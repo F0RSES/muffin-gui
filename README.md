@@ -1,7 +1,8 @@
 # Muffin
 Cross-platform Qt6 GUI for zapret (Windows winws + Linux nfqws).
 
-[![CI](https://github.com/F0RSES/muffin-gui/actions/workflows/ci.yml/badge.svg)](https://github.com/F0RSES/muffin-gui/actions/workflows/ci.yml)
+[![Linux CI](https://github.com/F0RSES/muffin-gui/actions/workflows/ci.yml/badge.svg?job=linux)](https://github.com/F0RSES/muffin-gui/actions/workflows/ci.yml)
+[![Windows CI](https://github.com/F0RSES/muffin-gui/actions/workflows/ci.yml/badge.svg?job=windows)](https://github.com/F0RSES/muffin-gui/actions/workflows/ci.yml)
 
 ## Что это
 Графическая оболочка для запуска и управления стратегиями zapret.
