@@ -1,8 +1,12 @@
 // coretest — plain console verifier for the zapret core library.
 //
 // It does not use QTest (keeps the dependency surface to QtCore only) and runs the parser and
-// locator against real on-disk zapret trees. Defaults to /home/norman/Documents/zapret but accepts
-// an alternative base as argv[1]. Exits non-zero on any failed assertion.
+// locator against an on-disk zapret tree. The tree is taken from argv[1], else $ZAPRET_TEST_TREE,
+// else ~/Documents/zapret but only when that folder is itself a zapret tree, so nothing is pinned to
+// one developer's home. When none of those is an actual zapret distribution — which
+// is the case on a CI runner that ships nothing but the toolchain — a minimal fixture tree is
+// generated in a temporary directory instead, so every tree-dependent section below still asserts
+// against real files rather than against an empty directory. Exits non-zero on any failed assertion.
 //
 // The "[backends: real execution]" section goes further than the synchronous rejection checks: it
 // really spawns child processes (throwaway /bin/sh fixtures in a temporary directory), pumps the Qt
@@ -64,6 +68,169 @@ static const Strategy *findByName(const QList<Strategy> &list, const QString &na
         if (s.name == name)
             return &s;
     return nullptr;
+}
+
+// ---- the tree the parse/locate sections read ---------------------------------
+//
+// Parsing, path resolution and locating only mean something against files that exist. On a
+// developer box that is an unpacked zapret; on a CI runner it is nothing at all, and the sections
+// below would then be asserting against an empty directory — reporting parser failures that are
+// really "no data" failures. So the tree is resolved once at startup: a real one is used as-is,
+// otherwise buildFixtureTree() materialises a minimal distribution carrying the same landmarks.
+//
+// The fixture is deliberately shaped to keep every assertion meaningful rather than weakened: its
+// general.bat has the chcp marker, the %~dp0-derived BIN/LISTS, an empty %GameFilterTCP%/UDP%
+// expansion, a ^-continued `start "title" /min "%BIN%winws.exe" ...` line and quoted list paths, so
+// parseWindowsCommand() has the same work to do as it does on the shipped wrapper. Only the number
+// of wrappers a tree holds is content-specific, and that is what g_winStrategies pins per tree.
+
+static bool g_treeIsReal = true;    // false when the generated fixture stands in
+static int g_winStrategies = 22;    // selectable *.bat count, -1 = "no exact expectation"
+
+// Windows hands Qt paths back with native separators while this test builds them with '/'. Every
+// path comparison below goes through these so one set of assertions holds on both hosts.
+static QString pathKey(const QString &p)
+{
+    const QString k = QDir::fromNativeSeparators(p);
+#if defined(Q_OS_WIN)
+    return k.toLower();
+#else
+    return k;
+#endif
+}
+
+static bool samePath(const QString &a, const QString &b)
+{
+    return !a.isEmpty() && !b.isEmpty() && pathKey(a) == pathKey(b);
+}
+
+static bool pathStartsWith(const QString &path, const QString &prefix)
+{
+    const QString k = pathKey(path);
+    const QString p = pathKey(prefix);
+    return !k.isEmpty() && !p.isEmpty() && k.startsWith(p);
+}
+
+// Does this directory hold a zapret distribution — either as the root itself or as the parent of
+// windows/ and linux/? Answered with the production detector on purpose: whatever the tree sections
+// accept is exactly what the locator and the GUI would accept.
+static bool isZapretTree(const QString &base)
+{
+    if (base.isEmpty() || !QFileInfo(base).isDir())
+        return false;
+    if (ZapretPaths::detectPlatform(base) != Strategy::Platform::Unknown)
+        return true;
+    const Strategy::Platform win = ZapretPaths::detectPlatform(base + QLatin1String("/windows"));
+    const Strategy::Platform lin = ZapretPaths::detectPlatform(base + QLatin1String("/linux"));
+    return win != Strategy::Platform::Unknown || lin != Strategy::Platform::Unknown;
+}
+
+static bool writeFile(const QString &path, const QByteArray &bytes)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const bool ok = f.write(bytes) == bytes.size();
+    f.close();
+    return ok;
+}
+
+// *.bat files buildFixtureTree() writes that the parser is allowed to surface: three wrappers, with
+// service.bat and readme.bat dropped as excluded names and bin/ + lists/ as excluded dirs.
+static const int kFixtureWindowsStrategies = 3;
+
+static bool buildFixtureTree(const QString &base)
+{
+    const QString win = base + QLatin1String("/windows");
+    const QString lin = base + QLatin1String("/linux");
+
+    // windows — the curated default wrapper, in the shape the shipped one has: code page marker,
+    // %~dp0-derived BIN/LISTS, an empty game-filter expansion that has to be tidied off the comma
+    // list, and the winws.exe invocation spread over caret-continued lines.
+    if (!writeFile(win + QLatin1String("/general.bat"), QByteArrayLiteral(
+            "@echo off\r\n"
+            "chcp 65001 > nul\r\n"
+            "set BIN=%~dp0bin\\\r\n"
+            "set LISTS=%~dp0lists\\\r\n"
+            "call service.bat load_game_filter\r\n"
+            "start \"zapret general\" /min \"%BIN%winws.exe\" --wf-tcp=80,443,2053,2083,2087,2096,8443,%GameFilterTCP% ^\r\n"
+            " --wf-udp=443,19294-19344,50000-50100,%GameFilterUDP% ^\r\n"
+            " --new --filter-tcp=443 --dpi-desync=fake --hostlist=\"%LISTS%list-general.txt\" ^\r\n"
+            " --new --filter-udp=443 --dpi-desync=fake --full-hostlist=\"%LISTS%list-general.txt\"\r\n"
+            "pause\r\n")))
+        return false;
+
+    if (!writeFile(win + QLatin1String("/general (ALT5).bat"), QByteArrayLiteral(
+            "@echo off\r\n"
+            "chcp 65001 > nul\r\n"
+            "set BIN=%~dp0bin\\\r\n"
+            "start \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,443 --wf-udp=443,4433 --dpi-desync=altcomma\r\n"
+            "pause\r\n")))
+        return false;
+
+    if (!writeFile(win + QLatin1String("/md4.bat"), QByteArrayLiteral(
+            "@echo off\r\n"
+            "chcp 65001 > nul\r\n"
+            "set BIN=%~dp0bin\\\r\n"
+            "start \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,443 --filter-tcp=443 --dpi-desync=fake,split\r\n"
+            "pause\r\n")))
+        return false;
+
+    // Helpers and payload: never selectable, but they are what marks the directory a windows root.
+    if (!writeFile(win + QLatin1String("/service.bat"), QByteArrayLiteral(
+            "@echo off\r\nrem game filter helper - not a strategy\r\n")))
+        return false;
+    if (!writeFile(win + QLatin1String("/readme.bat"), QByteArrayLiteral(
+            "@echo off\r\nrem documentation launcher - not a strategy\r\n")))
+        return false;
+    if (!writeFile(win + QLatin1String("/bin/winws.exe"), QByteArrayLiteral("MZ fixture payload\r\n")))
+        return false;
+    if (!writeFile(win + QLatin1String("/lists/list-general.txt"), QByteArrayLiteral("example.com\r\n")))
+        return false;
+
+    // linux — the primary sysv launcher plus the openrc alternative that dedup has to choose
+    // between, a systemd unit parked in an excluded dir, the helper names the exclusion list must
+    // drop, and the payload binaries ZapretPaths::nfqwsPath() searches for.
+    const QByteArray initScript = QByteArrayLiteral(
+        "#!/bin/sh\n"
+        "# zapret init script (fixture)\n"
+        "case \"$1\" in\n"
+        "  start) echo starting ;;\n"
+        "  stop) echo stopping ;;\n"
+        "esac\n");
+    if (!writeFile(lin + QLatin1String("/init.d/sysv/zapret"), initScript))
+        return false;
+    if (!writeFile(lin + QLatin1String("/init.d/openrc/zapret"), initScript))
+        return false;
+    if (!writeFile(lin + QLatin1String("/init.d/systemd/zapret.service"), QByteArrayLiteral(
+            "[Unit]\nDescription=zapret\n")))
+        return false;
+    if (!writeFile(lin + QLatin1String("/blockcheck.sh"), QByteArrayLiteral("#!/bin/sh\necho fixture\n")))
+        return false;
+    if (!writeFile(lin + QLatin1String("/install_easy.sh"), QByteArrayLiteral("#!/bin/sh\necho fixture\n")))
+        return false;
+    if (!writeFile(lin + QLatin1String("/config.default"), QByteArrayLiteral("#!/bin/sh\n# options\n")))
+        return false;
+    if (!writeFile(lin + QLatin1String("/binaries/linux-x86_64/nfqws"), QByteArrayLiteral("fixture payload\n")))
+        return false;
+    if (!writeFile(lin + QLatin1String("/binaries/linux-arm64/nfqws"), QByteArrayLiteral("fixture payload\n")))
+        return false;
+
+    return true;
+}
+
+// Assert the number of selectable windows wrappers. Exact for the two trees whose contents this
+// project knows (the pinned developer unpack and the generated fixture). A third tree — a CI
+// download, another zapret release — legitimately ships a different list, so there the requirement
+// is only that something selectable was found rather than a number that is not a property of the
+// code under test.
+static void checkWindowsCount(int actual, const QString &label)
+{
+    if (g_winStrategies >= 0)
+        check(actual == g_winStrategies, label + QStringLiteral(" is %1").arg(g_winStrategies));
+    else
+        check(actual > 0, label + QStringLiteral(" is non-zero (got %1)").arg(actual));
 }
 
 // ---- real process execution --------------------------------------------------
@@ -201,14 +368,59 @@ int main(int argc, char **argv)
     // need no looping; the real-execution section pumps the event loop explicitly (pumpUntil/pumpFor).
     QCoreApplication app(argc, argv);
 
+    // Where the two distribution trees are read from: argv[1], else $ZAPRET_TEST_TREE (the hook a
+    // build can point at a downloaded unpack), else ~/Documents/zapret — and that last one only when
+    // the folder actually holds a zapret tree, so the test is host-independent rather than pinned to
+    // one developer's home. None of those resolving to a real zapret tree is the normal CI situation
+    // rather than an error — it falls back to a fixture.
     QString base = (argc > 1) ? QString::fromLocal8Bit(argv[1])
-                              : QStringLiteral("/home/norman/Documents/zapret");
+                              : QString::fromLocal8Bit(qgetenv("ZAPRET_TEST_TREE"));
+    const QString pinnedRoot = QDir::homePath() + QLatin1String("/Documents/zapret");
+    const bool pinnedDefault = base.isEmpty() && isZapretTree(pinnedRoot);
+    if (pinnedDefault)
+        base = pinnedRoot;
+
+    QTemporaryDir fixtureDir;
+    if (!isZapretTree(base))
+    {
+        const QString requested = base.isEmpty()
+                                      ? QStringLiteral("$HOME/Documents/zapret (absent or not a zapret tree)")
+                                      : base;
+        // The generated root is named "zapret" on purpose: ZapretLocator probes "<cwd>/zapret", so
+        // moving the working directory to its parent keeps the auto-locate section below meaningful
+        // on a host that ships no zapret at all.
+        if (!fixtureDir.isValid())
+        {
+            out << "  FAIL  cannot create a fixture temporary directory\n";
+            out.flush();
+            return 2;
+        }
+        base = fixtureDir.path() + QLatin1String("/zapret");
+        if (!buildFixtureTree(base))
+        {
+            out << "  FAIL  cannot write a fixture zapret tree under " << fixtureDir.path() << '\n';
+            out.flush();
+            return 2;
+        }
+        QDir::setCurrent(QFileInfo(base).absolutePath());
+        g_treeIsReal = false;
+        g_winStrategies = kFixtureWindowsStrategies;
+        out << "  NOTE  no zapret tree at " << requested << " — generated a fixture at " << base << '\n';
+    }
+    else if (!pinnedDefault)
+    {
+        // A tree this project does not pin the contents of (a different zapret release, a CI
+        // download): assert the landmarks, not a wrapper count copied from somebody's unpack.
+        g_winStrategies = -1;
+    }
+
     const QString winRoot = base + "/windows";
     const QString linuxRoot = base + "/linux";
     const QString base_dir = base;   // the unsorted parent the locator expands
 
     out << "=== zapret core verification ===\n";
-    out << "base = " << base << "\n\n";
+    out << "base = " << base << (g_treeIsReal ? "  (real zapret tree)" : "  (generated fixture tree)")
+        << "\n\n";
 
     // ---- displayName / kindOf pure logic (no filesystem needed) ----
     out << "[displayName]\n";
@@ -247,7 +459,9 @@ int main(int argc, char **argv)
     out << "\n[parse windows]\n";
     QList<Strategy> win = StrategyParser::parse(winRoot, Strategy::Platform::Windows);
     out << "  found " << win.size() << " windows strategies\n";
-    check(win.size() == 22, "22 .bat strategies (23 minus service.bat)");
+    // The count is the one property the tree's contents decide, so it is checked against the
+    // expectation resolved for this tree (see checkWindowsCount).
+    checkWindowsCount(static_cast<int>(win.size()), QStringLiteral("selectable windows strategies"));
     check(findByName(win, "general") != nullptr, "'general' present");
     check(findByName(win, "service") == nullptr, "'service' excluded");
     check(findByName(win, "general (ALT5)") != nullptr, "'general (ALT5)' present");
@@ -262,7 +476,7 @@ int main(int argc, char **argv)
         out << "  cmd = " << genD->executablePath << " /c  arg=" << genD->primaryArg << "\n";
         check(genD->executablePath == "cmd.exe", "batch uses cmd.exe");
         check(genD->primaryArg == genD->filePath, "primaryArg is the .bat path");
-        check(genD->workingDirectory == winRoot, "workingDirectory = windows root");
+        check(samePath(genD->workingDirectory, winRoot), "workingDirectory = windows root");
         check(genD->requiresRoot, "batch requires elevation");
     }
 
@@ -286,8 +500,8 @@ int main(int argc, char **argv)
         check(progBase.compare(QLatin1String("winws.exe"), Qt::CaseInsensitive) == 0,
               "executablePath basename is winws.exe");
         check(wc.executablePath.contains(QLatin1String("bin")), "executablePath runs through bin/");
-        check(wc.executablePath.startsWith(winRoot), "executablePath is under the windows root");
-        check(wc.workingDirectory == winRoot, "workingDirectory is the bat directory");
+        check(pathStartsWith(wc.executablePath, winRoot), "executablePath is under the windows root");
+        check(samePath(wc.workingDirectory, winRoot), "workingDirectory is the bat directory");
 
         // argv must be non-empty and must not re-include the program token itself.
         check(!wc.argv.isEmpty(), "winws argv is populated");
@@ -501,8 +715,8 @@ int main(int argc, char **argv)
     {
         ZapretManager catalog;
         catalog.setZapretDir(winRoot);
-        check(catalog.resolvedRoot() == winRoot, "manager keeps a direct windows root");
-        check(catalog.strategyCount() == 22, "manager exposes 22 windows strategies");
+        check(samePath(catalog.resolvedRoot(), winRoot), "manager keeps a direct windows root");
+        checkWindowsCount(catalog.strategyCount(), QStringLiteral("manager windows strategies"));
 
         const Strategy *gen = findByName(catalog.strategies(), "general");
         check(gen != nullptr, "catalog holds 'general'");
@@ -526,10 +740,10 @@ int main(int argc, char **argv)
         base.setZapretDir(base_dir);
         check(!base.resolvedRoot().isEmpty(), "a base directory resolves to a root");
 #if defined(Q_OS_LINUX)
-        check(base.resolvedRoot() == linuxRoot, "on Linux the base resolves to linux/");
+        check(samePath(base.resolvedRoot(), linuxRoot), "on Linux the base resolves to linux/");
         check(base.strategyCount() >= 1, "linux catalog holds at least the init script");
 #elif defined(Q_OS_WIN)
-        check(base.resolvedRoot() == winRoot, "on Windows the base resolves to windows/");
+        check(samePath(base.resolvedRoot(), winRoot), "on Windows the base resolves to windows/");
 #endif
 
         // Empty setting = auto-locate through ZapretLocator's well-known bases.
