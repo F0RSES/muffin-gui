@@ -1,5 +1,35 @@
+# Build directories
 build/
+cmake-build-*/
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.dll
+*.sys
+
+# Qt generated sources (AUTOMOC / AUTOUIC / AUTORCC)
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.moc
+
+# IDE / editor
+.vscode/
+.idea/
 *.user
+
+# Tooling caches
 .cache/
 compile_commands.json
+
+# Runtime logs
 logs/
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
