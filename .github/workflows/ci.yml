@@ -3,48 +3,116 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
-# The plan is: install a Qt that meets the project floor (README targets 6.7+; the hide-console
-# block in WindowsBackend.cpp additionally wants >=6.6 for setCreateProcessArgumentsModifier, but
-# is guarded by QT_VERSION so older Qt still compiles), then configure + build + test with ctest.
-# Because coretest falls back to a generated fixture tree when neither argv[1], $ZAPRET_TEST_TREE,
-# nor the pinned developer default resolve to a real zapret distribution — which is exactly the CI
-# situation — nothing here needs to download zapret itself. uitest is registered with ctest and
-# runs under the offscreen platform (see CMakeLists.txt's plugin-path discovery).
+# Two separate jobs (not a matrix) so a single OS can be re-run independently while the
+# Windows MSVC path is still being debugged. Runner images are pinned explicitly:
+#   - ubuntu-latest is migrating to Ubuntu 26 shortly and its apt Qt would float,
+#   - windows-latest tracks the newest VS/Windows image; windows-2022 pins VS 2022.
+# Qt strategy differs per OS on purpose:
+#   - Linux uses the DISTRO Qt6 from apt (6.2.4 on jammy). The project's only >6.2 API,
+#     setCreateProcessArgumentsModifier in WindowsBackend.cpp, is guarded by QT_VERSION and
+#     lives behind Q_OS_WIN, so it never compiles into the Linux target — 6.2 is sufficient
+#     and apt install is far more reliable than the Python-based installer action.
+#   - Windows uses jurplel/install-qt-action (apt has no MSVC Qt). Version pinned to the
+#     concrete 6.7.3 (wildcards like 6.7.* pull the newest, which is a moving target).
+# Every test runs in fixture mode: forcing ZAPRET_TEST_TREE to a non-existent path makes
+# coretest generate a minimal zapret distribution tree (see tests/coretest.cpp), so the
+# parser/locator assertions stay meaningful without downloading zapret, and checkWindowsCount
+# asserts landmarks only (g_winStrategies == -1 for an unpinned tree). uitest runs headless
+# via the offscreen platform plugin that CMakeLists.txt locates.
 
 jobs:
-  test:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+  linux:
+    name: Linux (ubuntu-22.04, Qt 6.2 apt)
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+      - name: Install Qt6 and build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qt6-base-dev qt6-base-dev-tools \
+            libqt6svg6-dev libgl1-mesa-dev \
+            ninja-build cmake g++
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test (fixture mode)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4.4.3
         with:
-          version: '6.7.*'
-          modules: qtbase
-          setup-dir: qtsetup
+          name: Muffin-linux-x64
+          path: |
+            build/Muffin
+            README.md
+            LICENSE
+
+  windows:
+    name: Windows (windows-2022, Qt 6.7.3 MSVC)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Install Qt6
+        # Pinned to the newest real v4.x tag (v4.4.1) instead of the floating @v4, per the
+        # no-floating-versions rule. `modules` must name an add-on module (base is always
+        # installed and is not a module — passing "qtbase" makes aqtinstall fail); qtsvg is
+        # requested because the app's resources.qrc ships .svg icons.
+        uses: jurplel/install-qt-action@v4.4.1
+        with:
+          version: '6.7.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: qtsvg
           cache: true
 
       - name: Configure
         shell: bash
-        # install-qt-action exports Qt6_DIR as the cmake package config directory; pointing
-        # CMAKE_PREFIX_PATH at it makes find_package(Qt6 ...) work on every host.
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$Qt6_DIR"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 
       - name: Build
-        run: cmake --build build --config Debug
+        run: cmake --build build --config Release --parallel
 
-      - name: Test (fixture mode — mirrors a fresh checkout with no zapret tree)
-        shell: bash
+      - name: Test (fixture mode)
         env:
+          QT_QPA_PLATFORM: offscreen
           ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
-        run: ctest --test-dir build --output-on-failure
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Deploy Qt DLLs
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          windeployqt --release --no-translations --no-system-d3d-compiler `
+            --no-opengl-sw build/Release/Muffin.exe
+
+      - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Muffin-windows-x64
+          path: |
+            build/Release/Muffin.exe
+            build/Release/Qt6*.dll
+            build/Release/platforms/
+            build/Release/imageformats/
+            build/Release/styles/
+            README.md
+            LICENSE
