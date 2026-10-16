@@ -1,0 +1,21 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>theme_dark.qss</file>
+        <file>theme_light.qss</file>
+        <file>icons/app.svg</file>
+        <file>icons/play.svg</file>
+        <file>icons/stop.svg</file>
+        <file>icons/refresh.svg</file>
+        <file>icons/settings.svg</file>
+        <file>icons/tray.svg</file>
+        <file>icons/clear.svg</file>
+        <file>icons/copy.svg</file>
+        <file>icons/ping-ok.svg</file>
+        <file>icons/ping-fail.svg</file>
+        <file>icons/ping-wait.svg</file>
+        <file>icons/arrow-down.svg</file>
+        <file>icons/check.svg</file>
+        <file>icons/error.svg</file>
+    </qresource>
+</RCC>

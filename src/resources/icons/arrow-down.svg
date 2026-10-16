@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixed mid-grey: QSS image: urls are not recoloured per theme, so this reads on dark and light. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+    <path d="M6.4 9.6L12 15.4l5.6-5.8z" fill="#8A8A9A" stroke="none"/>
+</svg>

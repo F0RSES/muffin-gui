@@ -1,0 +1,148 @@
+/* ============================================================================
+   Zapret GUI — light theme. Same selector tree as theme_dark.qss, light tokens.
+   ==========================================================================*/
+QMainWindow, QDialog { background-color: #F4F5FA; }
+
+QWidget {
+    background-color: transparent;
+    color: #1F2937;
+    font-family: "Segoe UI", "Inter", "Noto Sans", sans-serif;
+    font-size: 10pt;
+}
+QToolTip {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #D6D8E4; padding: 5px 8px; border-radius: 6px;
+}
+
+QToolBar, QToolBar::separator { background-color: #E9EBF3; border: none; spacing: 6px; }
+QToolBar { padding: 6px 10px; }
+QToolButton {
+    background-color: transparent; color: #1F2937;
+    border: 1px solid transparent; border-radius: 8px; padding: 6px 10px;
+}
+QToolButton:hover  { background-color: #DCDFEB; border-color: #C9CCDC; }
+QToolButton:pressed { background-color: #CDD1E0; }
+QToolButton:disabled { color: #A7ABBB; }
+
+QFrame#card, StrategyCard, QFrame#strategyCard {
+    background-color: #FFFFFF;
+    border: 1px solid #DCDEEA;
+    border-radius: 12px;
+}
+StrategyCard:hover, QFrame#strategyCard:hover { background-color: #F1F2FA; }
+StrategyCard[active="true"], QFrame#strategyCard[active="true"] {
+    border: 2px solid #7C3AED;
+    background-color: #F4EFFF;
+}
+StrategyCard[error="true"], QFrame#strategyCard[error="true"] {
+    border: 2px solid #DC2626;
+    background-color: #FDF2F2;
+}
+QLabel#cardError      { color: #DC2626; font-size: 9pt; }
+QLabel#cardTitle { font-size: 11pt; font-weight: 700; color: #111827; }
+QLabel#cardDesc  { font-size: 9pt;  color: #6B7280; }
+QLabel#cardHint  { font-size: 8pt;  color: #9CA3AF; }
+QLabel#muted     { color: #6B7280; }
+QLabel#placeholder { color: #9CA3AF; font-size: 11pt; }
+
+QPushButton {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #C9CCDC; border-radius: 8px; padding: 7px 14px;
+}
+QPushButton:hover   { background-color: #F1F2FA; border-color: #AEB2C6; }
+QPushButton:pressed { background-color: #E2E4EF; }
+QPushButton:disabled { color: #B4B8C6; background-color: #EDEEF5; border-color: #EDEEF5; }
+QPushButton#primaryButton {
+    background-color: #7C3AED; color: #FFFFFF; border: 1px solid #7C3AED;
+    border-radius: 8px; padding: 8px 16px; font-weight: 600;
+}
+QPushButton#primaryButton:hover   { background-color: #8B5CF6; border-color: #8B5CF6; }
+QPushButton#primaryButton:pressed { background-color: #6D28D9; }
+QPushButton#primaryButton:disabled { background-color: #C9BCEC; border-color: #C9BCEC; color: #F1ECFB; }
+QPushButton#dangerButton { background-color: #FEE2E2; border-color: #FCA5A5; color: #B91C1C; }
+QPushButton#dangerButton:hover { background-color: #FECACA; }
+
+QLineEdit, QSpinBox, QComboBox {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #C9CCDC; border-radius: 8px; padding: 6px 10px;
+    selection-background-color: #7C3AED; selection-color: #FFFFFF;
+}
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #7C3AED; }
+QLineEdit:read-only { color: #6B7280; background-color: #F3F4F8; }
+QLineEdit#pathOk   { border: 1px solid #059669; }
+QLineEdit#pathBad  { border: 1px solid #DC2626; }
+QLabel#validOk  { color: #059669; font-size: 9pt; }
+QLabel#validBad { color: #DC2626; font-size: 9pt; }
+QLabel#trayNote { color: #B45309; font-size: 8pt; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;
+    width: 22px; border: none; }
+QComboBox::down-arrow { image: url(:/icons/arrow-down.svg); width: 14px; height: 14px; }
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #C9CCDC; border-radius: 8px; padding: 4px;
+    selection-background-color: #7C3AED; selection-color: #FFFFFF; outline: none;
+}
+QSpinBox::up-button, QSpinBox::down-button { background: #EDEEF5; width: 16px; border: none; }
+QSpinBox::up-arrow, QSpinBox::down-arrow { width: 10px; height: 10px; }
+
+QCheckBox { spacing: 8px; color: #1F2937; background: transparent; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border-radius: 5px;
+    border: 1px solid #AEB2C6; background-color: #FFFFFF;
+}
+QCheckBox::indicator:hover  { border-color: #7C3AED; }
+QCheckBox::indicator:checked { background-color: #7C3AED; border-color: #7C3AED;
+    image: url(:/icons/check.svg); }
+
+QPlainTextEdit#logView {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #DCDEEA; border-radius: 10px;
+    font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+    font-size: 9pt; padding: 6px;
+}
+QFrame#logPanel { background-color: #FFFFFF; border: 1px solid #DCDEEA; border-radius: 12px; }
+QFrame#logHeader { background: transparent; border: none; }
+
+QScrollArea { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
+QScrollBar::handle:vertical { background: #C7CAD9; border-radius: 4px; min-height: 28px; }
+QScrollBar::handle:vertical:hover { background: #AEB2C6; }
+QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
+QScrollBar::handle:horizontal { background: #C7CAD9; border-radius: 4px; min-width: 28px; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: none; border: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+
+QStatusBar { background-color: #E7E9F2; color: #6B7280; border-top: 1px solid #DCDEEA; }
+QStatusBar::item { border: none; }
+QLabel#statusLabel { font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+QLabel#statusLabel[statusKind="stopped"] { color: #6B7280; }
+QLabel#statusLabel[statusKind="starting"] { color: #D97706; }
+QLabel#statusLabel[statusKind="running"]  { color: #059669; }
+QLabel#statusLabel[statusKind="error"]    { color: #DC2626; }
+QLabel#dirLabel { color: #9CA3AF; font-size: 9pt; }
+
+QMenu {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #C9CCDC; border-radius: 10px; padding: 6px;
+}
+QMenu::item { padding: 6px 22px 6px 14px; border-radius: 6px; }
+QMenu::item:selected { background-color: #7C3AED; color: #FFFFFF; }
+QMenu::separator { height: 1px; background: #E2E4EF; margin: 5px 8px; }
+
+QSplitter::handle { background-color: #E2E4EF; width: 3px; }
+QGroupBox { border: 1px solid #DCDEEA; border-radius: 10px; margin-top: 12px; padding-top: 8px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #6B7280; }
+QHeaderView::section { background-color: #EDEEF5; color: #6B7280; border: none; padding: 6px; }
+QDialogButtonBox QPushButton { min-width: 84px; }
+QProgressBar { border: 1px solid #DCDEEA; border-radius: 6px; background: #F3F4F8; color: #1F2937; }
+QProgressBar::chunk { background-color: #7C3AED; border-radius: 5px; }
+
+/* ---------- window surfaces (keep this block last) ---------------------------
+   Same cascade trap as the dark sheet: the generic transparent QWidget rule outranks the window rule at
+   the top of the file, so anything with nothing behind it (the window itself, the stacked widget, the
+   card list's viewport) painted black instead of the light background. */
+QMainWindow, QDialog, QStackedWidget, QSplitter, QScrollArea,
+QScrollArea > QWidget > QWidget, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader {
+    background-color: #F4F5FA;
+}
