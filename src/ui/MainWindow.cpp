@@ -65,7 +65,7 @@ MainWindow::MainWindow(QWidget *parent)
     // back to the GUI thread. It is deleted explicitly in the destructor.
     m_ping = new PingService();
 
-    setWindowTitle(QStringLiteral("Zapret GUI"));
+    setWindowTitle(QStringLiteral("Muffin"));
     setMinimumSize(1100, 700);
     setWindowIcon(Theme::icon(QStringLiteral("app"), Theme::accent(), 32));
 
@@ -87,7 +87,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     // A short startup banner: it proves the manager -> log wiring end to end and leaves the panel
     // explaining itself instead of showing an empty box.
-    m_log->appendLine(QStringLiteral("Zapret GUI %1 запущен (бэкенд: %2)")
+    m_log->appendLine(QStringLiteral("Muffin %1 запущен (бэкенд: %2)")
                           .arg(QApplication::applicationVersion(), m_manager->backendName()),
                       LogPanel::Info);
     if (m_manager->strategyCount() > 0) {
@@ -434,7 +434,7 @@ void MainWindow::updateStatusUi()
                                && state != IZapretBackend::State::Error)
                                   ? name
                                   : QStringLiteral("остановлено");
-    setWindowTitle(QStringLiteral("Zapret GUI — %1").arg(titleName));
+    setWindowTitle(QStringLiteral("Muffin — %1").arg(titleName));
 
     if (m_dirLabel) {
         const QString dir = m_manager->resolvedRoot().isEmpty()
@@ -462,7 +462,7 @@ void MainWindow::updateTrayIcon()
     const bool running = m_manager->isRunning() || m_manager->state() == IZapretBackend::State::Starting;
     const QColor tint = running ? Theme::success() : Theme::mutedText();
     m_tray->setIcon(Theme::icon(QStringLiteral("tray"), tint, 22));
-    m_tray->setToolTip(QStringLiteral("Zapret GUI — %1")
+    m_tray->setToolTip(QStringLiteral("Muffin — %1")
                            .arg(statusText(m_manager->state(),
                                            m_manager->activeStrategy()
                                                ? m_manager->activeStrategy()->name
@@ -635,7 +635,7 @@ void MainWindow::notifyError(const QString &message, bool interactive)
     if (!interactive) {
         // An automatic start must not steal focus with a modal: a balloon, or the status bar.
         if (m_tray)
-            m_tray->showMessage(QStringLiteral("Zapret GUI"), message,
+            m_tray->showMessage(QStringLiteral("Muffin"), message,
                                 Theme::icon(QStringLiteral("tray"), Theme::error(), 22), 5000);
         else
             statusBar()->showMessage(message, 6000);
@@ -643,9 +643,9 @@ void MainWindow::notifyError(const QString &message, bool interactive)
     }
 
     if (isVisible() && !QApplication::activeModalWidget())
-        QMessageBox::warning(this, QStringLiteral("Zapret GUI"), message);
+        QMessageBox::warning(this, QStringLiteral("Muffin"), message);
     else if (m_tray)
-        m_tray->showMessage(QStringLiteral("Zapret GUI"), message,
+        m_tray->showMessage(QStringLiteral("Muffin"), message,
                             Theme::icon(QStringLiteral("tray"), Theme::error(), 22), 5000);
 }
 
@@ -692,7 +692,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (!m_quitting && hideOnClose(m_settings->minimizeToTray(), trayUp)) {
         hide();
         event->ignore();
-        m_tray->showMessage(QStringLiteral("Zapret GUI"),
+        m_tray->showMessage(QStringLiteral("Muffin"),
                             QStringLiteral("Окно свёрнуто в трей — zapret продолжает работать.\n"
                                            "Двойной клик по иконке открывает окно."),
                             Theme::icon(QStringLiteral("tray"), Theme::success(), 22),

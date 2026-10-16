@@ -22,13 +22,9 @@ constexpr int kPingIntervalMax     = 60;
 Settings::Settings(QObject *parent)
     : QObject(parent)
 {
-    const QString org = QCoreApplication::organizationName().isEmpty()
-                            ? QStringLiteral("ZapretGui")
-                            : QCoreApplication::organizationName();
-    const QString app = QCoreApplication::applicationName().isEmpty()
-                            ? QStringLiteral("ZapretGui")
-                            : QCoreApplication::applicationName();
-    m_settings = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, org, app);
+    // QSettings() resolves organizationName()/applicationName() on its own; the entry point (main.cpp)
+    // owns those identities, so hardcoding a second copy here could only ever drift from it.
+    m_settings = std::make_unique<QSettings>();
 }
 
 Settings::Settings(const QString &iniFilePath, QObject *parent)

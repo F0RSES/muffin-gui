@@ -1,5 +1,5 @@
 /* ============================================================================
-   Zapret GUI — dark theme.  Tokens: bg #1E1E2E surface #2A2A3C hover #34344A
+   Muffin — dark theme.  Tokens: bg #1E1E2E surface #2A2A3C hover #34344A
    accent #7C3AED / #8B5CF6  text #E4E4E7 / #9CA3AF  ok #10B981 err #EF4444 warn #F59E0B
    ==========================================================================*/
 QMainWindow, QDialog { background-color: #1E1E2E; }

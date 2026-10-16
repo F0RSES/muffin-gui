@@ -221,7 +221,7 @@ bool PingService::probeHttp(const QString &host, int *latencyMs)
     QNetworkRequest req{QUrl(QStringLiteral("https://%1/").arg(host))};
     req.setTransferTimeout(kHttpTimeoutMs);
     req.setHeader(QNetworkRequest::UserAgentHeader,
-                  QStringLiteral("Mozilla/5.0 (compatible; ZapretGui/0.1; reachability probe)"));
+                  QStringLiteral("Mozilla/5.0 (compatible; Muffin/0.1; reachability probe)"));
 
     QElapsedTimer clock;
     clock.start();

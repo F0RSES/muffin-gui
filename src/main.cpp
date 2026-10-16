@@ -8,9 +8,12 @@
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
-    QApplication::setApplicationName(QStringLiteral("ZapretGui"));
-    QApplication::setOrganizationName(QStringLiteral("ZapretGui"));
+    QApplication::setApplicationName(QStringLiteral("Muffin"));
+    QApplication::setOrganizationName(QStringLiteral("Muffin"));
+    QApplication::setApplicationDisplayName(QStringLiteral("Muffin"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    // Linux desktop environments match a running app to its .desktop entry through this id.
+    QApplication::setDesktopFileName(QStringLiteral("Muffin"));
     // Closing the window must not kill a running zapret unless the user chose "Выход" in the tray;
     // MainWindow::closeEvent decides, and Qt only quits once that handler accepted the close.
     QApplication::setQuitOnLastWindowClosed(true);

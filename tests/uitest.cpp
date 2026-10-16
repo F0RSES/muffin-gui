@@ -59,7 +59,7 @@ static void testSettings()
 
     QTemporaryDir dir;
     check(dir.isValid(), "temporary dir created");
-    const QString file = dir.filePath(QStringLiteral("zapret-gui.ini"));
+    const QString file = dir.filePath(QStringLiteral("muffin-test.ini"));
 
     {
         Settings s(file);
@@ -339,7 +339,7 @@ static void testTrayPolicy()
     // that silently does nothing.
     QTemporaryDir dir;
     check(dir.isValid(), "temporary settings store created");
-    Settings settings(dir.filePath(QStringLiteral("zapret-gui.ini")));
+    Settings settings(dir.filePath(QStringLiteral("muffin-test.ini")));
     settings.setMinimizeToTray(true);
 
     SettingsDialog dialog(settings);
@@ -496,8 +496,8 @@ int main(int argc, char **argv)
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
 
     QApplication app(argc, argv);
-    QApplication::setApplicationName(QStringLiteral("ZapretGuiTest"));
-    QApplication::setOrganizationName(QStringLiteral("ZapretGuiTest"));
+    QApplication::setApplicationName(QStringLiteral("MuffinTest"));
+    QApplication::setOrganizationName(QStringLiteral("MuffinTest"));
 
     std::printf("=== zapret GUI verification (offscreen) ===\n");
     std::printf("platform = %s\n", qPrintable(app.platformName()));

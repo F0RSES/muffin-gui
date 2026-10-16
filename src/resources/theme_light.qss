@@ -1,5 +1,5 @@
 /* ============================================================================
-   Zapret GUI — light theme. Same selector tree as theme_dark.qss, light tokens.
+   Muffin — light theme. Same selector tree as theme_dark.qss, light tokens.
    ==========================================================================*/
 QMainWindow, QDialog { background-color: #F4F5FA; }
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(zapret_gui LANGUAGES CXX)
+project(Muffin LANGUAGES CXX)
 
 # ---- Qt6 -------------------------------------------------------------------
 # Core logic depends on QtCore (QString/QDir/QProcess); the reachability prober adds QtNetwork, and
@@ -70,15 +70,15 @@ set(ZAPRET_UI_HEADERS
 
 qt_add_resources(ZAPRET_GUI_RESOURCES src/resources/resources.qrc)
 
-qt_add_executable(ZapretGui WIN32
+qt_add_executable(Muffin WIN32
     src/main.cpp
     ${ZAPRET_UI_SOURCES}
     ${ZAPRET_UI_HEADERS}
     ${ZAPRET_GUI_RESOURCES}
 )
 
-target_include_directories(ZapretGui PRIVATE src/ui)
-target_link_libraries(ZapretGui PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Network)
+target_include_directories(Muffin PRIVATE src/ui)
+target_link_libraries(Muffin PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Network)
 
 # ---- tests ------------------------------------------------------------------
 # coretest: QtCore-only console verifier for the parser/locator/manager/backends.

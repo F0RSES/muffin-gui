@@ -35,7 +35,7 @@ SettingsDialog::~SettingsDialog() = default;
 
 void SettingsDialog::build()
 {
-    setWindowTitle(QStringLiteral("Настройки Zapret GUI"));
+    setWindowTitle(QStringLiteral("Настройки Muffin"));
     setModal(true);
 
     m_pathEdit = new QLineEdit(this);
