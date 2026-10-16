@@ -103,7 +103,7 @@ add_test(NAME uitest COMMAND uitest)
 # A Qt installation can expose its libraries without the matching platform plugins (this project's
 # user-local prefix does exactly that). Locate a plugin directory holding the offscreen platform and
 # hand it to the test so ctest works without a display server.
-find_file(ZAPRET_OFFSCREEN_PLUGIN NAMES libqoffscreen.so
+find_file(ZAPRET_OFFSCREEN_PLUGIN NAMES libqoffscreen.so qoffscreen.dll
           PATHS "${Qt6_DIR}/../../../plugins/platforms"
                 "$ENV{HOME}/.local/zapretdev/usr/plugins/platforms"
                 "/usr/lib/x86_64-linux-gnu/qt6/plugins/platforms"

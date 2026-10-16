@@ -129,13 +129,15 @@ bool WindowsBackend::start(const Strategy &s, QString *error)
     m_process->setProcessChannelMode(QProcess::MergedChannels);
     m_stopByRequest = false;   // a new run starts clean: its exits are never "on request"
 
-#if defined(Q_OS_WIN)
-    // Hide the console window winws.exe would otherwise flash when launched from a GUI process.
-    m_process->setCreateProcessArguments(
-        [](QProcessCreateArguments *p) -> bool {
-            p->flags |= CREATE_NO_WINDOW;
-            return true;
-        });
+#if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    // Hide the console window winws.exe would otherwise flash when launched from a GUI process. The
+    // only supported way to reach CreateProcess' flags is QProcess' create-process arguments modifier
+    // (Qt 6.6+): a void lambda handed the struct Qt is about to pass to CreateProcessW. On an older
+    // Qt the flag is unreachable, so the console may blink — cosmetic only, and not worth a second
+    // launch path. Compiled only for Windows targets; guarded by Q_OS_WIN above.
+    m_process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *cpa) {
+        cpa->flags |= CREATE_NO_WINDOW;
+    });
 #endif
 
     m_lastError.clear();
