@@ -10,7 +10,7 @@ Cross-platform Qt6 GUI for zapret (Windows winws + Linux nfqws).
 системный трей.
 
 ## Зависимости
-- Qt 6.7+ (Widgets, Network, Concurrent)
+- Qt 6.6+ (тестировано на 6.7.3 CI и 6.10.2 локально; Widgets, Network, Concurrent)
 - CMake 3.24+
 - Windows: MSVC 2022 или MinGW
 - Linux: GCC 13+ / Clang 15+, libqt6-base-dev
