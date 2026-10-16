@@ -52,7 +52,12 @@ public:
 
 signals:
     void stateChanged(State s);
-    void logMessage(const QString &line, int level);   // level: 0=info, 1=warn, 2=error
+    // Informational output: process stdout/stderr, progress, and the text of anything that went wrong.
+    // level: 0=info, 1=warn, 2=error
+    void logMessage(const QString &line, int level);
+    // The notification channel for a failure. A view should surface it (badge, dialog, balloon) and NOT
+    // log it: every emitter here writes the same text through logMessage first, so a listener wired to
+    // both signals would otherwise show the failure twice. Consumers that only watch the log still see it.
     void errorOccurred(const QString &message);
 
 protected:

@@ -3,22 +3,34 @@
 // It does not use QTest (keeps the dependency surface to QtCore only) and runs the parser and
 // locator against real on-disk zapret trees. Defaults to /home/norman/Documents/zapret but accepts
 // an alternative base as argv[1]. Exits non-zero on any failed assertion.
+//
+// The "[backends: real execution]" section goes further than the synchronous rejection checks: it
+// really spawns child processes (throwaway /bin/sh fixtures in a temporary directory), pumps the Qt
+// event loop and asserts the resulting state machine, log output and error reporting. It never runs
+// pkexec, nfqws or anything that could touch this machine's network.
 
 #include "Strategy.h"
 #include "StrategyParser.h"
 #include "ZapretLocator.h"
 #include "ZapretPaths.h"
 #include "ZapretManager.h"
+#include "PrivilegeHelper.h"
 #include "IZapretBackend.h"
 #include "LinuxBackend.h"
 #include "WindowsBackend.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QTextStream>
+#include <QVector>
+
+#include <functional>
 
 using namespace zapret;
 
@@ -54,16 +66,146 @@ static const Strategy *findByName(const QList<Strategy> &list, const QString &na
     return nullptr;
 }
 
+// ---- real process execution --------------------------------------------------
+//
+// Everything else in this file asserts synchronous, loop-free behaviour. The helpers below drive the
+// part that only a running event loop can prove: a backend that really spawns a child, watches it,
+// pipes its output into the log and reports the outcome. The children are throwaway /bin/sh scripts in
+// a temporary directory — never pkexec, never nfqws — so no test here can touch the host's network.
+
+// Records everything a backend emitted while the test watched it. Parented to the backend so it can
+// never outlive (or out-observe) the object it is connected to.
+class BackendProbe : public QObject
+{
+public:
+    explicit BackendProbe(IZapretBackend *backend)
+        : QObject(backend)
+    {
+        QObject::connect(backend, &IZapretBackend::stateChanged, this,
+                         [this](IZapretBackend::State s) { m_states.append(s); });
+        QObject::connect(backend, &IZapretBackend::logMessage, this,
+                         [this](const QString &line, int level) {
+                             m_logs << QStringLiteral("%1 %2").arg(level).arg(line);
+                         });
+        QObject::connect(backend, &IZapretBackend::errorOccurred, this,
+                         [this](const QString &m) { m_errors << m; });
+    }
+
+    bool sawState(IZapretBackend::State s) const { return m_states.contains(s); }
+    // Did the first state transition go through `s`? (Order matters: Stopping after Running, etc.)
+    bool stateSequence(const QVector<IZapretBackend::State> &expected) const
+    {
+        int at = 0;
+        for (const IZapretBackend::State s : m_states) {
+            if (at < expected.size() && s == expected.at(at))
+                ++at;
+        }
+        return at == expected.size();
+    }
+    bool sawLog(const QString &needle) const
+    {
+        for (const QString &line : m_logs)
+            if (line.contains(needle))
+                return true;
+        return false;
+    }
+    // How many log lines carry `needle`. A failure must appear exactly once: the emitter logs it and the
+    // notification channel (errorOccurred) is not a second log.
+    int logCountWith(const QString &needle) const
+    {
+        int hits = 0;
+        for (const QString &line : m_logs)
+            if (line.contains(needle))
+                ++hits;
+        return hits;
+    }
+    const QStringList &errors() const { return m_errors; }
+    const QStringList &logs() const { return m_logs; }
+    int stateCount() const { return m_states.size(); }
+
+private:
+    QVector<IZapretBackend::State> m_states;
+    QStringList m_logs;
+    QStringList m_errors;
+};
+
+static void pumpFor(int ms)
+{
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < ms)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+}
+
+static bool pumpUntil(const std::function<bool()> &pred, int timeoutMs)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!pred()) {
+        if (t.elapsed() >= timeoutMs)
+            return pred();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+    }
+    return true;
+}
+
+// Write a POSIX shell script and make it executable. Returns the path, or "" on any failure.
+static QString makeScript(const QString &path, const QString &body)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return QString();
+    f.write("#!/bin/sh\n");
+    f.write(body.toUtf8());
+    f.close();
+    const QFileDevice::Permissions owner = QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                           | QFileDevice::ExeOwner;
+    const QFileDevice::Permissions others = QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                            | QFileDevice::ReadOther | QFileDevice::ExeOther;
+    if (!QFile::setPermissions(path, owner | others))
+        return QString();
+    return path;
+}
+
+// A Strategy shaped exactly like the parser's DirectBinary output, but pointed at a fake payload.
+static Strategy fakeDirectStrategy(const QString &id, const QString &script, Strategy::Platform platform)
+{
+    Strategy s;
+    s.id = id;
+    s.name = id;
+    s.fileName = QFileInfo(script).fileName();
+    s.dirPath = QFileInfo(script).absolutePath();
+    s.filePath = script;
+    s.executablePath = script;
+    s.kind = Strategy::Kind::Binary;
+    s.platform = platform;
+    s.argv = {QStringLiteral("--wf-tcp=80,443"), QStringLiteral("--dpi-desync=fake")};
+    s.requiresRoot = false;
+    return s;
+}
+
 int main(int argc, char **argv)
 {
-    // Backends use QProcess, which needs a QCoreApplication instance to exist. We never enter a real
-    // event loop here — every backend assertion below exercises a synchronous start() rejection.
+#if defined(Q_OS_UNIX)
+    // Deterministic elevation gate. PrivilegeHelper::hasPolkitAgent() approximates "can pkexec prompt
+    // me here?" by looking for a desktop-session variable. Clearing them before anything caches the
+    // process environment makes that answer stable even on a developer desktop, so the root-required
+    // path is provable without ever raising a real polkit password prompt on the user's screen.
+    // (QProcessEnvironment caches on first read — hence: first statement of main, before the app too.)
+    qunsetenv("DISPLAY");
+    qunsetenv("WAYLAND_DISPLAY");
+    qunsetenv("XDG_SESSION_TYPE");
+#endif
+
+    // Backends use QProcess, which needs a QCoreApplication instance to exist. The rejection paths below
+    // need no looping; the real-execution section pumps the event loop explicitly (pumpUntil/pumpFor).
     QCoreApplication app(argc, argv);
 
     QString base = (argc > 1) ? QString::fromLocal8Bit(argv[1])
                               : QStringLiteral("/home/norman/Documents/zapret");
     const QString winRoot = base + "/windows";
     const QString linuxRoot = base + "/linux";
+    const QString base_dir = base;   // the unsorted parent the locator expands
 
     out << "=== zapret core verification ===\n";
     out << "base = " << base << "\n\n";
@@ -353,6 +495,304 @@ int main(int argc, char **argv)
         check(!err.isEmpty(), "manager fills the error on rejection");
         check(mgr.state() == IZapretBackend::State::Error, "manager reflects Error state");
     }
+
+    // ---- ZapretManager strategy catalog (what the GUI feeds its cards) ----
+    out << "\n[ZapretManager catalog]\n";
+    {
+        ZapretManager catalog;
+        catalog.setZapretDir(winRoot);
+        check(catalog.resolvedRoot() == winRoot, "manager keeps a direct windows root");
+        check(catalog.strategyCount() == 22, "manager exposes 22 windows strategies");
+
+        const Strategy *gen = findByName(catalog.strategies(), "general");
+        check(gen != nullptr, "catalog holds 'general'");
+        if (gen) {
+            check(gen->kind == Strategy::Kind::Binary, "catalog strategy is resolved to DirectBinary");
+            check(!gen->argv.isEmpty(), "catalog strategy carries winws argv");
+            check(!gen->id.isEmpty(), "catalog strategy has a stable id");
+            check(catalog.findStrategy(gen->id) != nullptr, "findStrategy resolves by id");
+            check(catalog.findStrategy(gen->id)->name == gen->name, "found strategy matches");
+        }
+        check(catalog.findStrategy(QStringLiteral("no-such-id")) == nullptr,
+              "findStrategy rejects unknown ids");
+
+        QString err;
+        check(!catalog.startById(QStringLiteral("no-such-id"), &err), "startById(unknown) fails");
+        check(!err.isEmpty(), "startById(unknown) explains itself");
+        check(catalog.activeStrategyId().isEmpty(), "a failed start leaves nothing active");
+
+        // A base folder (…/zapret) expands to the root that matches this host.
+        ZapretManager base;
+        base.setZapretDir(base_dir);
+        check(!base.resolvedRoot().isEmpty(), "a base directory resolves to a root");
+#if defined(Q_OS_LINUX)
+        check(base.resolvedRoot() == linuxRoot, "on Linux the base resolves to linux/");
+        check(base.strategyCount() >= 1, "linux catalog holds at least the init script");
+#elif defined(Q_OS_WIN)
+        check(base.resolvedRoot() == winRoot, "on Windows the base resolves to windows/");
+#endif
+
+        // Empty setting = auto-locate through ZapretLocator's well-known bases.
+        ZapretManager autoMgr;
+        const int autoCount = autoMgr.reload();
+        check(!autoMgr.resolvedRoot().isEmpty(), "auto-locate found a zapret tree");
+        check(autoCount == autoMgr.strategyCount(), "reload() count matches the catalog");
+
+        // Pointing at nothing yields an empty catalog instead of a crash or stale entries.
+        ZapretManager none;
+        none.setZapretDir(QStringLiteral("/definitely/not/zapret"));
+        check(none.strategyCount() == 0, "a bogus directory yields no strategies");
+    }
+
+    // ---- backends: real process execution ----
+    //
+    // These are the assertions the failure-mode section above cannot make: that a strategy actually
+    // launches, that its output reaches the log, that exit codes become states, and — the one that
+    // matters most when a user presses "Остановить" — that a requested stop is reported as a clean stop
+    // and not as a crash.
+    out << "\n[backends: real execution]\n";
+#if defined(Q_OS_UNIX)
+    {
+        QTemporaryDir tmp;
+        check(tmp.isValid(), "fixture directory created");
+        const QString argsLog = tmp.filePath(QStringLiteral("args.log"));
+
+        // (1) A long-lived direct payload. It stays up for ~5 s of sleep loops, which is what lets the
+        //     test observe Running and then stop() a live process instead of one that already exited.
+        const QString live = makeScript(tmp.filePath(QStringLiteral("fake-nfqws.sh")), QStringLiteral(
+            "echo \"nfqws-fake up: $*\"\n"
+            "echo \"$*\" >> '%1'\n"
+            "i=0\n"
+            "while [ \"$i\" -lt 5 ]; do sleep 1; i=$((i+1)); done\n"
+            "echo \"nfqws-fake done\"\n").arg(argsLog));
+        check(!live.isEmpty(), "live payload fixture written");
+
+        {
+            using S = IZapretBackend::State;
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = fakeDirectStrategy(QStringLiteral("live-direct"), live, Strategy::Platform::Linux);
+
+            QString err;
+            const bool accepted = lb.start(s, &err);
+            check(accepted, "LinuxBackend accepted a direct payload");
+            if (!accepted)
+                out << "    note: " << err << '\n';
+
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 8000),
+                  "a real child drives the backend to Running");
+            check(probe->stateSequence({S::Starting, S::Running}),
+                  "transitions arrived as Starting then Running");
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("nfqws-fake up")); }, 3000),
+                  "the child's stdout was piped into the log");
+            check(probe->sawLog(QStringLiteral("--wf-tcp=80,443")),
+                  "the argv the parser produced reached the child");
+            check(lb.isRunning(), "isRunning() is true while the child lives");
+
+            lb.stop();
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 8000), "stop() ends in Stopped");
+            check(probe->sawState(S::Stopping), "Stopping was reported on the way down");
+            check(probe->errors().isEmpty(),
+                  "a user-initiated stop is NOT reported as an error (SIGTERM used to look like a crash)");
+            check(probe->sawLog(QStringLiteral("stopped on request")),
+                  "the clean stop is what the log says");
+            check(!probe->sawState(S::Error),
+                  "and no Error state was emitted anywhere in the stop cycle");
+            check(!lb.isRunning(), "nothing is managed after the stop");
+            pumpFor(150);   // let any late notification land before the scope closes
+        }
+
+        // (2) A payload that fails on its own: exit 3 must surface as Error + errorOccurred, because
+        //     nfqws dying by itself is exactly the failure the GUI has to badge on the card.
+        const QString failing = makeScript(tmp.filePath(QStringLiteral("fake-fail.sh")), QStringLiteral(
+            "echo \"nfqws-fake: cannot open nfqueue group 200: Operation not permitted\" >&2\n"
+            "exit 3\n"));
+        {
+            using S = IZapretBackend::State;
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = fakeDirectStrategy(QStringLiteral("fail-direct"), failing, Strategy::Platform::Linux);
+
+            QString err;
+            check(lb.start(s, &err), "a failing payload is still accepted (the launch itself worked)");
+            check(pumpUntil([&] { return lb.state() == S::Error; }, 8000),
+                  "a non-zero exit moves the backend to Error");
+            check(probe->errors().size() == 1, "exactly one errorOccurred for the failed run");
+            check(probe->logCountWith(QStringLiteral("payload exited with code 3")) == 1,
+                  "the failure is logged exactly once (logMessage owns the line, errorOccurred does not)");
+            check(!probe->errors().isEmpty()
+                      && probe->errors().first().contains(QStringLiteral("code 3")),
+                  "the error names the exit code");
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("cannot open nfqueue")); }, 3000),
+                  "stderr reached the log too — that is where the reason lives");
+            check(!lb.isRunning(), "a dead payload leaves nothing running");
+        }
+
+        // (3) The controller (init-script) shape: two short-lived commands, `start` then `stop`, with the
+        //     daemon state derived from their exit codes. executablePath is the script itself — that is how
+        //     LinuxBackend runs a controller once it is root — which keeps a real pkexec prompt out of the
+        //     test while still driving the whole controller state machine.
+        const QString controller = makeScript(tmp.filePath(QStringLiteral("fake-init.sh")), QStringLiteral(
+            "echo \"$*\" >> '%1'\n"
+            "echo \"controller: $*\"\n").arg(argsLog));
+        {
+            using S = IZapretBackend::State;
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s;
+            s.id = QStringLiteral("controller");
+            s.name = QStringLiteral("controller");
+            s.fileName = QStringLiteral("zapret");
+            s.filePath = controller;
+            s.primaryArg = controller;
+            s.executablePath = controller;   // stand-in for "pkexec": no elevation attempt is made
+            s.kind = Strategy::Kind::ShellScript;
+            s.platform = Strategy::Platform::Linux;
+            s.requiresRoot = false;
+
+            QString err;
+            check(lb.start(s, &err), "controller start accepted");
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 8000),
+                  "a successful controller command means the daemon is up");
+            check(lb.isRunning(), "controller mode reports running with no live child process");
+            check(pumpUntil([&] {
+                        QFile f(argsLog);
+                        return f.open(QIODevice::ReadOnly) &&
+                               QString::fromUtf8(f.readAll()).contains(QStringLiteral("start"));
+                    }, 5000),
+                  "the controller was invoked with 'start'");
+
+            lb.stop();
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 8000),
+                  "the matching 'stop' command brings the controller down");
+            QFile f(argsLog);
+            const QString invoked = f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+            f.close();
+            check(invoked.contains(QStringLiteral("stop")), "the controller was invoked with 'stop'");
+            check(invoked.contains(QStringLiteral("start")), "and with 'start' before that, in order");
+            check(probe->errors().isEmpty(), "a clean controller cycle raises no error");
+        }
+
+        // (4) WindowsBackend's live-process tracking is plain QProcess, so the same machine is verifiable
+        //     here with a POSIX payload. What genuinely needs a Windows box — cmd.exe /c, powershell -File,
+        //     CREATE_NO_WINDOW and the UAC prompt — is deliberately not claimed by this test.
+        {
+            using S = IZapretBackend::State;
+            WindowsBackend wb;
+            BackendProbe *probe = new BackendProbe(&wb);
+            Strategy s = fakeDirectStrategy(QStringLiteral("win-live"), live, Strategy::Platform::Windows);
+
+            QString err;
+            check(wb.start(s, &err), "WindowsBackend accepted a live payload");
+            check(pumpUntil([&] { return wb.state() == S::Running; }, 8000),
+                  "WindowsBackend reaches Running from QProcess::started");
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("nfqws-fake up")); }, 3000),
+                  "merged stdout is captured by WindowsBackend");
+            wb.stop();
+            check(pumpUntil([&] { return wb.state() == S::Stopped; }, 8000),
+                  "WindowsBackend stop() lands on Stopped");
+            check(probe->errors().isEmpty(),
+                  "and, like Linux, does not dress its own kill up as a crash");
+            check(!probe->sawState(S::Error),
+                  "the requested stop never passes through Error (Qt emits Crashed before finished)");
+        }
+
+        // (5) A program that cannot be exec'd at all: the asynchronous FailedToStart path. A bare name
+        //     skips the synchronous existence check, so this is the path a missing binary takes in the field.
+        {
+            using S = IZapretBackend::State;
+            WindowsBackend wb;
+            BackendProbe *probe = new BackendProbe(&wb);
+            Strategy s = fakeDirectStrategy(QStringLiteral("win-missing"), live, Strategy::Platform::Windows);
+            s.executablePath = QStringLiteral("zapret-nonexistent-command");
+            s.filePath = s.executablePath;
+
+            wb.start(s, nullptr);   // accepted or not: either way it has to end in Error
+            check(pumpUntil([&] { return wb.state() == S::Error; }, 8000),
+                  "an unresolvable program ends in Error");
+            check(!probe->errors().isEmpty()
+                      && probe->errors().first().contains(QStringLiteral("failed to start"), Qt::CaseInsensitive),
+                  "the error says it failed to start");
+            check(!wb.isRunning(), "no phantom process is tracked after a failed start");
+        }
+
+        // (6) The elevation gate, deterministically. coretest cleared the session variables at startup, so a
+        //     root-requiring strategy must be refused before spawning anything rather than reaching a real
+        //     pkexec prompt. Under a root run the gate does not apply, so that branch is asserted instead.
+        {
+            using S = IZapretBackend::State;
+            Strategy needsRoot = fakeDirectStrategy(QStringLiteral("needs-root"), live,
+                                                     Strategy::Platform::Linux);
+            needsRoot.requiresRoot = true;
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            QString err;
+            const bool accepted = lb.start(needsRoot, &err);
+
+            if (PrivilegeHelper::isElevated()) {
+                check(accepted, "as root the gate does not block a privileged strategy");
+                pumpUntil([&] { return lb.state() == S::Running; }, 8000);
+                lb.stop();
+                pumpUntil([&] { return lb.state() == S::Stopped; }, 8000);
+            } else {
+                check(!accepted, "non-root without a polkit agent is refused before spawning anything");
+                check(err.contains(QStringLiteral("polkit")) || err.contains(QStringLiteral("root")),
+                      "the refusal says why: root required, no agent reachable");
+                check(lb.state() == S::Error, "the gate leaves the backend in Error");
+                check(probe->errors().size() == 1, "the gate reports exactly one error");
+                check(probe->logCountWith(err) == 1, "the refusal is logged exactly once");
+            }
+
+            // The Windows mirror of the same gate: an unelevated GUI cannot load WinDivert, so it is refused
+            // with its own message. isElevated() is geteuid() here, so this is a real assertion, not a loop.
+            Strategy winRoot = fakeDirectStrategy(QStringLiteral("win-admin"), live,
+                                                  Strategy::Platform::Windows);
+            winRoot.requiresRoot = true;
+            WindowsBackend wb;
+            QString werr;
+            const bool winAccepted = wb.start(winRoot, &werr);
+            check(winAccepted == PrivilegeHelper::isElevated(),
+                  "WindowsBackend gates elevation on the same token check");
+            if (!winAccepted)
+                check(werr.contains(QStringLiteral("elevat"), Qt::CaseInsensitive),
+                      "the Windows refusal mentions elevation");
+        }
+
+        // (7) ZapretManager end to end with a real child — the facade the GUI actually drives.
+        {
+            using S = IZapretBackend::State;
+            ZapretManager mgr;
+            int startedCount = 0;
+            int stoppedCount = 0;
+            QString startedId;
+            QObject::connect(&mgr, &ZapretManager::strategyStarted,
+                             [&](const QString &id, const QString &) { ++startedCount; startedId = id; });
+            QObject::connect(&mgr, &ZapretManager::strategyStopped, [&] { ++stoppedCount; });
+
+            const QString quick = makeScript(tmp.filePath(QStringLiteral("fake-quick.sh")), QStringLiteral(
+                "echo \"quick child up\"\n"));
+            Strategy s = fakeDirectStrategy(QStringLiteral("mgr-live"), quick, Strategy::Platform::Linux);
+
+            QString err;
+            check(mgr.start(s, &err), "manager accepted the strategy");
+            check(startedCount == 1 && startedId == QLatin1String("mgr-live"),
+                  "strategyStarted carried the id the UI badges");
+            check(mgr.activeStrategyId() == QLatin1String("mgr-live"),
+                  "manager remembers which strategy is active");
+            check(mgr.activeStrategy() != nullptr, "activeStrategy() resolves back to it");
+            check(mgr.activeStrategy() && mgr.activeStrategy()->id == QLatin1String("mgr-live"),
+                  "activeStrategy() is the copy that was started, not a catalog lookup");
+            check(mgr.isRunning() || mgr.state() != S::Stopped, "manager reports a live backend");
+            check(pumpUntil([&] { return mgr.state() == S::Stopped; }, 8000),
+                  "the manager follows the child all the way down");
+            check(stoppedCount == 1, "strategyStopped fired once when the child exited");
+            check(mgr.activeStrategyId().isEmpty() && mgr.activeStrategy() == nullptr,
+                  "nothing stays active after the run ends");
+        }
+    }
+#else
+    out << "  SKIP  real-execution tests need a POSIX host to run the /bin/sh fixtures\n";
+#endif
 
     out << "\n=== " << (g_failures ? "FAILED" : "ALL PASS") << " (" << g_failures << " failures) ===\n";
     out.flush();

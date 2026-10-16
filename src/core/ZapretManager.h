@@ -3,6 +3,7 @@
 #include "IZapretBackend.h"
 #include "Strategy.h"
 
+#include <QList>
 #include <QObject>
 #include <QString>
 
@@ -49,13 +50,59 @@ public:
     QString backendName() const;                 // "Windows" / "Linux" / "None"
     bool hasBackend() const { return m_backend != nullptr; }
 
+    // ---- strategy catalog (UI-facing, additive) -------------------------------------
+    //
+    // The GUI needs "what can I run here?" without importing the parser, the locator and the
+    // Windows-command resolver separately. setZapretDir() remembers the root and reloads; reload()
+    // runs the same pipeline the core tests use (parseTree -> applyDefaults -> dedup ->
+    // resolveWindowsCommands) and caches the result. An empty directory means "auto-locate", and a
+    // directory that is a *base* (contains windows/ and linux/) is expanded to the root matching this
+    // host, so one setting works for both layouts.
+
+    void setZapretDir(const QString &dir);
+    QString zapretDir() const { return m_zapretDir; }
+    QString resolvedRoot() const { return m_resolvedRoot; }
+
+    // Re-scan the configured directory. Returns the number of strategies now available.
+    int reload();
+
+    QList<Strategy> strategies() const { return m_strategies; }
+
+    // The directory reload() actually scanned (a windows/ or linux/ root), empty when nothing was
+    // found. Differs from zapretDir() when the setting holds a base folder or is unset.
+    int strategyCount() const { return static_cast<int>(m_strategies.size()); }
+    const Strategy *findStrategy(const QString &id) const;
+
+    // Start the catalog entry with this id (see start()).
+    bool startById(const QString &id, QString *error = nullptr);
+
+    // The entry the last accepted start() referred to, nullptr when nothing is active. The manager keeps
+    // its own copy, so this also answers for a strategy handed straight to start() instead of resolved
+    // from the catalog (that is what the tests and any embedder do).
+    const Strategy *activeStrategy() const;
+    QString activeStrategyId() const { return m_activeId; }
+
 signals:
     void stateChanged(IZapretBackend::State s);
+    void strategiesLoaded(int count);
+    void strategyStarted(const QString &id, const QString &name);
+    void strategyStopped();
     void logMessage(const QString &line, int level);
     void errorOccurred(const QString &message);
 
 private:
+    // Resolve a user directory into (root, platform). Falls back to auto-location.
+    QString resolveRoot(const QString &dir, Strategy::Platform *platformOut) const;
+
     IZapretBackend *m_backend = nullptr;
+    QString m_zapretDir;
+    QString m_resolvedRoot;
+    QString m_activeId;
+    // A copy of what is running, not a lookup into the catalog: a reload() (or a start() of a strategy
+    // that never came from the catalog) must not make the running process unanswerable.
+    Strategy m_activeStrategy;
+    bool m_hasActiveStrategy = false;
+    QList<Strategy> m_strategies;
 };
 
 } // namespace zapret

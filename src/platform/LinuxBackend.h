@@ -65,6 +65,9 @@ private:
     bool m_controller = false;
     bool m_stopRequested = false;
     bool m_cmdIsStop = false;      // the currently running controller command is a "stop"
+    // The direct payload was killed by stop(). A SIGTERM'd child reports CrashExit on Unix, and without
+    // this marker a routine user-initiated stop would be shown as a crash.
+    bool m_directStop = false;
     QString m_scriptPath;      // controller: the init script path (for the later "stop")
     QString m_controllerProg;  // controller: "pkexec" (reused for stop)
 

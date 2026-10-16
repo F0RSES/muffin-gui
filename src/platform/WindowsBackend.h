@@ -49,6 +49,11 @@ private:
     QProcess *m_process = nullptr;
     State m_state = State::Stopped;
     QString m_lastError;
+
+    // stop() kills the child with a signal, and on Unix a signalled exit is reported as CrashExit. Without
+    // this flag the normal "Остановить" click would surface as a crash error; with it, our own kill is
+    // recognised as the clean shutdown it is.
+    bool m_stopByRequest = false;
 };
 
 } // namespace zapret

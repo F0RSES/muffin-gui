@@ -190,6 +190,7 @@ bool LinuxBackend::start(const Strategy &s, QString *error)
     m_controllerProg = program;
     m_stopRequested = false;
     m_cmdIsStop = false;
+    m_directStop = false;   // a new run starts clean: its exits are never "on request"
 
     resetProcess();
     m_process->setProgram(program);
@@ -248,9 +249,13 @@ void LinuxBackend::stop()
         // Direct payload: terminate the live process exactly like the Windows backend.
         if (!m_process || m_process->state() == QProcess::NotRunning)
         {
+            m_directStop = false;
             setState(State::Stopped);
             return;
         }
+        // Set before terminate(): waitForFinished() delivers finished() from inside this call, and the
+        // handler must already know the death was requested.
+        m_directStop = true;
         setState(State::Stopping);
         emit logMessage(QStringLiteral("LinuxBackend: terminating managed process"), 0);
         m_process->terminate();
@@ -286,6 +291,15 @@ void LinuxBackend::onProcessFinished(int exitCode, bool crashed)
 
     if (!m_controller)
     {
+        if (m_directStop)
+        {
+            // stop() killed it. A signalled exit arrives here as CrashExit on Unix, which is exactly the
+            // false "crash" an ordinary Остановить click must not turn into.
+            m_directStop = false;
+            emit logMessage(QStringLiteral("LinuxBackend: payload stopped on request"), 0);
+            setState(State::Stopped);
+            return;
+        }
         // Direct payload terminated.
         if (crashed)
         {

@@ -127,6 +127,7 @@ bool WindowsBackend::start(const Strategy &s, QString *error)
     if (!s.workingDirectory.isEmpty())
         m_process->setWorkingDirectory(s.workingDirectory);
     m_process->setProcessChannelMode(QProcess::MergedChannels);
+    m_stopByRequest = false;   // a new run starts clean: its exits are never "on request"
 
 #if defined(Q_OS_WIN)
     // Hide the console window winws.exe would otherwise flash when launched from a GUI process.
@@ -160,9 +161,13 @@ void WindowsBackend::stop()
 {
     if (!m_process || m_process->state() == QProcess::NotRunning)
     {
+        m_stopByRequest = false;
         setState(State::Stopped);
         return;
     }
+    // Set before terminate(): waitForFinished() below can deliver finished() synchronously, and the
+    // handler has to already know that this death is ours.
+    m_stopByRequest = true;
     setState(State::Stopping);
     emit logMessage(QStringLiteral("WindowsBackend: terminating managed process"), 0);
     m_process->terminate();
@@ -182,6 +187,17 @@ void WindowsBackend::onProcessStarted()
 
 void WindowsBackend::onProcessFinished(int exitCode, bool crashed)
 {
+    if (m_stopByRequest)
+    {
+        // We asked for this shutdown. Whichever signal took the child, or whatever code it returned on
+        // the way out, the run ended as intended: reporting "crashed" here would put a red badge on a
+        // card the user simply stopped.
+        m_stopByRequest = false;
+        emit logMessage(QStringLiteral("WindowsBackend: process stopped on request"), 0);
+        setState(State::Stopped);
+        return;
+    }
+
     if (crashed)
     {
         m_lastError = QStringLiteral("WindowsBackend: process crashed (exit %1)").arg(exitCode);
@@ -200,6 +216,13 @@ void WindowsBackend::onProcessFinished(int exitCode, bool crashed)
 void WindowsBackend::onProcessError()
 {
     const QProcess::ProcessError e = m_process ? m_process->error() : QProcess::UnknownError;
+
+    // Qt emits errorOccurred(Crashed) *before* finished() for every signalled exit — including the
+    // SIGTERM our own stop() sends. finished() is handled right after this and already knows the death
+    // was requested, so reporting it here too would put a crash badge and a dialog on a clean stop.
+    if (e == QProcess::Crashed && m_stopByRequest)
+        return;
+
     QString msg;
     switch (e)
     {
