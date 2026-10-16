@@ -10,38 +10,64 @@ on:
 
 # Two separate jobs (not a matrix) so a single OS can be re-run independently while the
 # Windows MSVC path is still being debugged. Runner images are pinned explicitly:
-#   - ubuntu-latest is migrating to Ubuntu 26 shortly and its apt Qt would float,
+#   - ubuntu-latest is migrating to a newer Ubuntu shortly and its apt Qt would float with it,
 #   - windows-latest tracks the newest VS/Windows image; windows-2022 pins VS 2022.
-# Qt strategy differs per OS on purpose:
-#   - Linux uses the DISTRO Qt6 from apt (6.2.4 on jammy). The project's only >6.2 API,
-#     setCreateProcessArgumentsModifier in WindowsBackend.cpp, is guarded by QT_VERSION and
-#     lives behind Q_OS_WIN, so it never compiles into the Linux target — 6.2 is sufficient
-#     and apt install is far more reliable than the Python-based installer action.
-#   - Windows uses jurplel/install-qt-action (apt has no MSVC Qt). Version pinned to the
-#     concrete 6.7.3 (wildcards like 6.7.* pull the newest, which is a moving target).
-# Every test runs in fixture mode: forcing ZAPRET_TEST_TREE to a non-existent path makes
-# coretest generate a minimal zapret distribution tree (see tests/coretest.cpp), so the
-# parser/locator assertions stay meaningful without downloading zapret, and checkWindowsCount
-# asserts landmarks only (g_winStrategies == -1 for an unpinned tree). uitest runs headless
-# via the offscreen platform plugin that CMakeLists.txt locates.
+#
+# Qt is installed by jurplel/install-qt-action@v4.4.1 on BOTH platforms, pinned to the same
+# concrete 6.7.3 (no wildcards). The distro Qt from apt can no longer be used: the project's
+# real floor is Qt 6.6, not 6.2 —
+#   - QPalette::Accent            -> Qt 6.6  (src/ui/Theme.cpp:80)
+#   - QStyleHints::colorScheme()  -> Qt 6.5  (src/ui/Theme.cpp:121)
+#   - Qt::ColorScheme             -> Qt 6.5
+# Ubuntu 22.04 ships Qt 6.2.4, which has none of these (that is what broke the Linux job).
+# Using one installer on both runners also removes OS version drift: Linux and Windows now
+# compile against byte-identical headers, so an API that exists on one exists on the other.
+#
+# install-qt-action facts verified against the code it ships at tag v4.4.1:
+#   - `modules` is deliberately ABSENT. It names aqtinstall add-on modules; an unknown name
+#     ("qtsvg", "qtbase") makes aqt fail — that is what broke the Windows job. QtBase is always
+#     installed and is not a module; SVG rendering support is not something this build needs
+#     requested separately.
+#   - `install-deps` defaults to true and, on Linux only, runs its own `sudo apt-get update`
+#     plus installs build-essential, libgl1-mesa-dev, libxkbcommon-dev, the xcb libs and
+#     libxcb-cursor0 (Qt >= 6.5) that the pre-built Qt needs at link/run time. It runs before
+#     the download, so the apt step below exists mainly for ninja/cmake.
+#   - The action exports QT_ROOT_DIR. It does NOT export `Qt6_DIR` (that name only exists as the
+#     CMake cache variable written by find_package(Qt6)); `Qt5_DIR` is set for Qt 5 only. So the
+#     CMake prefix is taken from $QT_ROOT_DIR/lib/cmake, as the action's README recommends.
+#   - `cache: true` keys the automatic cache on version/host/target/arch, so it stays correct
+#     when the pinned version is bumped.
+#
+# Tests run in fixture mode: forcing ZAPRET_TEST_TREE to a non-existent path makes coretest
+# generate a minimal zapret distribution tree (see tests/coretest.cpp), so the parser/locator
+# assertions stay meaningful without downloading zapret, and checkWindowsCount asserts landmarks
+# only (g_winStrategies == -1 for an unpinned tree). uitest runs headless on the offscreen
+# platform plugin, which CMakeLists.txt locates via ${Qt6_DIR}/../../../plugins/platforms —
+# for an aqt install that resolves to $QT_ROOT_DIR/plugins/platforms, where the plugin really is.
 
 jobs:
   linux:
-    name: Linux (ubuntu-22.04, Qt 6.2 apt)
+    name: Linux (ubuntu-22.04, Qt 6.7.3)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4.2.2
 
-      - name: Install Qt6 and build deps
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4.4.1
+        with:
+          version: '6.7.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            qt6-base-dev qt6-base-dev-tools \
-            libqt6svg6-dev libgl1-mesa-dev \
-            ninja-build cmake g++
+          sudo apt-get install -y ninja-build cmake g++ libgl1-mesa-dev
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR/lib/cmake"
 
       - name: Build
         run: cmake --build build --parallel
@@ -69,22 +95,19 @@ jobs:
       - uses: actions/checkout@v4.2.2
 
       - name: Install Qt6
-        # Pinned to the newest real v4.x tag (v4.4.1) instead of the floating @v4, per the
-        # no-floating-versions rule. `modules` must name an add-on module (base is always
-        # installed and is not a module — passing "qtbase" makes aqtinstall fail); qtsvg is
-        # requested because the app's resources.qrc ships .svg icons.
+        # win64_msvc2019_64 is the correct arch for Qt 6.7 on VS 2022 (the MSVC 2019 and 2022
+        # toolsets are binary-compatible); win64_msvc2022_64 only exists from Qt 6.8 on.
         uses: jurplel/install-qt-action@v4.4.1
         with:
           version: '6.7.3'
           host: windows
           target: desktop
           arch: win64_msvc2019_64
-          modules: qtsvg
           cache: true
 
       - name: Configure
         shell: bash
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR/lib/cmake"
 
       - name: Build
         run: cmake --build build --config Release --parallel
