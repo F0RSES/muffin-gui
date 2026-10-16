@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The plan is: install a Qt that meets the project floor (README targets 6.7+; the hide-console
+# block in WindowsBackend.cpp additionally wants >=6.6 for setCreateProcessArgumentsModifier, but
+# is guarded by QT_VERSION so older Qt still compiles), then configure + build + test with ctest.
+# Because coretest falls back to a generated fixture tree when neither argv[1], $ZAPRET_TEST_TREE,
+# nor the pinned developer default resolve to a real zapret distribution — which is exactly the CI
+# situation — nothing here needs to download zapret itself. uitest is registered with ctest and
+# runs under the offscreen platform (see CMakeLists.txt's plugin-path discovery).
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          modules: qtbase
+          setup-dir: qtsetup
+          cache: true
+
+      - name: Configure
+        shell: bash
+        # install-qt-action exports Qt6_DIR as the cmake package config directory; pointing
+        # CMAKE_PREFIX_PATH at it makes find_package(Qt6 ...) work on every host.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$Qt6_DIR"
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      - name: Test (fixture mode — mirrors a fresh checkout with no zapret tree)
+        shell: bash
+        env:
+          ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
+        run: ctest --test-dir build --output-on-failure
