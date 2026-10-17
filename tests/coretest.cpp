@@ -16,8 +16,10 @@
 #include "Strategy.h"
 #include "StrategyParser.h"
 #include "PortableMode.h"
+#include "ZapretDownloader.h"
 #include "ZapretLocator.h"
 #include "ZapretPaths.h"
+#include "ZapretSource.h"
 #include "ZapretManager.h"
 #include "PrivilegeHelper.h"
 #include "IZapretBackend.h"
@@ -29,6 +31,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -904,6 +908,261 @@ int main(int argc, char **argv)
             const QList<ZapretLocator::Found> viaTemp = ZapretLocator::locate({managedCopy});
             check(!ZapretLocator::firstRoot(viaTemp, Strategy::Platform::Linux).isEmpty(),
                   "a tree placed in the managed layout is located as linux");
+        }
+    }
+
+    // ---- which archive a release feed offers us ----
+    //
+    // Captured shapes of the two live endpoints, decoys included, because the decoys are the reason this
+    // function exists:
+    //   * bol-van lists an openwrt/embedded tarball BEFORE the main one and ships a sha256sum.txt next to
+    //     them - a naive "first .tar.gz wins" installs firmware build with no binaries/<arch>/nfqws;
+    //   * Flowseal lists a .rar first, which no archiver shipped with an OS can unpack.
+    // Network-free by construction: pickRelease() only reads the JSON it is handed.
+    out << "\n[ZapretSource]\n";
+    {
+        const QByteArray linuxApi = QByteArrayLiteral(R"JSON({
+  "tag_name": "v72.13",
+  "name": "v72.13",
+  "assets": [
+    {"name": "sha256sum.txt", "size": 8014,
+     "digest": "sha256:3fbb8e0a99c6cd7cdc1acc316bdb6dd279e5595587f1398d3baef25e66cd4d5d",
+     "browser_download_url": "https://github.com/bol-van/zapret/releases/download/v72.13/sha256sum.txt"},
+    {"name": "zapret-v72.13-openwrt-embedded.tar.gz", "size": 3489340,
+     "digest": "sha256:b2a9f454523264899e0e7ba19c662e59e29fb20ebb354aa3631cd76885f4c2e6",
+     "browser_download_url": "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13-openwrt-embedded.tar.gz"},
+    {"name": "zapret-v72.13.tar.gz", "size": 7844856,
+     "digest": "sha256:25c74e6c5f48963fa244c2955e76694a07c39447245a0457e2efdc74b3317e68",
+     "browser_download_url": "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"},
+    {"name": "zapret-v72.13.zip", "size": 7959200,
+     "digest": "sha256:c493e33a0dc4eba23a8686efdaba55f59755ad6ade3564aebd9d13f4c65e2e0c",
+     "browser_download_url": "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.zip"}
+  ]
+})JSON");
+        const QJsonObject lin = QJsonDocument::fromJson(linuxApi).object();
+        check(!lin.isEmpty(), "the captured linux release fixture parses");
+
+        const ZapretRelease l = ZapretSource::pickRelease(lin, Strategy::Platform::Linux);
+        check(l.tagName == QLatin1String("v72.13"), "linux: tag is carried through");
+        check(l.version == QLatin1String("v72.13"), "linux: version comes from the tag");
+        check(l.assetName == QLatin1String("zapret-v72.13.tar.gz"),
+              "linux: the main tarball, not the openwrt/embedded one listed ahead of it");
+        check(l.sizeBytes == 7844856, "linux: the size shown to the user is the chosen asset's");
+        check(l.sha256 == QLatin1String("25c74e6c5f48963fa244c2955e76694a07c39447245a0457e2efdc74b3317e68"),
+              "linux: the digest is kept without its sha256: prefix");
+        check(!l.downloadUrl.contains(QLatin1String("openwrt")) &&
+                  l.downloadUrl.endsWith(QLatin1String("zapret-v72.13.tar.gz")),
+              "linux: the url belongs to the asset that was named");
+
+        check(ZapretSource::pickRelease(lin, Strategy::Platform::Windows).assetName
+                  == QLatin1String("zapret-v72.13.zip"),
+              "windows priority: zip beats the tarball in the same release");
+
+        const QByteArray winApi = QByteArrayLiteral(R"JSON({
+  "tag_name": "1.10.3",
+  "name": "1.10.3",
+  "assets": [
+    {"name": "zapret-discord-youtube-1.10.3.rar", "size": 1284679,
+     "digest": "sha256:da62821155054b94c198d8406d32bef47edb64f3cc53d29869026108eab5b937",
+     "browser_download_url": "https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.10.3/zapret-discord-youtube-1.10.3.rar"},
+    {"name": "zapret-discord-youtube-1.10.3.tar.gz", "size": 1493470,
+     "digest": "sha256:12478bc0908c60012daeed177a0a44287fa4f7fd8f86f0d0cff84ed132f67185",
+     "browser_download_url": "https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.10.3/zapret-discord-youtube-1.10.3.tar.gz"},
+    {"name": "zapret-discord-youtube-1.10.3.zip", "size": 1510219,
+     "digest": "sha256:244314ae1c24538a0d751601da8e0c925c843371eec4456eb15f14c4fd6b7058",
+     "browser_download_url": "https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.10.3/zapret-discord-youtube-1.10.3.zip"}
+  ]
+})JSON");
+        const QJsonObject win = QJsonDocument::fromJson(winApi).object();
+        const ZapretRelease w = ZapretSource::pickRelease(win, Strategy::Platform::Windows);
+        check(w.tagName == QLatin1String("1.10.3"), "windows: tag is carried through");
+        check(w.assetName == QLatin1String("zapret-discord-youtube-1.10.3.zip"),
+              "windows: the zip wins even though the rar is listed first");
+        check(!w.assetName.endsWith(QLatin1String(".rar")),
+              "and never an archive this application has no way to open");
+        check(w.sizeBytes == 1510219, "windows: size of the chosen asset");
+        check(w.sha256 == QLatin1String("244314ae1c24538a0d751601da8e0c925c843371eec4456eb15f14c4fd6b7058"),
+              "windows: digest of the chosen asset");
+        check(ZapretSource::pickRelease(win, Strategy::Platform::Linux).assetName
+                  == QLatin1String("zapret-discord-youtube-1.10.3.tar.gz"),
+              "linux priority: tarball beats zip when both exist");
+
+        // The feeds are the whole point of the API urls, so they are asserted rather than trusted.
+        check(ZapretSource::apiUrl(Strategy::Platform::Windows).contains(QLatin1String("Flowseal")) &&
+                  ZapretSource::windowsApiUrl() == ZapretSource::apiUrl(Strategy::Platform::Windows),
+              "windows asks the Flowseal feed");
+        check(ZapretSource::apiUrl(Strategy::Platform::Linux).contains(QLatin1String("bol-van")) &&
+                  ZapretSource::linuxApiUrl() == ZapretSource::apiUrl(Strategy::Platform::Linux),
+              "linux asks the bol-van feed");
+    }
+
+    out << "\n[ZapretSource: releases with nothing usable, and digests]\n";
+    {
+        auto obj = [](const QByteArray &json) { return QJsonDocument::fromJson(json).object(); };
+
+        check(ZapretSource::pickRelease(obj(R"JSON({"tag_name":"v9","assets":[]})JSON"),
+                                        Strategy::Platform::Linux)
+                  .tagName.isEmpty(),
+              "a release with no assets answers with an empty release");
+
+        check(ZapretSource::pickRelease(obj(R"JSON({"message":"Not Found","documentation_url":"https://docs.github.com"})JSON"),
+                                        Strategy::Platform::Windows)
+                  .tagName.isEmpty(),
+              "an API error body is not mistaken for a release");
+
+        check(ZapretSource::pickRelease(obj(R"JSON({"tag_name":"v8","assets":[{"name":"zapret-v8.rar","size":1,"browser_download_url":"https://example.invalid/zapret-v8.rar"}]})JSON"),
+                                        Strategy::Platform::Windows)
+                  .tagName.isEmpty(),
+              "a release that only offers .rar offers nothing this application can open");
+
+        check(ZapretSource::pickRelease(obj(R"JSON({"tag_name":"v7","assets":[{"name":"zapret-v7-openwrt.tar.gz","size":1,"browser_download_url":"https://example.invalid/zapret-v7-openwrt.tar.gz"}]})JSON"),
+                                        Strategy::Platform::Linux)
+                  .tagName.isEmpty(),
+              "a release whose only tarball is a firmware variant is refused, not installed");
+
+        const ZapretRelease nd = ZapretSource::pickRelease(
+            obj(R"JSON({"tag_name":"v6","assets":[{"name":"zapret-v6.tar.gz","size":10,"browser_download_url":"https://example.invalid/zapret-v6.tar.gz"}]})JSON"),
+            Strategy::Platform::Linux);
+        check(!nd.tagName.isEmpty() && nd.sha256.isEmpty(),
+              "an asset published without a digest is still installable, with the check skipped");
+
+        check(ZapretSource::pickRelease(obj(R"JSON({"tag_name":"v5","assets":[{"name":"zapret-v5.tgz","size":5,"browser_download_url":"https://example.invalid/zapret-v5.tgz"}]})JSON"),
+                                        Strategy::Platform::Linux)
+                  .assetName == QLatin1String("zapret-v5.tgz"),
+              ".tgz counts as the tarball it is");
+
+        const ZapretRelease named = ZapretSource::pickRelease(
+            obj(R"JSON({"name":"Release 2024-05","assets":[{"name":"z.tar.gz","size":1,"browser_download_url":"https://example.invalid/z.tar.gz"}]})JSON"),
+            Strategy::Platform::Linux);
+        check(named.tagName == QLatin1String("Release 2024-05") &&
+                  named.version == QLatin1String("Release 2024-05"),
+              "with no tag_name the release name carries the version");
+
+        const QString hex64 =
+            QStringLiteral("25c74e6c5f48963fa244c2955e76694a07c39447245a0457e2efdc74b3317e68");
+        check(ZapretSource::normalizeDigest(QStringLiteral("sha256:") + hex64) == hex64,
+              "normalizeDigest strips the sha256 prefix");
+        check(ZapretSource::normalizeDigest(QStringLiteral("SHA256:") + hex64.toUpper()) == hex64,
+              "and tolerates both an uppercase prefix and uppercase hex");
+        check(ZapretSource::normalizeDigest(hex64) == hex64,
+              "a bare hex digest is accepted as sha256 by length");
+        check(ZapretSource::normalizeDigest(QStringLiteral("sha1:") + hex64).isEmpty(),
+              "a value tagged sha1 is not silently verified as sha256");
+        check(ZapretSource::normalizeDigest(QStringLiteral("sha512:") + hex64).isEmpty(),
+              "nor is one tagged sha512");
+        check(ZapretSource::normalizeDigest(QStringLiteral("sha256:deadbeef")).isEmpty(),
+              "too short is not a sha256");
+        check(ZapretSource::normalizeDigest(QStringLiteral("sha256:") + QString(64, QLatin1Char('z'))).isEmpty(),
+              "64 non-hex characters are not a sha256");
+        check(ZapretSource::normalizeDigest(QString()).isEmpty(), "absent stays absent");
+
+        check(ZapretSource::preferredExtensions(Strategy::Platform::Windows).first()
+                  == QLatin1String("zip"),
+              "the windows order is documented, not incidental");
+        check(ZapretSource::preferredExtensions(Strategy::Platform::Linux).first()
+                  == QLatin1String("tar.gz"),
+              "and so is the linux one");
+    }
+
+    // ---- the pieces of an install that need neither a socket nor a subprocess ----
+    out << "\n[ZapretDownloader: digest, archiver, installed layout]\n";
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temporary dir for the downloader helpers");
+        if (dir.isValid())
+        {
+            const QString file = dir.filePath(QStringLiteral("payload.bin"));
+            check(writeFile(file, QByteArrayLiteral("zapret-download-test-payload\n")),
+                  "wrote the fixture payload");
+
+            // The sha256sum of exactly those bytes, produced outside Qt and hard-coded here: an oracle the
+            // code under test cannot politely agree with itself about.
+            const QString known =
+                QStringLiteral("de3620a780719fb17ba1f81bf56a2e869538bebd5b40a66cbb8bb1ae0176e055");
+            check(ZapretDownloader::sha256OfFile(file) == known,
+                  "sha256OfFile agrees with the external sha256sum of the same bytes");
+
+            QString actual;
+            check(ZapretDownloader::verifySha256(file, known, &actual) && actual == known,
+                  "verifySha256 accepts the published digest and reports what it computed");
+
+            QString fail;
+            const QString wrong(64, QLatin1Char('0'));
+            check(!ZapretDownloader::verifySha256(file, wrong, &actual, &fail),
+                  "a different digest is refused");
+            check(fail.contains(QStringLiteral("SHA-256 mismatch")),
+                  "and the message is the one that tells the user to suspect tampering");
+            check(fail.contains(actual), "with the actual digest in it, so the pair is comparable");
+
+            check(ZapretDownloader::verifySha256(file, QString(), &actual),
+                  "an unpublished digest skips the check instead of failing the download");
+
+            QString readErr;
+            check(!ZapretDownloader::verifySha256(dir.filePath(QStringLiteral("absent.bin")), known,
+                                                  nullptr, &readErr),
+                  "a file that is not there cannot be verified");
+            check(readErr.contains(QStringLiteral("cannot read")), "and the reason says so");
+
+            const QString tarProg = ZapretDownloader::extractorProgram(QStringLiteral("/tmp/fixture.tar.gz"));
+            check(!tarProg.isEmpty(), "this host can unpack a tarball");
+            const QStringList tarArgs =
+                ZapretDownloader::extractorArguments(tarProg, QStringLiteral("/tmp/f.tar.gz"),
+                                                     QStringLiteral("/tmp/out"));
+            check(tarArgs.contains(QStringLiteral("/tmp/f.tar.gz")) &&
+                      tarArgs.contains(QStringLiteral("/tmp/out")),
+                  "the archive and the destination both reach the archiver");
+            if (QFileInfo(tarProg).fileName().compare(QLatin1String("unzip"), Qt::CaseInsensitive) != 0)
+                check(tarArgs.first() == QLatin1String("-xzf"), "tar is told to decompress a tarball");
+
+#if defined(Q_OS_WIN)
+            // bsdtar detects the format from the payload, so on Windows the suffix does not gate it.
+            check(!ZapretDownloader::extractorProgram(QStringLiteral("/nope/such.archive")).isEmpty(),
+                  "windows keeps tar whatever the suffix claims");
+#else
+            check(ZapretDownloader::extractorProgram(QStringLiteral("/nope/such.archive")).isEmpty(),
+                  "an unknown suffix claims no extractor");
+            check(ZapretDownloader::extractorProgram(QStringLiteral("/nope/archive.rar")).isEmpty(),
+                  "and neither does a rar, which is why the picker never chooses one");
+#endif
+
+            QString missing;
+            const QString tree = dir.filePath(QStringLiteral("tree"));
+            check(!ZapretDownloader::installLooksComplete(tree, Strategy::Platform::Windows, &missing),
+                  "a directory that does not exist is not a completed windows install");
+            check(missing.contains(QStringLiteral("bin/winws.exe")),
+                  "and the complaint names the file that decides it");
+
+            check(writeFile(tree + QStringLiteral("/bin/winws.exe"), QByteArrayLiteral("MZ fixture")),
+                  "wrote a windows payload");
+            check(ZapretDownloader::installLooksComplete(tree, Strategy::Platform::Windows),
+                  "the same root now passes the windows check");
+            check(!ZapretDownloader::installLooksComplete(tree, Strategy::Platform::Linux, &missing),
+                  "yet it is still not a linux install");
+
+            const QString nfqws =
+                tree + QStringLiteral("/binaries/") + fixtureArchDir() + QStringLiteral("/nfqws");
+            check(writeFile(nfqws, QByteArrayLiteral("ELF fixture")), "wrote a linux payload binary");
+            QFile::setPermissions(nfqws, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                             QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+                                             QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                                             QFileDevice::ExeOther);
+            check(ZapretDownloader::installLooksComplete(tree, Strategy::Platform::Linux),
+                  "an executable nfqws for this host's architecture completes a linux install");
+#if !defined(Q_OS_WIN)
+            QFile::setPermissions(nfqws, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+            check(!ZapretDownloader::installLooksComplete(tree, Strategy::Platform::Linux),
+                  "and the same file with the exec bit off does not: POSIX can express that, so it is checked");
+#endif
+
+            // A tree carrying only another architecture's payload must not be called usable here: the
+            // backend would exec it and fail at start, which is what this check exists to prevent.
+            const QString foreign = dir.filePath(QStringLiteral("tree-foreign"));
+            const QString foreignFile = foreign + QStringLiteral("/binaries/linux-ppc64/nfqws");
+            check(writeFile(foreignFile, QByteArrayLiteral("ELF foreign")), "wrote a foreign-arch payload");
+            QFile::setPermissions(foreignFile, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                                   QFileDevice::ExeOwner);
+            check(!ZapretDownloader::installLooksComplete(foreign, Strategy::Platform::Linux),
+                  "and a tree with only that payload is refused");
         }
     }
 

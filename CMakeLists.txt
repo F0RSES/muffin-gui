@@ -18,6 +18,8 @@ add_library(zapretcore STATIC
     src/core/StrategyParser.cpp
     src/core/ZapretPaths.cpp
     src/core/ZapretLocator.cpp
+    src/core/ZapretSource.cpp
+    src/core/ZapretDownloader.cpp
     src/core/PrivilegeHelper.cpp
     src/core/ZapretManager.cpp
     src/core/PingService.cpp
@@ -30,6 +32,7 @@ add_library(zapretcore STATIC
 target_sources(zapretcore PRIVATE
     src/core/Strategy.h
     src/core/IZapretBackend.h
+    src/core/ZapretDownloader.h
     src/core/ZapretManager.h
     src/core/PingService.h
     src/platform/WindowsBackend.h
