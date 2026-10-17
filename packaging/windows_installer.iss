@@ -114,5 +114,5 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; Tasks: deskt
 [Run]
 ; Offered but unchecked: right after a fresh install the app has no zapret tree yet, and opening it is
 ; not a prerequisite for finishing the setup.
-Filename: "{app}\{#AppName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsunchecked
+Filename: "{app}\{#AppName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall unchecked
 
