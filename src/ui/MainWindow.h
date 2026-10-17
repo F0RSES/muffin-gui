@@ -56,6 +56,20 @@ public:
     // click has to quit, or the user loses their only way back to the window.
     static bool hideOnClose(bool minimizeToTraySetting, bool trayAvailable);
 
+    // Which card a backend failure should be pinned to, from the three ids the window can name a run
+    // by, in precedence order:
+    //
+    //   pendingStartId — the start this window asked for and that has not resolved yet;
+    //   activeId       — the strategy the manager currently reports as running;
+    //   lastRunId      — the last run the window saw as active, kept because a manager that has
+    //                    already forgotten the run answers with "" (see m_lastRunId).
+    //
+    // The third case is not hypothetical: portable mode deliberately defers its error report until the
+    // nfqueue teardown finished, and by then stateChanged(Error) has already made the manager drop the
+    // active strategy, so the first two are both empty and the failure would otherwise badge nothing.
+    static QString errorTargetId(const QString &pendingStartId, const QString &activeId,
+                                 const QString &lastRunId);
+
     // Accessors used by tests and by nothing else in the app.
     ZapretManager *manager() const { return m_manager; }
     LogPanel *logPanel() const { return m_log; }
@@ -137,6 +151,12 @@ private:
     // Which strategy the current start attempt belongs to, and which card carries a failure badge.
     QString m_pendingStartId;
     QString m_errorCardId;
+    // The most recent run the manager still named as active. ZapretManager clears that name inside the
+    // same stateChanged(Error) that precedes a backend's errorOccurred, so a deferred failure — every
+    // portable-mode failure that had to tear the queue down first — arrives with nothing to attribute
+    // it to unless the window remembered. Cleared when a run comes down cleanly, so a much later,
+    // unrelated refusal cannot badge a card whose run ended without incident.
+    QString m_lastRunId;
     QString m_lastErrorText;          // for dialog coalescing of repeated identical failures
     QElapsedTimer m_errorClock;       // running from construction
     qint64 m_lastErrorAt = 0;

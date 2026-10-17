@@ -354,6 +354,48 @@ static void testTrayPolicy()
     check(!dialog.trayNote()->text().contains(QStringLiteral("%1")), "the note has no unsubstituted placeholder");
 }
 
+// ---------------------------------------------------------- window policy ----
+static void testWindowPolicy()
+{
+    std::printf("\n[window policy]\n");
+
+    // The status chip's wording is a pure mapping, so the phases a portable run walks through — which
+    // are the only ones a view can misread as "nothing is happening" — are checkable here.
+    using S = IZapretBackend::State;
+    check(MainWindow::statusText(S::Starting, QStringLiteral("nfqws (portable)"))
+              .contains(QStringLiteral("nfqws (portable)")),
+          "the firewall-up phase still names the strategy the user picked");
+    check(MainWindow::statusText(S::Running, QStringLiteral("nfqws (portable)"))
+              .contains(QStringLiteral("nfqws (portable)")),
+          "and so does the live payload");
+    check(!MainWindow::statusText(S::Stopping, QStringLiteral("nfqws (portable)")).isEmpty(),
+          "the teardown phase has wording of its own");
+    check(MainWindow::statusKind(S::Starting) == MainWindow::statusKind(S::Stopping),
+          "in-flight phases share one chip colour: neither reads as idle");
+    check(MainWindow::statusKind(S::Running) != MainWindow::statusKind(S::Stopped),
+          "up and down are distinguishable");
+    check(MainWindow::statusKind(S::Error) != MainWindow::statusKind(S::Stopped),
+          "a failure is not shown as an ordinary stop");
+
+    // Which card a backend failure belongs to. A pending start owns the answer while the attempt is
+    // unresolved; otherwise the live run does; otherwise the window's memory of the last live run —
+    // which is exactly what a deferred portable error needs, because the manager has forgotten the
+    // strategy by the time that error is announced (see the manager-level test in coretest).
+    const QString pend = QStringLiteral("A");
+    const QString act = QStringLiteral("B");
+    const QString last = QStringLiteral("C");
+    check(MainWindow::errorTargetId(pend, act, last) == pend,
+          "the card that asked for this start owns its failure");
+    check(MainWindow::errorTargetId(QString(), act, last) == act,
+          "once the attempt resolved, the live run's card does");
+    check(MainWindow::errorTargetId(QString(), QString(), last) == last,
+          "with the run already forgotten, the remembered one is badged");
+    check(MainWindow::errorTargetId(QString(), QString(), QString()).isEmpty(),
+          "and a failure that belongs to no run badges nothing rather than something stale");
+    check(MainWindow::errorTargetId(pend, QString(), QString()) == pend,
+          "an empty fallback chain never outranks the pending start");
+}
+
 // ------------------------------------------------------------------- Theme ----
 static void testTheme(QApplication &app)
 {
@@ -509,6 +551,7 @@ int main(int argc, char **argv)
     testPingIndicator();
     testStrategyCard();
     testTrayPolicy();
+    testWindowPolicy();
     testTheme(app);
     testPingService();
 

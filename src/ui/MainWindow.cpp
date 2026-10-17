@@ -247,6 +247,16 @@ bool MainWindow::hideOnClose(bool minimizeToTraySetting, bool trayAvailable)
     return minimizeToTraySetting && trayAvailable;
 }
 
+QString MainWindow::errorTargetId(const QString &pendingStartId, const QString &activeId,
+                                  const QString &lastRunId)
+{
+    if (!pendingStartId.isEmpty())
+        return pendingStartId;
+    if (!activeId.isEmpty())
+        return activeId;
+    return lastRunId;
+}
+
 // Idempotent: the first call can land before the DE publishes a tray host, in which case the retry
 // timer calls this again. Only the first successful call builds the menu.
 bool MainWindow::ensureTray()
@@ -565,6 +575,14 @@ void MainWindow::onStateChanged(IZapretBackend::State state)
     // pending start that already resolved.
     if (state == IZapretBackend::State::Running || state == IZapretBackend::State::Stopped)
         m_pendingStartId.clear();
+    // Capture the run's card while the manager still names it. It forwards stateChanged before its own
+    // bookkeeping slot clears m_activeId, so this is the last moment the two agree — and a portable
+    // failure that deferred its report to after the nfqueue teardown arrives with nothing to attribute
+    // to otherwise (see errorTargetId). A run that came down cleanly leaves no grievance behind.
+    if (state == IZapretBackend::State::Stopped)
+        m_lastRunId.clear();
+    else if (const QString id = m_manager->activeStrategyId(); !id.isEmpty())
+        m_lastRunId = id;
     updateStatusUi();
     if (state == IZapretBackend::State::Stopped && m_tray && !isVisible())
         updateTrayIcon();
@@ -596,9 +614,12 @@ void MainWindow::onErrorOccurred(const QString &message)
     // See the contract on IZapretBackend::errorOccurred.
 
     // Pin the reason where it stays visible after the dialog is dismissed: on the card that asked for
-    // this start, or — when that attempt already resolved — on the card that is currently active.
-    const QString targetId = m_pendingStartId.isEmpty() ? m_manager->activeStrategyId()
-                                                        : m_pendingStartId;
+    // this start, or — when that attempt already resolved — on the card that is currently active. A
+    // third case exists only on the deferred paths: portable mode reports its failure after the queue
+    // teardown, and by then the manager has forgotten which strategy was running, so the window's own
+    // memory of the last live run is what still identifies the card.
+    const QString targetId = errorTargetId(m_pendingStartId, m_manager->activeStrategyId(),
+                                           m_lastRunId);
     if (!targetId.isEmpty())
         attachErrorBadge(targetId, message);
 
