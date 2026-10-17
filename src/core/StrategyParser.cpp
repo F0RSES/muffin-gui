@@ -1,5 +1,6 @@
 #include "StrategyParser.h"
 
+#include "PortableMode.h"
 #include "ZapretPaths.h"
 
 #include <QDir>
@@ -51,6 +52,11 @@ Strategy::Platform resolvePlatform(const Strategy::Kind kind, const QString &fil
 
 // Desirability heuristic so the recommended entry floats to the top. Purely for list ordering;
 // it never affects how something is launched. Higher runs first.
+//
+// The linux ShellScript numbers here are only a PRE-pass guess: they encode sysv-beats-openrc so the
+// tree walk has something to deduplicate on. StrategyParser::applyLinuxRunModes is what decides the
+// final weight, because ranking the init script correctly requires knowing the tree's install state,
+// which a per-file heuristic cannot see.
 int weightFor(const Strategy &s)
 {
     switch (s.kind)
@@ -74,6 +80,33 @@ int weightFor(const Strategy &s)
         break;
     }
     return 0;
+}
+
+// Portable-mode presentation weights (docs/zapret_analysis.md section 4). They are deliberately
+// spread apart: the init script's 100/30 pair straddles the portable payload's 50, so the two swap
+// places the moment the tree gets installed, and neither ties with anything else in the list.
+constexpr int kInitScriptInstalledWeight = 100;
+constexpr int kInitScriptUninstalledWeight = 30;
+constexpr int kPortableNfqwsWeight = 50;
+
+// The final weight of an InitScript strategy. `installed` decides the tier; inside each tier sysv
+// keeps a one-point lead over openrc so deduplicated() — which collapses every entry named "zapret"
+// of kind ShellScript down to the highest-weighted one — still keeps the sysv copy either way.
+int weightForInitScript(const Strategy &s, bool installed)
+{
+    const bool primary = lower(s.filePath).contains(QLatin1String("/sysv/"));
+    const int tier = installed ? kInitScriptInstalledWeight : kInitScriptUninstalledWeight;
+    return primary ? tier : tier - 1;
+}
+
+// True when both paths name the same on-disk file. QFileInfo::operator== compares canonical paths,
+// which is what lets a synthesized strategy and a tree-walked one be recognised as the same payload
+// even when one path came from QDir (native separators) and the other from ZapretPaths ('/').
+bool sameFile(const QString &a, const QString &b)
+{
+    if (a.isEmpty() || b.isEmpty())
+        return false;
+    return QFileInfo(a) == QFileInfo(b);
 }
 
 } // namespace
@@ -272,10 +305,105 @@ QList<Strategy> StrategyParser::parseTree(const QString &dirPath, Strategy::Plat
     QList<Strategy> raw;
     collect(dirPath, platform, 0, std::max(0, maxDepth), raw);
 
+    // Run modes go first: this is the only pass that sees the whole tree (so it can judge install
+    // state), and it may APPEND a strategy that applyDefaults still has to fill in.
+    applyLinuxRunModes(raw, dirPath, platform);
+
     // applyDefaults needs the root; when the caller handed us the root, pass it through, then
     // re-dedup + order the whole presented list.
     applyDefaults(raw, dirPath, platform);
     return deduplicated(raw);
+}
+
+void StrategyParser::applyLinuxRunModes(QList<Strategy> &strategies, const QString &rootPath,
+                                        Strategy::Platform platform)
+{
+    Strategy::Platform plat = platform;
+    if (plat == Strategy::Platform::Unknown)
+        plat = guessPlatform(rootPath);
+    if (plat != Strategy::Platform::Linux)
+        return;   // windows trees have no bring-up choice to make
+
+    const bool installed = ZapretPaths::isLinuxInstalled(rootPath);
+
+    for (Strategy &s : strategies)
+    {
+        if (s.platform != Strategy::Platform::Linux)
+            continue;
+
+        if (s.kind == Strategy::Kind::ShellScript)
+        {
+            // Label every linux controller script explicitly rather than leaving the backend to
+            // infer it from kind, and re-rank the zapret daemon by whether it can actually start.
+            s.runMode = Strategy::RunMode::InitScript;
+            if (s.name == QLatin1String("zapret"))
+            {
+                s.weight = weightForInitScript(s, installed);
+                if (!installed && s.description.isEmpty())
+                {
+                    // Say why the documented one-click launcher is ranked below a raw binary: it will
+                    // fail with "nfqws not found" until install_easy.sh / install_bin.sh put the
+                    // daemon binary at <root>/nfq/nfqws.
+                    s.description = QStringLiteral(
+                        "init script (not installed: %1 is missing, start will fail)")
+                        .arg(QFileInfo(ZapretPaths::nfqwsBuiltPath(rootPath)).fileName());
+                }
+            }
+        }
+    }
+
+    // ---- the portable payload ----
+    //
+    // `binaries` is an excluded dir, so the walk above never sees <root>/binaries/<arch>/nfqws and
+    // this strategy has to be synthesized. nfqwsPath() already applies the native-arch preference and
+    // returns "" when the tree ships no usable payload, in which case portable mode is not offered
+    // at all (the GUI would only be able to start something that cannot run).
+    const QString nfqws = ZapretPaths::nfqwsPath(rootPath);
+    if (nfqws.isEmpty())
+        return;
+
+    // A tree that carries a bare nfqws where the walk DOES look (e.g. <root>/nfqws, the leftover
+    // install_bin.sh leaves behind) already produced a Kind::Binary entry for it. Adopt that one
+    // instead of appending a twin with a different id for the same file.
+    for (Strategy &s : strategies)
+    {
+        if (s.kind == Strategy::Kind::Binary && s.platform == Strategy::Platform::Linux &&
+            sameFile(s.filePath, nfqws))
+        {
+            s.runMode = Strategy::RunMode::PortableNfqws;
+            s.weight = kPortableNfqwsWeight;
+            if (s.argv.isEmpty())
+                s.argv = portableNfqwsDefaultArgs();
+            if (s.workingDirectory.isEmpty())
+                s.workingDirectory = QDir(rootPath).absolutePath();
+            if (s.description.isEmpty())
+                s.description = QStringLiteral("nfqws (portable: firewall rules managed by the GUI)");
+            return;
+        }
+    }
+
+    Strategy p;
+    const QFileInfo fi(nfqws);
+    p.id = fi.absoluteFilePath();
+    p.name = QStringLiteral("nfqws (portable)");
+    p.description = QStringLiteral("nfqws (portable: firewall rules managed by the GUI)");
+    p.fileName = fi.fileName();
+    p.dirPath = fi.absolutePath();
+    p.filePath = fi.absoluteFilePath();
+    p.kind = Strategy::Kind::Binary;        // what is on disk: an executable payload
+    p.platform = Strategy::Platform::Linux;
+    p.runMode = Strategy::RunMode::PortableNfqws;   // how the backend owns its lifecycle
+    p.weight = kPortableNfqwsWeight;
+    // The default flags live in argv, the one field the backend already reads for a direct payload:
+    // no parallel "portable args" concept for the UI and the tests to keep in sync. portable mode
+    // needs them (unlike the init script, which composes its own from config.default) because nothing
+    // else supplies them, and a raw nfqws with no --qnum would simply refuse to start.
+    p.argv = portableNfqwsDefaultArgs();
+    // Run from the tree root, not from binaries/<arch>/: every relative path a user may add to argv
+    // (lists, ipset scripts, nfqws' own helper files) is rooted at the zapret tree.
+    p.workingDirectory = QDir(rootPath).absolutePath();
+    // executablePath / requiresRoot / profileTemplate are filled by applyDefaults() for Kind::Binary.
+    strategies.append(p);
 }
 
 void StrategyParser::applyDefaults(QList<Strategy> &strategies, const QString &rootPath,

@@ -15,6 +15,7 @@
 
 #include "Strategy.h"
 #include "StrategyParser.h"
+#include "PortableMode.h"
 #include "ZapretLocator.h"
 #include "ZapretPaths.h"
 #include "ZapretManager.h"
@@ -319,6 +320,9 @@ static bool pumpUntil(const std::function<bool()> &pred, int timeoutMs)
 // Write a POSIX shell script and make it executable. Returns the path, or "" on any failure.
 static QString makeScript(const QString &path, const QString &body)
 {
+    // Like writeFile, the parent is created: several fixtures live in their own subdirectory of a
+    // temporary tree, and mkpath is not the caller's job.
+    QDir().mkpath(QFileInfo(path).absolutePath());
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return QString();
@@ -349,6 +353,119 @@ static Strategy fakeDirectStrategy(const QString &id, const QString &script, Str
     s.argv = {QStringLiteral("--wf-tcp=80,443"), QStringLiteral("--dpi-desync=fake")};
     s.requiresRoot = false;
     return s;
+}
+
+// ---- portable run modes on trees of a known install state ---------------------
+//
+// [parseTree linux] above reads whatever tree this machine happens to have, so it can only assert the
+// weight that tree implies. These helpers build both states from scratch, differing by exactly one
+// file — nfq/nfqws, the binary init.d/sysv/functions execs — so both tiers of the ranking get pinned
+// here instead of being inferred from somebody's ~/Documents.
+
+// The arch directory nfqwsPath() looks for first on this host, with the same fallback the locator
+// itself applies, so a tree built here is findable wherever the test runs.
+static QString fixtureArchDir()
+{
+    const QString native = ZapretPaths::nativeArchDirName();
+    return native.isEmpty() ? QStringLiteral("linux-x86_64") : native;
+}
+
+static bool makeLinuxTree(const QString &root, bool installed, bool payload = true)
+{
+    const QByteArray initBody = QByteArrayLiteral(
+        "#!/bin/sh\ncase \"$1\" in\n  start) echo starting ;;\n  stop) echo stopping ;;\nesac\n");
+    bool ok = true;
+    ok &= writeFile(root + QLatin1String("/init.d/sysv/zapret"), initBody);
+    ok &= writeFile(root + QLatin1String("/init.d/openrc/zapret"), initBody);
+    ok &= writeFile(root + QLatin1String("/config.default"), QByteArrayLiteral("#!/bin/sh\n# options\n"));
+    if (payload)
+        ok &= writeFile(root + QLatin1String("/binaries/") + fixtureArchDir() + QLatin1String("/nfqws"),
+                        QByteArrayLiteral("fixture payload\n"));
+    if (installed)
+    {
+        // The one thing that separates an installed tree from an unpacked one, and it has to be
+        // executable: isLinuxInstalled() checks exactly what the init script checks before it execs.
+        ok &= !makeScript(root + QLatin1String("/nfq/nfqws"),
+                          QStringLiteral("echo fixture daemon\n")).isEmpty();
+    }
+    return ok;
+}
+
+static int indexOfName(const QList<Strategy> &list, const QString &name)
+{
+    for (int i = 0; i < list.size(); ++i)
+        if (list[i].name == name)
+            return i;
+    return -1;
+}
+
+// Everything a tree of a known install state must produce. Every claim here is about a ranking or a
+// label the backend reads later, so a regression shows up as a wrong card order or a wrong launch
+// shape rather than as a process that fails to start.
+static void checkRunModes(const QString &root, bool installed)
+{
+    const QString tag = installed ? QStringLiteral("installed:") : QStringLiteral("unpacked:");
+    check(ZapretPaths::isLinuxInstalled(root) == installed,
+          tag + QStringLiteral(" the tree is what it was built to be"));
+
+    const QList<Strategy> list = StrategyParser::parseTree(root, Strategy::Platform::Linux, 3);
+    const Strategy *init = findByName(list, QStringLiteral("zapret"));
+    const Strategy *port = findByName(list, QStringLiteral("nfqws (portable)"));
+    check(init != nullptr, tag + QStringLiteral(" the init script is offered"));
+    check(port != nullptr, tag + QStringLiteral(" the portable payload is offered too"));
+    if (!init || !port)
+        return;
+
+    check(init->kind == Strategy::Kind::ShellScript &&
+              init->runMode == Strategy::RunMode::InitScript,
+          tag + QStringLiteral(" the script is labelled InitScript"));
+    check(port->kind == Strategy::Kind::Binary &&
+              port->runMode == Strategy::RunMode::PortableNfqws,
+          tag + QStringLiteral(" the payload is labelled PortableNfqws"));
+    check(init->weight == (installed ? 100 : 30),
+          tag + QStringLiteral(" init weight is %1").arg(init->weight));
+    check(port->weight == 50, tag + QStringLiteral(" portable weight stays 50"));
+
+    // sysv must keep its one-point lead in BOTH tiers, or dedup would pick openrc in one of them.
+    check(init->filePath.contains(QLatin1String("/sysv/")),
+          tag + QStringLiteral(" sysv wins the dedup against openrc"));
+
+    const int ii = indexOfName(list, init->name), pi = indexOfName(list, port->name);
+    check(ii >= 0 && pi >= 0, tag + QStringLiteral(" both bring-ups are listed"));
+    check(installed ? ii < pi : pi < ii,
+          installed ? tag + QStringLiteral(" the daemon outranks a raw payload")
+                    : tag + QStringLiteral(" the working payload outranks a doomed daemon"));
+    check(list.first().name == (installed ? init->name : port->name),
+          tag + QStringLiteral(" the first card shown is the one that works"));
+
+    // The ranking has to be explainable: an unpacked tree says why its documented launcher ranks last,
+    // and an installed one must not keep saying it.
+    check(init->description.contains(QStringLiteral("not installed")) == !installed,
+          tag + QStringLiteral(" the init script explains its own rank"));
+    check(port->description.contains(QStringLiteral("portable")),
+          tag + QStringLiteral(" the payload says the GUI manages its firewall"));
+
+    // What the backend is going to exec, checked before anything execs it.
+    check(port->executablePath == port->filePath, tag + QStringLiteral(" a Binary execs itself"));
+    check(port->primaryArg.isEmpty(), tag + QStringLiteral(" nothing is wrapped around it"));
+    check(port->requiresRoot, tag + QStringLiteral(" root is required"));
+    check(port->argv == portableNfqwsDefaultArgs(), tag + QStringLiteral(" argv is the shared default"));
+    check(samePath(port->workingDirectory, root), tag + QStringLiteral(" cwd is the tree root"));
+    check(samePath(port->filePath, ZapretPaths::nfqwsPath(root)),
+          tag + QStringLiteral(" it points at the packaged nfqws"));
+    check(!port->id.isEmpty(), tag + QStringLiteral(" the strategy has a stable id"));
+
+    // Re-running the pass must not append a twin or re-rank what it already labelled.
+    QList<Strategy> again = list;
+    StrategyParser::applyLinuxRunModes(again, root, Strategy::Platform::Linux);
+    int twins = 0;
+    for (const Strategy &s : again)
+        if (s.runMode == Strategy::RunMode::PortableNfqws)
+            ++twins;
+    check(twins == 1, tag + QStringLiteral(" applyLinuxRunModes is idempotent (%1 entries)").arg(twins));
+    const Strategy *port2 = findByName(again, port->name);
+    check(port2 && port2->weight == port->weight && port2->argv == port->argv,
+          tag + QStringLiteral(" and leaves the entry it made alone"));
 }
 
 int main(int argc, char **argv)
@@ -600,19 +717,139 @@ int main(int argc, char **argv)
     check(z != nullptr, "sysv 'zapret' present");
     if (z)
     {
+        // The init script's rank is not a constant: it depends on whether the tree was ever
+        // installed. Asserted from the same predicate the parser reads, so this holds against a
+        // developer's installed tree and against the generated fixture alike; both tiers are pinned
+        // deterministically in the run-mode section below.
+        const bool linInstalled = ZapretPaths::isLinuxInstalled(linuxRoot);
         check(z->kind == Strategy::Kind::ShellScript, "zapret is ShellScript");
-        check(z->weight == 100, "zapret is top-weighted (sysv)");
+        check(z->runMode == Strategy::RunMode::InitScript, "zapret carries RunMode::InitScript");
+        check(z->weight == (linInstalled ? 100 : 30),
+              QStringLiteral("zapret weight matches the install state (installed=%1 -> w=%2)")
+                  .arg(linInstalled)
+                  .arg(z->weight));
         check(z->filePath.contains("sysv"), "selected the sysv copy");
         check(z->executablePath == "pkexec", "shell script uses pkexec");
         check(z->requiresRoot, "shell script requires root");
     }
     check(findByName(lin, "install_easy") == nullptr, "install_easy.sh excluded");
     check(findByName(lin, "blockcheck") == nullptr, "blockcheck.sh excluded");
+
+    // The packaged payload lives in binaries/, which the tree walk never enters, so the parser has to
+    // synthesize it. It is offered whatever the install state: a GUI that hides the only thing that
+    // can start is worse than one that ranks it third.
+    const QString packagedNfqws = ZapretPaths::nfqwsPath(linuxRoot);
+    const Strategy *port = findByName(lin, QStringLiteral("nfqws (portable)"));
+    check(port != nullptr || packagedNfqws.isEmpty(),
+          QStringLiteral("portable strategy present (%1)").arg(port ? "yes" : "no packaged nfqws"));
+    if (port)
+    {
+        check(!packagedNfqws.isEmpty(), "packaged nfqws was located for the portable entry");
+        check(port->kind == Strategy::Kind::Binary, "portable entry is a Binary (DirectBinary)");
+        check(port->runMode == Strategy::RunMode::PortableNfqws,
+              "portable entry carries RunMode::PortableNfqws");
+        check(port->weight == 50, "portable entry is mid-weighted (50)");
+        check(port->requiresRoot, "portable entry requires root");
+        check(samePath(port->filePath, packagedNfqws), "portable entry points at binaries/<arch>/nfqws");
+        check(port->primaryArg.isEmpty(), "portable entry wraps nothing: no primaryArg");
+        check(samePath(port->workingDirectory, linuxRoot),
+              "portable entry runs from the tree root, not from binaries/<arch>");
+        check(port->argv == portableNfqwsDefaultArgs(),
+              "portable entry seeds argv with the shared default flags");
+        if (z)
+        {
+            const bool linInstalled = ZapretPaths::isLinuxInstalled(linuxRoot);
+            // Positions, not pointers: the weights alone say which entry should be first.
+            const int zi = indexOfName(lin, z->name), pi = indexOfName(lin, port->name);
+            check(zi >= 0 && pi >= 0, "both linux bring-ups are in the presented list");
+            check(linInstalled ? zi < pi : pi < zi,
+                  linInstalled ? "installed tree ranks the init script above portable"
+                               : "unpacked tree ranks portable above a script that cannot start");
+        }
+    }
+
     bool sorted = true;
     for (int i = 1; i < lin.size(); ++i)
         if (lin[i].weight > lin[i - 1].weight)
             sorted = false;
     check(sorted, "linux results ordered by descending weight");
+
+    // ---- portable-mode vocabulary: the numbers both halves must agree on ----
+    out << "\n[portable vocabulary]\n";
+    {
+        const QStringList defs = portableNfqwsDefaultArgs();
+        check(defs.contains(QStringLiteral("--qnum=%1").arg(kPortableNfQueueNum)),
+              "default argv binds the shared queue number");
+        check(defs.contains(QStringLiteral("--dpi-desync-fwmark=%1")
+                                 .arg(QLatin1String(kPortableNfDesyncMark))),
+              "default argv stamps the shared desync mark");
+        check(defs.contains(QStringLiteral("--filter-tcp=80,443")),
+              "default argv filters tcp 80,443 (from portablePorts)");
+        check(defs.contains(QStringLiteral("--filter-udp=80,443")),
+              "default argv filters udp 80,443 (from portablePorts)");
+        check(portablePorts().size() == 4, "portablePorts holds tcp+udp on 80 and 443");
+        // The backend re-reads the queue from argv instead of assuming it, so a user who edits
+        // --qnum= in the GUI gets the firewall moved with it. Last occurrence wins, as with getopt.
+        check(portableQueueNum(defs) == kPortableNfQueueNum, "default argv round-trips its queue");
+        check(portableQueueNum(QStringList{}) == kPortableNfQueueNum,
+              "no --qnum falls back to the default");
+        check(portableQueueNum({QStringLiteral("--qnum=1"), QStringLiteral("--qnum=7")}) == 7,
+              "the last --qnum wins");
+        check(portableQueueNum({QStringLiteral("--qnum=0")}) == 0, "queue 0 is accepted");
+        check(portableQueueNum({QStringLiteral("--qnum=65535")}) == 65535, "the top of the range holds");
+        for (const QString &bad : {QStringLiteral("--qnum=65536"), QStringLiteral("--qnum="),
+                                   QStringLiteral("--qnum=abc"), QStringLiteral("--qnum=200x"),
+                                   QStringLiteral("--qnum=-1"), QStringLiteral("-qnum=9")})
+            check(portableQueueNum({bad}) == kPortableNfQueueNum,
+                  QStringLiteral("%1 is rejected, not interpolated into a root shell script").arg(bad));
+    }
+
+    // ---- run modes: both install states, on trees built for the purpose ----
+    out << "\n[run modes: unpacked vs installed]\n";
+    {
+        QTemporaryDir unpackedTmp, installedTmp, noPayTmp;
+        check(unpackedTmp.isValid() && installedTmp.isValid() && noPayTmp.isValid(),
+              "run-mode fixture directories created");
+        const QString up = unpackedTmp.filePath(QStringLiteral("linux"));
+        const QString ins = installedTmp.filePath(QStringLiteral("linux"));
+        const QString noPay = noPayTmp.filePath(QStringLiteral("linux"));
+        check(makeLinuxTree(up, false), "unpacked tree written");
+        check(makeLinuxTree(ins, true), "installed tree written");
+        checkRunModes(up, false);
+        checkRunModes(ins, true);
+
+        // Install state is the only difference between the two verdicts above, so prove the flip on a
+        // single tree: the same directory before and after nfq/nfqws appears, which is precisely what
+        // install_easy.sh / install_bin.sh is for.
+        {
+            const QList<Strategy> before = StrategyParser::parseTree(up, Strategy::Platform::Linux, 3);
+            const Strategy *bInit = findByName(before, QStringLiteral("zapret"));
+            check(bInit && bInit->weight == 30, "same tree: the init script starts at 30");
+            check(!makeScript(up + QLatin1String("/nfq/nfqws"), QStringLiteral("echo up\n")).isEmpty(),
+                  "same tree: the installed daemon binary created");
+            check(ZapretPaths::isLinuxInstalled(up), "same tree: now detected as installed");
+
+            const QList<Strategy> after = StrategyParser::parseTree(up, Strategy::Platform::Linux, 3);
+            const Strategy *aInit = findByName(after, QStringLiteral("zapret"));
+            check(aInit && aInit->weight == 100, "same tree: the daemon ranks first again");
+            check(aInit && aInit->description.isEmpty(),
+                  "same tree: and no longer warns about being uninstalled");
+            check(findByName(after, QStringLiteral("nfqws (portable)")) != nullptr,
+                  "same tree: portable mode stays offered after an install");
+        }
+
+        // A tree carrying no packaged payload cannot offer portable mode: the GUI would only be able
+        // to start something that cannot exec.
+        {
+            check(makeLinuxTree(noPay, false, /*payload=*/false), "payload-less tree written");
+            check(ZapretPaths::nfqwsPath(noPay).isEmpty(), "payload-less tree has no nfqws to find");
+            const QList<Strategy> list = StrategyParser::parseTree(noPay, Strategy::Platform::Linux, 3);
+            check(findByName(list, QStringLiteral("nfqws (portable)")) == nullptr,
+                  "payload-less tree offers no portable card");
+            check(findByName(list, QStringLiteral("zapret")) != nullptr,
+                  "payload-less tree still offers the init script");
+        }
+    }
 
     // ---- locator ----
     out << "\n[ZapretLocator]\n";
@@ -1002,6 +1239,405 @@ int main(int argc, char **argv)
             check(stoppedCount == 1, "strategyStopped fired once when the child exited");
             check(mgr.activeStrategyId().isEmpty() && mgr.activeStrategy() == nullptr,
                   "nothing stays active after the run ends");
+        }
+
+        // ---- (8) portable mode: the full three-phase state machine ----
+        //
+        // $ZAPRET_GUI_FIREWALL_PROG replaces the "pkexec /bin/sh -c <rules>" prefix, so the firewall
+        // half of a portable run is driven by a stand-in that records the generated script and then
+        // succeeds, fails or sleeps on command. Nothing here can touch this machine's kernel: the real
+        // iptables is never exec'd, and no polkit prompt is raised. The nfqws half is the same kind of
+        // throwaway /bin/sh child the tests above use.
+        out << "\n[backends: portable mode]\n";
+
+        // The wrapper is exec'd as `<wrapper> /bin/sh -c <script>`, so the script it must echo is $3.
+        auto makeFirewallDouble = [&](const QString &name, const QString &log, int exitCode,
+                                     int delaySec) {
+            QString body;
+            if (delaySec > 0)
+                body += QStringLiteral("sleep %1\n").arg(delaySec);
+            body += QStringLiteral("printf '%s\\n' \"$3\" >> '%1'\n").arg(log);
+            body += QStringLiteral("exit %1\n").arg(exitCode);
+            return makeScript(tmp.filePath(name), body);
+        };
+        auto readFileText = [](const QString &path) {
+            QFile f(path);
+            return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+        };
+        // The strategy the parser synthesizes for an unpacked tree, pointed at a fake payload: kind,
+        // runMode and argv are the parser's own output shape, only the program is swapped out.
+        auto portableStrategy = [](const QString &id, const QString &payload, bool root) {
+            Strategy s = fakeDirectStrategy(id, payload, Strategy::Platform::Linux);
+            s.runMode = Strategy::RunMode::PortableNfqws;
+            s.argv = portableNfqwsDefaultArgs();
+            s.requiresRoot = root;
+            return s;
+        };
+
+        const QString fwUpLog = tmp.filePath(QStringLiteral("firewall-up.log"));
+        const QString firewallOk = makeFirewallDouble(QStringLiteral("fake-firewall-ok.sh"),
+                                                      fwUpLog, 0, 0);
+        check(!firewallOk.isEmpty(), "firewall stand-in written");
+
+        // (8a) The happy path: rules, then nfqws, then — on stop — nfqws, then rules.
+        {
+            using S = IZapretBackend::State;
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", firewallOk.toLocal8Bit());
+            QFile::remove(fwUpLog);
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = portableStrategy(QStringLiteral("portable-live"), live, false);
+
+            QString err;
+            check(lb.start(s, &err), QStringLiteral("portable start accepted (%1)").arg(err));
+            check(lb.state() == S::Starting, "a portable run sits in Starting while the rules go in");
+            check(!probe->sawState(S::Running), "the firewall command alone is never 'Running'");
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 8000),
+                  "queue first, then payload: the backend reaches Running");
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("nfqws-fake up")); }, 3000),
+                  "nfqws really exec'd, with the queue already in place");
+            check(lb.isRunning(), "portable mode reports running only while nfqws is the live child");
+
+            // The user has to be able to explain every authorisation prompt they are shown.
+            check(probe->sawLog(QStringLiteral("portable mode: payload")), "the run announces itself");
+            check(probe->sawLog(QStringLiteral("insert iptables rules in mangle OUTPUT")),
+                  "the firewall step says what it will do before the prompt, not after");
+            check(probe->sawLog(QStringLiteral("nfqueue rules installed")), "and what it did afterwards");
+
+            // What was actually handed to the kernel-side command: the load-bearing properties of
+            // portable mode, asserted on the generated text rather than on the code that writes it.
+            const QString up = readFileText(fwUpLog);
+            check(!up.isEmpty(), "the firewall stand-in was invoked");
+            check(up.contains(QStringLiteral("insert nfqueue rules")), "with the insert variant");
+            check(up.contains(QStringLiteral("Q=200")), "on the shared queue number");
+            check(up.contains(QStringLiteral("M=0x40000000")), "with the shared anti-loop mark");
+            check(up.contains(QStringLiteral("-t mangle -C OUTPUT")),
+                  "each rule is probed before it is added, so a repeated start cannot duplicate it");
+            check(up.contains(QStringLiteral("-I OUTPUT 1")), "and inserted at the top, as upstream does");
+            check(up.contains(QStringLiteral("--queue-bypass")),
+                  "every rule carries --queue-bypass: a dead nfqws cannot black-hole traffic");
+            check(up.contains(QStringLiteral("-w5")), "the xtables lock wait is bounded, not infinite");
+            for (const QString &needle : {QStringLiteral("-p tcp --dport 80"),
+                                          QStringLiteral("-p tcp --dport 443"),
+                                          QStringLiteral("-p udp --dport 80"),
+                                          QStringLiteral("-p udp --dport 443")})
+                check(up.contains(needle), QStringLiteral("the rule set steers %1").arg(needle));
+
+            // IPv6 must mirror IPv4 exactly: same ports, same queue, same mark, same --queue-bypass.
+            // The rules are driven through ip6tables, and the binary is resolved the same guarded way
+            // iptables is so a host without ip6tables skips the v6 block instead of failing the run.
+            check(up.contains(QStringLiteral("/usr/sbin/ip6tables")),
+                  "the script probes for ip6tables alongside iptables");
+            check(up.contains(QStringLiteral("if [ -n \"$IP6T\" ]; then")),
+                  "the v6 rules are guarded, so an absent ip6tables is skipped, not fatal");
+            check(up.count(QStringLiteral("op \"$IPT\"")) == 4,
+                  "exactly four IPv4 rules are issued");
+            check(up.count(QStringLiteral("op \"$IP6T\"")) == 4,
+                  "exactly four IPv6 rules, mirroring the IPv4 set");
+            for (const QString &needle : {QStringLiteral("op \"$IP6T\" -p tcp --dport 80"),
+                                          QStringLiteral("op \"$IP6T\" -p tcp --dport 443"),
+                                          QStringLiteral("op \"$IP6T\" -p udp --dport 80"),
+                                          QStringLiteral("op \"$IP6T\" -p udp --dport 443")})
+                check(up.contains(needle),
+                      QStringLiteral("the v6 rule set steers %1").arg(needle));
+            // Symmetry: the v6 lines carry the very same queue/mark/bypass tail as the v4 lines.
+            for (const QString &port : {QStringLiteral("80"), QStringLiteral("443")})
+            {
+                const QString tail = QStringLiteral(
+                    "-m mark ! --mark $M/$M -j NFQUEUE --queue-num $Q --queue-bypass");
+                check(up.contains(QStringLiteral("op \"$IPT\" -p tcp --dport %1 %2").arg(port, tail)) &&
+                          up.contains(QStringLiteral("op \"$IP6T\" -p tcp --dport %1 %2").arg(port, tail)),
+                      QStringLiteral("tcp/%1 is steered identically in both families").arg(port));
+            }
+
+            lb.stop();
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 8000),
+                  "stop takes nfqws down and then the rules");
+            check(probe->sawLog(QStringLiteral("nfqws stopped on request")),
+                  "a requested kill is not dressed up as a crash");
+            check(probe->sawLog(QStringLiteral("nfqueue rules removed")), "and the rules go with it");
+            check(!probe->sawState(S::Error), "a clean portable cycle never passes through Error");
+            check(probe->errors().isEmpty(), "and reports no error at all");
+            check(!lb.isRunning(), "nothing is managed afterwards");
+
+            const QString both = readFileText(fwUpLog);
+            check(both.contains(QStringLiteral("remove nfqueue rules")), "the delete variant ran too");
+            check(both.contains(QStringLiteral("-D OUTPUT")), "the teardown deletes rather than inserts");
+            check(both.indexOf(QStringLiteral("insert nfqueue rules")) >= 0 &&
+                      both.indexOf(QStringLiteral("remove nfqueue rules")) >
+                          both.indexOf(QStringLiteral("insert nfqueue rules")),
+                  "insert precedes delete: the queue exists for the whole life of nfqws");
+            check(both.count(QStringLiteral("insert nfqueue rules")) == 1 &&
+                      both.count(QStringLiteral("remove nfqueue rules")) == 1,
+                  "exactly one insert and one delete per run");
+
+            pumpFor(150);
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8b) stop() pressed while the insert command is still in flight. Killing a shell mid-script
+        // is the one way to leave the rule set undescribable, so the stop is queued instead: the run
+        // tears down as a unit and nfqws is never exec'd.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-queued.log"));
+            const QString slow = makeFirewallDouble(QStringLiteral("fake-firewall-slow.sh"), fwLog, 0, 2);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", slow.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            QString err;
+            check(lb.start(portableStrategy(QStringLiteral("portable-queued-stop"), live, false), &err),
+                  QStringLiteral("queued-stop: start accepted (%1)").arg(err));
+            check(lb.state() == S::Starting, "queued-stop: still Starting when stop() arrives");
+
+            lb.stop();
+            check(probe->sawLog(QStringLiteral("stop queued until the firewall command returns")),
+                  "queued-stop: the request is queued, not forced");
+            check(lb.state() == S::Stopping, "queued-stop: state moves to Stopping at once");
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 12000),
+                  "queued-stop: the run still reaches Stopped");
+            check(!probe->sawState(S::Running), "queued-stop: nfqws never came up");
+            check(!probe->sawLog(QStringLiteral("nfqws-fake up")), "queued-stop: no payload was exec'd");
+            check(probe->sawLog(QStringLiteral("removing the rules without starting nfqws")),
+                  "queued-stop: the teardown says what it is doing");
+            check(probe->errors().isEmpty(), "queued-stop: a queued stop is not an error");
+
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("insert nfqueue rules")) &&
+                      txt.contains(QStringLiteral("remove nfqueue rules")),
+                  "queued-stop: the rules that went in came back out");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+            pumpFor(100);
+        }
+
+        // (8c) The insert command fails. Nothing was bound to a queue, so no nfqws and, deliberately,
+        // no teardown command either: a second prompt that cannot succeed is noise.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-fails.log"));
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-fail.sh"), fwLog, 4, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            QString err;
+            check(lb.start(portableStrategy(QStringLiteral("portable-fw-fails"), live, false), &err),
+                  QStringLiteral("fw-fails: start accepted (%1)").arg(err));
+            check(pumpUntil([&] { return lb.state() == S::Error; }, 8000),
+                  "fw-fails: a failed insert ends the run in Error");
+            check(probe->sawLog(QStringLiteral("firewall setup failed")), "fw-fails: and says what failed");
+            check(probe->sawLog(QStringLiteral("nfqws was not started")),
+                  "fw-fails: the user learns the payload never ran");
+            check(!probe->sawState(S::Running), "fw-fails: nothing claims to be running");
+            check(probe->errors().size() == 1, "fw-fails: exactly one error is reported");
+            check(!lb.isRunning(), "fw-fails: no phantom process is tracked");
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("insert nfqueue rules")), "fw-fails: the insert was attempted");
+            check(!txt.contains(QStringLiteral("remove nfqueue rules")),
+                  "fw-fails: no delete is issued for rules that do not exist");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8d) nfqws dies by itself after the queue went in. The rules must not outlive it: the
+        // teardown runs first and the original failure is reported afterwards.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-after-exit.log"));
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-exit.sh"), fwLog, 0, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = portableStrategy(QStringLiteral("portable-payload-exits"), failing, false);
+            QString err;
+            check(lb.start(s, &err), QStringLiteral("payload-exit: start accepted (%1)").arg(err));
+            check(pumpUntil([&] { return lb.state() == S::Error; }, 8000),
+                  "payload-exit: a non-zero nfqws exit ends in Error");
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("nfqueue rules removed")); }, 8000),
+                  "payload-exit: and the queue is torn down on the way out");
+            check(probe->sawLog(QStringLiteral("nfqws exited with code 3")),
+                  "payload-exit: nfqws' own exit code is what gets reported");
+            check(probe->errors().size() == 1, "payload-exit: exactly one error, not one per phase");
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("remove nfqueue rules")),
+                  "payload-exit: the delete really was issued for the rules that went in");
+            check(txt.indexOf(QStringLiteral("insert nfqueue rules")) <
+                      txt.indexOf(QStringLiteral("remove nfqueue rules")),
+                  "payload-exit: insert first, delete after");
+            check(!lb.isRunning(), "payload-exit: nothing is left managed");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8e) nfqws cannot be exec'd at all. The rules went in, so they have to come back out even
+        // though no payload ever ran — the FailedToStart path, not the finished() one.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-after-nostart.log"));
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-nostart.sh"), fwLog, 0, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = portableStrategy(QStringLiteral("portable-no-exec"), live, false);
+            // A bare name skips the synchronous existence check and reaches QProcess::FailedToStart,
+            // which is how a missing payload behaves in the field.
+            s.executablePath = QStringLiteral("zapret-nonexistent-nfqws");
+            s.filePath = s.executablePath;
+
+            QString err;
+            check(lb.start(s, &err), QStringLiteral("no-exec: start accepted (%1)").arg(err));
+            check(pumpUntil([&] { return lb.state() == S::Error; }, 8000),
+                  "no-exec: an unlaunchable payload ends in Error");
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("nfqueue rules removed")); }, 8000),
+                  "no-exec: the rules it never got to use are removed anyway");
+            check(probe->errors().size() == 1 &&
+                      probe->errors().first().contains(QStringLiteral("failed to start"),
+                                                       Qt::CaseInsensitive),
+                  "no-exec: the report is the launch failure, not the cleanup");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8f) The queue the rules use is the queue argv asks for. A user who edits --qnum= in the GUI
+        // gets the firewall moved with it: that round trip is the whole point of PortableMode.h.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-custom-qnum.log"));
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-qnum.sh"), fwLog, 0, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = portableStrategy(QStringLiteral("portable-qnum"), live, false);
+            s.argv << QStringLiteral("--qnum=1234");   // last occurrence wins, as with getopt_long
+            QString err;
+            check(lb.start(s, &err), QStringLiteral("qnum: start accepted (%1)").arg(err));
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 8000), "qnum: the run comes up");
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("Q=1234")), "qnum: the rules use the queue from argv");
+            check(txt.contains(QStringLiteral("portable mode (queue 1234)")),
+                  "qnum: and say so in the script that was run");
+            check(!txt.contains(QStringLiteral("Q=200")), "qnum: and not the default one");
+            check(probe->sawLog(QStringLiteral("into NFQUEUE 1234")),
+                  "qnum: the text the user authorises names the same number");
+            check(probe->sawLog(QStringLiteral("portable mode: payload")),
+                  "qnum: the run announces the queue it is binding");
+            lb.stop();
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 8000), "qnum: and stops clean");
+            check(probe->errors().isEmpty(), "qnum: a custom queue still stops without an error");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8g) The elevation gate holds for portable mode too, and holds BEFORE anything is composed:
+        // an unreachable polkit agent must not leave a half-installed queue behind.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-gated.log"));
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-gated.sh"), fwLog, 0, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            Strategy s = portableStrategy(QStringLiteral("portable-needs-root"), live, true);
+            QString err;
+            const bool accepted = lb.start(s, &err);
+            if (PrivilegeHelper::isElevated())
+            {
+                check(accepted, "gate: running as root is not blocked");
+                pumpUntil([&] { return lb.state() == S::Running; }, 8000);
+                lb.stop();
+                pumpUntil([&] { return lb.state() == S::Stopped; }, 8000);
+            }
+            else
+            {
+                check(!accepted, "gate: non-root without an agent is refused before anything spawns");
+                check(err.contains(QStringLiteral("polkit")) || err.contains(QStringLiteral("root")),
+                      "gate: the refusal says why");
+                check(lb.state() == S::Error, "gate: the refusal leaves the backend in Error");
+                check(probe->errors().size() == 1, "gate: one error, logged once");
+                check(!QFile::exists(fwLog), "gate: no firewall command ran for a refused start");
+            }
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8h) One portable run at a time. A second start is refused while one is in flight — the
+        // queue and the payload are per-backend resources, and stacking a second pair of rules on the
+        // same queue number would leave the first run's teardown unable to describe what it removed.
+        {
+            using S = IZapretBackend::State;
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", firewallOk.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            QString err;
+            check(lb.start(portableStrategy(QStringLiteral("portable-first"), live, false), &err),
+                  "double-start: the first run is accepted");
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 8000),
+                  "double-start: and comes up");
+
+            QString err2;
+            check(!lb.start(portableStrategy(QStringLiteral("portable-second"), live, false), &err2),
+                  "double-start: a second start is refused");
+            check(err2.contains(QStringLiteral("already in progress"), Qt::CaseInsensitive),
+                  "double-start: the refusal says why");
+            check(probe->errors().size() == 1, "double-start: and reports that refusal once");
+
+            lb.stop();
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 8000),
+                  "double-start: the refused request left the first run stoppable");
+            check(!lb.isRunning(), "double-start: and it stopped");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+        }
+
+        // (8i) The same failure seen through ZapretManager — the seam the GUI actually subscribes to.
+        // The manager forwards the backend's stateChanged *before* its own bookkeeping slot clears the
+        // active strategy, so by the time a deferred error is announced nothing answers "which run
+        // failed?". MainWindow keeps the id of the last live run for exactly that question; this pins
+        // the ordering its fallback depends on, so the two cannot drift apart silently.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-manager.log"));
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-manager.sh"), fwLog, 0, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            ZapretManager mgr;
+            QStringList errorMsgs;
+            QStringList idsAtError;
+            int errorsBeforeStop = 0;
+            int stopCount = 0;
+            QObject::connect(&mgr, &ZapretManager::errorOccurred, [&](const QString &m) {
+                errorMsgs << m;
+                idsAtError << mgr.activeStrategyId();
+            });
+            QObject::connect(&mgr, &ZapretManager::strategyStopped, [&] {
+                errorsBeforeStop = errorMsgs.size();
+                ++stopCount;
+            });
+
+            QString err;
+            check(mgr.start(portableStrategy(QStringLiteral("portable-mgr"), failing, false), &err),
+                  QStringLiteral("manager-run: start accepted (%1)").arg(err));
+            check(mgr.activeStrategyId() == QLatin1String("portable-mgr"),
+                  "manager-run: the run is named while it is up");
+
+            check(pumpUntil([&] { return !errorMsgs.isEmpty(); }, 10000),
+                  "manager-run: the deferred failure does reach the GUI's channel");
+            check(errorMsgs.size() == 1 &&
+                      errorMsgs.first().contains(QStringLiteral("nfqws exited with code 3")),
+                  "manager-run: one error, and it is nfqws' own, not the cleanup's");
+            check(mgr.state() == S::Error, "manager-run: the facade reports Error");
+            check(stopCount == 1, "manager-run: strategyStopped fired exactly once");
+            check(idsAtError.first().isEmpty(),
+                  "manager-run: activeStrategyId() is already empty when the error lands");
+            check(errorsBeforeStop == 0,
+                  "manager-run: strategyStopped fired first — the run is forgotten one signal early");
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("remove nfqueue rules")),
+                  "manager-run: the queue was torn down before anything was announced");
+            check(mgr.isRunning() == false, "manager-run: nothing is managed afterwards");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+            pumpFor(100);
         }
     }
 #else

@@ -33,6 +33,10 @@ public:
     static QString openrcScriptPath(const QString &root);    // init.d/openrc/zapret
     static QString systemdUnitPath(const QString &root);     // init.d/systemd/zapret.service
     static QString configDefaultPath(const QString &root);   // config.default
+    static QString nfqwsBuiltPath(const QString &root);       // nfq/nfqws  (what the init scripts exec)
+    // True when the linux tree is INSTALLED, i.e. its sysv/openrc init script can actually bring the
+    // daemon up. See the definition for the exact on-disk condition.
+    static bool isLinuxInstalled(const QString &root);
     static QString binariesDir(const QString &root);         // binaries/
 
     // The arch directory name that matches the host, e.g. "linux-x86_64". Empty if we can't map

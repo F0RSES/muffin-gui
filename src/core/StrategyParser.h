@@ -44,6 +44,29 @@ public:
                                      Strategy::Platform platform = Strategy::Platform::Unknown,
                                      int maxDepth = 3);
 
+    // ---- Linux bring-up procedures (portable mode) ----
+    //
+    // A linux tree exposes two genuinely different ways to bring zapret up, and which one WORKS
+    // depends on whether the tree was installed. This pass labels every linux strategy with its
+    // Strategy::RunMode and re-weights it accordingly:
+    //
+    //   * the sysv/openrc "zapret" script   -> RunMode::InitScript
+    //         weight 100 when the tree is installed (ZapretPaths::isLinuxInstalled), so the documented
+    //         one-click daemon stays first; weight 30 when it is not, because `pkexec <script> start`
+    //         is then guaranteed to fail (it execs <root>/nfq/nfqws, which an unpacked tree does not have).
+    //   * <root>/binaries/<arch>/nfqws      -> RunMode::PortableNfqws, weight 50, created here.
+    //         `binaries` is an excluded dir, so the tree walk never finds this payload; the strategy is
+    //         synthesized from ZapretPaths::nfqwsPath() instead. It carries portableNfqwsDefaultArgs()
+    //         in argv, which is what makes it runnable without the user typing flags.
+    //
+    // Both are always emitted when both are possible: the GUI then shows a working option whatever the
+    // install state, and the weights merely decide which one floats to the top.
+    //
+    // Windows strategies are left untouched. Safe to call repeatedly (it matches on filePath).
+    static void applyLinuxRunModes(QList<Strategy> &strategies, const QString &rootPath,
+                                   Strategy::Platform platform = Strategy::Platform::Unknown);
+
+
     // Fills in executablePath / primaryArg / workingDirectory / profileTemplate / requiresRoot.
     static void applyDefaults(QList<Strategy> &strategies, const QString &rootPath,
                               Strategy::Platform platform);

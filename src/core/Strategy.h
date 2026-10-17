@@ -50,6 +50,30 @@ struct Strategy
         Binary        // direct nfqws / winws payload invocation (DirectBinary)
     };
 
+    // Which procedure a LINUX strategy must be brought up by. Kind says WHAT is on disk (a script or a
+    // binary); RunMode says HOW the backend owns its lifecycle, because two Linux Kind::Binary entries
+    // are not the same operation:
+    //
+    //   Default        — no linux-specific decision recorded: windows entries, systemd units and the
+    //                    hand-built strategies of the tests. The backend behaves exactly as kind alone
+    //                    implies, i.e. precisely as it did before portable mode existed.
+    //   InitScript     — the sysv/openrc "zapret" script starts a BACKGROUND daemon and returns, so the
+    //                    backend only runs `pkexec <script> start|stop` and derives state from the exit
+    //                    code. Mirrors Kind::ShellScript; the backend still detects the controller form
+    //                    from kind, so a strategy that only sets kind keeps working.
+    //   PortableNfqws  — the tree was merely unpacked (no install_easy.sh/install_bin.sh ran): its init
+    //                    script refuses to start because <root>/nfq/nfqws does not exist. The backend
+    //                    instead execs binaries/<arch>/nfqws as a FOREGROUND child it manages, and owns
+    //                    the nfqueue rules around it (iptables mangle OUTPUT -> NFQUEUE, with
+    //                    --queue-bypass so a dead nfqws never blackholes traffic) for the lifetime of
+    //                    that child.
+    enum class RunMode
+    {
+        Default,
+        InitScript,
+        PortableNfqws
+    };
+
     QString id;                // stable unique id (defaults to filePath)
     QString name;              // display name, e.g. "general", "general (ALT5)"
     QString description;       // one-line human summary for the list view ("" until populated)
@@ -59,6 +83,10 @@ struct Strategy
 
     Kind kind = Kind::Unknown;
     Platform platform = Platform::Unknown;
+    // Linux only: which bring-up procedure the backend follows for this entry. Set by StrategyParser
+    // (InitScript for the sysv/openrc script, PortableNfqws for a self-managed binaries/<arch>/nfqws).
+    // Default leaves the behaviour dictated by kind alone.
+    RunMode runMode = RunMode::Default;
 
     // Filled by StrategyParser::applyDefaults() (the "wrapper" launch form):
     QString executablePath;    // program to exec ("cmd.exe", "pkexec", the binary, ...)

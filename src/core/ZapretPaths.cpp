@@ -72,6 +72,28 @@ QString ZapretPaths::sysvScriptPath(const QString &root) { return rel(root, QStr
 QString ZapretPaths::openrcScriptPath(const QString &root) { return rel(root, QStringLiteral("init.d/openrc/zapret")); }
 QString ZapretPaths::systemdUnitPath(const QString &root) { return rel(root, QStringLiteral("init.d/systemd/zapret.service")); }
 QString ZapretPaths::configDefaultPath(const QString &root) { return rel(root, QStringLiteral("config.default")); }
+QString ZapretPaths::nfqwsBuiltPath(const QString &root) { return rel(root, QStringLiteral("nfq/nfqws")); }
+
+bool ZapretPaths::isLinuxInstalled(const QString &root)
+{
+    // "Installed" here means one specific, observable thing: the sysv/openrc init script, when asked
+    // to start, will find the binary it execs. init.d/sysv/functions hardcodes
+    //
+    //   NFQWS="$ZAPRET_BASE/nfq/nfqws"
+    //
+    // and $ZAPRET_BASE resolves to the tree root (readlink of init.d/<form>/../..). A freshly
+    // unpacked tree ships nfq/ as *sources only* (Makefile, *.c, *.h), so the script's start path
+    // fails with "nfqws not found" even though everything else is in place. nfq/nfqws existing and
+    // being executable is therefore exactly the condition that separates a working InitScript
+    // strategy from one that is guaranteed to fail, and install_bin.sh / install_easy.sh are what
+    // create it.
+    //
+    // Deliberately NOT consulted: /etc/init.d/zapret or systemctl state. Those say the service is
+    // registered, which the GUI does not care about — it cares whether `pkexec <script> start` works.
+    const QFileInfo fi(nfqwsBuiltPath(root));
+    return fi.exists() && fi.isFile() && fi.isExecutable();
+}
+
 QString ZapretPaths::binariesDir(const QString &root) { return rel(root, QStringLiteral("binaries")); }
 
 bool ZapretPaths::isWindowsRoot(const QString &root)
