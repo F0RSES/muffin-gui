@@ -45,6 +45,14 @@ public:
     void setRunning(bool running);
     bool isRunning() const { return m_running; }
 
+    // Take the action away without changing which action the button offers. A backend serves one
+    // operation at a time, so while a start or a teardown is in flight the window greys every control
+    // that could ask for another; `reason` goes into the button's tooltip because a control that just
+    // stops reacting reads as a freeze, which is what this looks like for the ten seconds an iptables
+    // teardown under pkexec can take. Relabelling (setRunning, setError) never re-enables on its own.
+    void setActionEnabled(bool enabled, const QString &reason = QString());
+    bool isActionEnabled() const { return m_actionEnabled; }
+
     // ---- failure surface -----------------------------------------------------
     // Show `message` in the card's error badge (an empty message clears it). The badge elides to the
     // available width; errorMessage() always returns the full text.
@@ -94,6 +102,7 @@ private:
     QPropertyAnimation *m_shadowAnim = nullptr;
 
     bool m_running = false;
+    bool m_actionEnabled = true;   // mirrors the button, and survives a relabel
 };
 
 } // namespace zapret

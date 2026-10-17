@@ -267,6 +267,20 @@ void StrategyCard::setRunning(bool running)
     setActive(running);
 }
 
+void StrategyCard::setActionEnabled(bool enabled, const QString &reason)
+{
+    m_actionEnabled = enabled;
+    if (!m_button)
+        return;
+    if (m_button->isEnabled() != enabled)
+        m_button->setEnabled(enabled);
+    // The reason belongs on the button, not only in the log: this is the control the user just reached
+    // for, and an empty tooltip on a live one would suggest the card is broken.
+    const QString wanted = enabled ? QString() : reason;
+    if (m_button->toolTip() != wanted)
+        m_button->setToolTip(wanted);
+}
+
 void StrategyCard::refreshButton()
 {
     QString text;

@@ -525,6 +525,36 @@ static void testStrategyCard()
     check(badge->toolTip() == longReason, "the tooltip can show all of it");
     card.clearError();
     check(!card.hasError() && badgeRow->isHidden(), "clearError hides the badge row again");
+
+    // ---- action gating ----
+    // The window greys a card out while another operation is in flight. Three things have to hold: only
+    // availability changes (the card still offers the action it was offering), the reason rides on the
+    // control the user just reached for, and neither a relabel nor a failure badge can quietly bring the
+    // button back — a card that re-enables itself mid-teardown is the ten-second bug this exists to stop.
+    check(card.isActionEnabled(), "a card is not gated by default");
+    check(button->isEnabled(), "and its button starts live");
+
+    const QString busy = QStringLiteral("Идёт остановка — дождитесь её завершения.");
+    card.setActionEnabled(false, busy);
+    check(!button->isEnabled(), "the window can take the card's action away");
+    check(!card.isActionEnabled(), "and the card reports that it has");
+    check(button->toolTip() == busy, "a greyed button carries the reason");
+
+    card.setRunning(true);
+    check(button->text() == QStringLiteral("Остановить"), "gating leaves the label alone");
+    check(!button->isEnabled(), "becoming the active card does not un-gate it");
+
+    card.setRunning(false);
+    card.setError(reason);
+    check(button->text() == QStringLiteral("Повторить"), "and a failure badge still only relabels");
+    check(!button->isEnabled(), "without unlocking the retry");
+    check(button->toolTip() == busy, "and without dropping the reason");
+
+    card.clearError();
+    card.setActionEnabled(true);
+    check(button->isEnabled(), "the action returns when the operation resolves");
+    check(card.isActionEnabled(), "and the card knows it has");
+    check(button->toolTip().isEmpty(), "with the reason taken back off a live button");
 }
 
 // ------------------------------------------------------ tray + policy glue ----
@@ -584,6 +614,49 @@ static void testWindowPolicy()
           "up and down are distinguishable");
     check(MainWindow::statusKind(S::Error) != MainWindow::statusKind(S::Stopped),
           "a failure is not shown as an ordinary stop");
+
+    // ---- the action matrix ----
+    // Every start/stop control in the window is derived from these two predicates, so the whole table IS
+    // the feature. What was missing was one row: a Stopping state that left both the toolbar's
+    // "Остановить" and every card's "Запустить" live for as long as the iptables teardown took, so the
+    // second click ten seconds into a stop either re-issued terminate() or drew the backend's
+    // "an operation is already in progress (stop first)" across a card that had done nothing wrong.
+    check(MainWindow::canStartFrom(S::Stopped), "an idle backend accepts a start");
+    check(MainWindow::canStartFrom(S::Error), "a failure can be retried");
+    check(!MainWindow::canStartFrom(S::Starting), "a launch in flight accepts no other launch");
+    check(!MainWindow::canStartFrom(S::Running), "one strategy at a time");
+    check(!MainWindow::canStartFrom(S::Stopping),
+          "a teardown accepts no start — the reported case");
+
+    check(MainWindow::canStopFrom(S::Running), "a live run can be stopped");
+    check(MainWindow::canStopFrom(S::Starting),
+          "a stuck launch stays cancellable: the backend queues this stop instead of racing it");
+    check(!MainWindow::canStopFrom(S::Stopping), "a stop already under way is not re-issued");
+    check(!MainWindow::canStopFrom(S::Stopped), "nothing to stop when nothing ran");
+    check(!MainWindow::canStopFrom(S::Error), "nor after a failure");
+
+    for (const S s : {S::Stopped, S::Starting, S::Running, S::Stopping, S::Error}) {
+        // A card holds a single button, so a state offering both actions could not be expressed at all.
+        check(!MainWindow::canStartFrom(s) || !MainWindow::canStopFrom(s),
+              "no state offers a start and a stop at the same time");
+        // The sentence a gated control shows must exist exactly when the control is gated, or a greyed
+        // button arrives with an empty tooltip and looks broken rather than busy.
+        check(MainWindow::blockedReason(s).isEmpty() == MainWindow::canStartFrom(s),
+              "a state that accepts a start has nothing to wait for, and one that refuses says why");
+        // The chip is the only part of the window a user reads as "busy" — it must go amber over exactly
+        // the states the buttons are gated by, or the wording and the controls disagree.
+        check((MainWindow::statusKind(s) == QStringLiteral("starting"))
+                  == (s == S::Starting || s == S::Stopping),
+              "the busy chip covers precisely the two in-flight states");
+    }
+
+    check(MainWindow::statusText(S::Stopping, QStringLiteral("nfqws (portable)"))
+              .contains(QStringLiteral("Остановка")),
+          "the chip and the tray tooltip read Остановка… while the teardown runs");
+    check(MainWindow::blockedReason(S::Stopping).contains(QStringLiteral("дождитесь")),
+          "and the reason offered in its place tells the user to wait");
+    check(MainWindow::blockedReason(S::Running).contains(QStringLiteral("остановите")),
+          "while a run is up, the missing action is named as the stop");
 
     // Which card a backend failure belongs to. A pending start owns the answer while the attempt is
     // unresolved; otherwise the live run does; otherwise the window's memory of the last live run —

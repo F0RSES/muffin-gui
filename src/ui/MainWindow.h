@@ -48,6 +48,20 @@ public:
     // QSS dynamic-property value for [statusKind="..."].
     static QString statusKind(IZapretBackend::State state);
 
+    // ---- action gating: pure predicates again, so the whole matrix is checkable without a process ----
+    //
+    // A backend owns one operation at a time. LinuxBackend::start() refuses outright while anything is up
+    // or coming up ("an operation is already in progress (stop first)"), and a portable stop takes as long
+    // as the iptables teardown under pkexec needs — ten seconds in the log that exposed this. For all of
+    // that time the window used to keep both the toolbar's "Остановить" and every card's "Запустить"
+    // clickable, so the only honest answer was an error row and a failure badge on a card that had done
+    // nothing wrong. Greyed out and worded is the fix; the guards in the slots below are the backstop.
+    static bool canStartFrom(IZapretBackend::State state);
+    static bool canStopFrom(IZapretBackend::State state);
+    // Why a start cannot be issued in this state, empty when it can. Doubles as the tooltip of every
+    // control the gating disables, so a greyed button says what it is waiting for.
+    static QString blockedReason(IZapretBackend::State state);
+
     // ---- tray policy, expressed as pure predicates so it is testable without a desktop ----
     // Whether the platform reports a tray host at all (GNOME without an AppIndicator extension, a bare
     // Wayland compositor and a headless session all answer false).

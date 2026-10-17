@@ -55,6 +55,11 @@ QString friendlyHostName(const QString &host)
     return base.left(1).toUpper() + base.mid(1);
 }
 
+// The toolbar stop's standing tooltip. updateStatusUi() replaces it with the reason the action is
+// unavailable while a teardown runs, and has to restore this exact text afterwards — spelling it twice
+// is how the two drift.
+const QString kStopActionHint = QStringLiteral("Остановить запущенную стратегию (Ctrl+Shift+X)");
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -237,7 +242,7 @@ void MainWindow::buildToolBar()
 
     m_stopAction = m_toolBar->addAction(Theme::themedIcon(QStringLiteral("stop"), 16),
                                         QStringLiteral("Остановить"));
-    m_stopAction->setToolTip(QStringLiteral("Остановить запущенную стратегию (Ctrl+Shift+X)"));
+    m_stopAction->setToolTip(kStopActionHint);
     connect(m_stopAction, &QAction::triggered, this, &MainWindow::onStopRequested);
 
     auto *spacer = new QWidget(m_toolBar);
@@ -454,6 +459,63 @@ QString MainWindow::statusKind(IZapretBackend::State state)
     return QStringLiteral("stopped");
 }
 
+bool MainWindow::canStartFrom(IZapretBackend::State state)
+{
+    switch (state) {
+    case IZapretBackend::State::Stopped:
+    case IZapretBackend::State::Error:
+        // Nothing is up and nothing is in flight — including after a failure, which is precisely when
+        // the user needs the retry to stay reachable.
+        return true;
+    case IZapretBackend::State::Starting:
+    case IZapretBackend::State::Running:
+    case IZapretBackend::State::Stopping:
+        break;
+    }
+    // All three in-flight/busy states. Stopping is the one that used to be missed: the payload is gone
+    // or already dying, but the teardown (iptables through pkexec, up to ten seconds in the reported
+    // log) still owns the backend, and start() answers "an operation is already in progress".
+    return false;
+}
+
+bool MainWindow::canStopFrom(IZapretBackend::State state)
+{
+    switch (state) {
+    case IZapretBackend::State::Running:
+        return true;
+    case IZapretBackend::State::Starting:
+        // A launch in flight stays cancellable on purpose: a controller start can hang, and
+        // LinuxBackend queues a stop asked for in this phase ("stop queued until the start command
+        // returns") instead of racing it. Greying this out would leave no way out of a stuck launch.
+        return true;
+    case IZapretBackend::State::Stopped:
+    case IZapretBackend::State::Error:
+    case IZapretBackend::State::Stopping:
+        break;
+    }
+    // Stopping is not a second stop waiting to happen: re-issuing one re-ran "terminating nfqws" ten
+    // seconds after the first, and in the direct-payload path it blocks the GUI in
+    // waitForFinished(3000) for a death that is already under way.
+    return false;
+}
+
+QString MainWindow::blockedReason(IZapretBackend::State state)
+{
+    switch (state) {
+    case IZapretBackend::State::Starting:
+        return QStringLiteral("Идёт запуск — дождитесь его завершения.");
+    case IZapretBackend::State::Stopping:
+        return QStringLiteral("Идёт остановка — дождитесь её завершения.");
+    case IZapretBackend::State::Running:
+        // The missing action here is not another strategy's start but this run's stop.
+        return QStringLiteral("Стратегия уже запущена — сначала остановите её.");
+    case IZapretBackend::State::Stopped:
+    case IZapretBackend::State::Error:
+        break;
+    }
+    return QString();
+}
+
 void MainWindow::updateStatusUi()
 {
     const IZapretBackend::State state = m_manager->state();
@@ -468,10 +530,15 @@ void MainWindow::updateStatusUi()
         m_statusLabel->update();
     }
 
-    const QString titleName = (!name.isEmpty() && state != IZapretBackend::State::Stopped
-                               && state != IZapretBackend::State::Error)
-                                  ? name
-                                  : QStringLiteral("остановлено");
+    // While the teardown runs the title has to say so rather than keep naming the strategy: alt-tabbing
+    // back to "Muffin — nfqws (portable)" is indistinguishable from a live run, and that ten-second gap
+    // is exactly when the second click used to land.
+    QString titleName = QStringLiteral("остановлено");
+    if (state == IZapretBackend::State::Stopping)
+        titleName = QStringLiteral("остановка…");
+    else if (!name.isEmpty() && state != IZapretBackend::State::Stopped
+             && state != IZapretBackend::State::Error)
+        titleName = name;
     setWindowTitle(QStringLiteral("Muffin — %1").arg(titleName));
 
     if (m_dirLabel) {
@@ -482,13 +549,31 @@ void MainWindow::updateStatusUi()
         m_dirLabel->setToolTip(dir);
     }
 
+    // "The run this card belongs to" is shown from the moment it is requested until the teardown
+    // finishes: the manager still names the strategy through both in-flight phases, and a card that
+    // silently fell back to "Запустить" mid-teardown would offer the very action the backend refuses.
     const bool activeIsUp = m_manager->isRunning() || state == IZapretBackend::State::Starting
                             || state == IZapretBackend::State::Stopping;
-    if (m_stopAction)
-        m_stopAction->setEnabled(activeIsUp);
+    const bool canStart = canStartFrom(state);
+    const bool canStop = canStopFrom(state);
+    const QString busy = blockedReason(state);
+
+    if (m_stopAction) {
+        m_stopAction->setEnabled(canStop);
+        // Idle states get the ordinary hint back; only a busy one gets a reason, so a disabled action
+        // never claims to be waiting for something that already finished.
+        m_stopAction->setToolTip(canStop || busy.isEmpty() ? kStopActionHint : busy);
+    }
+
     const QString activeId = m_manager->activeStrategyId();
-    for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it)
-        it.value()->setRunning(activeIsUp && it.key() == activeId);
+    for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it) {
+        const bool isActive = activeIsUp && it.key() == activeId;
+        it.value()->setRunning(isActive);
+        // One card offers exactly one action — stop when it owns the run, start otherwise — so the
+        // gating is per card, not per window: the active card is greyed only when a stop would be a
+        // duplicate, the others whenever a start would be refused.
+        it.value()->setActionEnabled(isActive ? canStop : canStart, busy);
+    }
 
     updateTrayIcon();
 }
@@ -579,6 +664,18 @@ void MainWindow::zapretInstalled(const QString &path)
 
 void MainWindow::startStrategy(const QString &id, bool interactive)
 {
+    // Asked before the backend sees the request. Cards and toolbar are greyed in exactly these states,
+    // but the tray menu, Ctrl+Shift+S and the auto-start on launch are not — and unguarded they reached
+    // LinuxBackend::start() mid-teardown, which reported "an operation is already in progress (stop
+    // first)" as a failure and badged the card that was merely clicked too early. Waiting is not an
+    // error, so it gets a warning line and a status-bar message instead of a dialog.
+    const QString busy = blockedReason(m_manager->state());
+    if (!busy.isEmpty()) {
+        m_log->appendLine(busy, LogPanel::Warn);
+        statusBar()->showMessage(busy, 5000);
+        return;
+    }
+
     const Strategy *strategy = m_manager->findStrategy(id);
     if (!strategy) {
         const QString msg = QStringLiteral("Стратегия не найдена: %1").arg(id);
@@ -618,8 +715,10 @@ void MainWindow::onStartRequested(const QString &id)
 
 void MainWindow::onStopRequested()
 {
-    const IZapretBackend::State state = m_manager->state();
-    if (state == IZapretBackend::State::Stopped || state == IZapretBackend::State::Error)
+    // Reached from the toolbar action, the card button, the tray menu and Ctrl+Shift+X. The first two
+    // are gated in updateStatusUi(), so this guard is what keeps the two that are not from re-issuing a
+    // stop that is already running — the second "terminating nfqws" ten seconds after the first.
+    if (!canStopFrom(m_manager->state()))
         return;
     m_manager->stop();
 }
@@ -756,7 +855,7 @@ void MainWindow::onSettingsChanged()
 void MainWindow::requestQuit()
 {
     m_quitting = true;
-    if (m_manager->isRunning())
+    if (m_manager->isRunning() && canStopFrom(m_manager->state()))
         m_manager->stop();
     hide();
     qApp->quit();
@@ -785,7 +884,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     }
 
     m_quitting = true;
-    if (m_manager->isRunning())
+    // Same gate as the explicit quit: a teardown already in flight must not be asked for a second time
+    // on the way out, where the direct-payload path would block the close in waitForFinished().
+    if (m_manager->isRunning() && canStopFrom(m_manager->state()))
         m_manager->stop();
     event->accept();
 }

@@ -61,6 +61,11 @@ QPushButton#primaryButton:pressed { background-color: #6D28D9; }
 QPushButton#primaryButton:disabled { background-color: #C9BCEC; border-color: #C9BCEC; color: #F1ECFB; }
 QPushButton#dangerButton { background-color: #FEE2E2; border-color: #FCA5A5; color: #B91C1C; }
 QPushButton#dangerButton:hover { background-color: #FECACA; }
+/* An id selector outranks a pseudo-state in QSS specificity, so QPushButton:disabled above does NOT
+   reach this button: without this rule a greyed-out "Остановить" keeps its full live red and reads as
+   clickable, which is precisely the misleading state during a teardown. Keep the neutral disabled
+   tokens so it looks like every other unavailable control. */
+QPushButton#dangerButton:disabled { background-color: #EDEEF5; border-color: #EDEEF5; color: #B4B8C6; }
 
 QLineEdit, QSpinBox, QComboBox {
     background-color: #FFFFFF; color: #1F2937;
