@@ -65,6 +65,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5.1.0
 
+      - name: Lint Inno Setup script
+        # ISCC rejects an unknown token in a [Run] `Flags:` value with
+        # `Parameter "Flags" includes an unknown flag.` -- which is a compile-time check on text that
+        # never needed Windows, Qt or the build to happen first. Doing it here costs ~2 s on Linux and
+        # stops the run before the tag-gated `installer` job burns a Windows runner (install Qt ->
+        # build -> artifact round-trip -> ISCC) to report the same typo.
+        # It lives in `linux` and not `windows` because `linux` is the job that runs on every push and
+        # PR; `installer` only exists on a tag, so a branch-level typo would go unnoticed until release.
+        run: python3 packaging/check-iss-flags.py packaging/windows_installer.iss
+
       - name: Install Qt6
         uses: jurplel/install-qt-action@v4.4.1
         with:

@@ -113,6 +113,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; Tasks: deskt
 
 [Run]
 ; Offered but unchecked: right after a fresh install the app has no zapret tree yet, and opening it is
-; not a prerequisite for finishing the setup.
-Filename: "{app}\{#AppName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall unchecked
+; not a prerequisite for finishing the setup. skipifsilent is the silent-install half of the same
+; reasoning: an unattended /SILENT or /VERYSILENT run must not end with a GUI popping up over it.
+; (postinstall alone already implies the original, non-elevated user token, which is what the app
+; wants -- it escalates itself through PrivilegeHelper when it actually needs to.)
+Filename: "{app}\{#AppName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall unchecked skipifsilent
 
