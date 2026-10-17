@@ -13,8 +13,23 @@ namespace zapret {
 //
 // The wrapper exists so no widget ever spells a key name or a default twice: readers get sane
 // defaults, writers emit changed() so open windows (MainWindow, SettingsDialog, tray) can react in
-// one place. IniFormat is forced on every platform, including Windows, so the file location is
-// predictable (QStandardPaths::AppConfigLocation) and the settings stay a plain, portable text file.
+// one place.
+//
+// The application-wide store uses Qt's NATIVE format for the platform — QSettings::setDefaultFormat()
+// is never called, so a default-constructed QSettings resolves organizationName()/applicationName() to
+// wherever this platform keeps them: the registry under HKCU\Software\F0RSES\Muffin on Windows, a plist
+// under ~/Library/Preferences on macOS, and an ini file in the organization's config directory on Linux
+// (~/.config/F0RSES/Muffin.conf, honouring XDG_CONFIG_HOME) — Qt's native format on XDG platforms
+// already being IniFormat, which is why the file looks like the one an ini store would write.
+//
+// That is a deliberate choice, not an oversight: it is the format the 0.1.0 store was written in, so
+// importLegacySettings() can read the old identity with QSettings::defaultFormat() and be sure it is
+// naming the same kind of store. It also carries the one cost worth knowing — on Windows the values live
+// in the registry rather than in a text file, so nothing here is a portable file the user can copy, and
+// renaming the organization relocates the whole store (again: that is what the import repairs).
+//
+// Only the explicit-path constructor below forces IniFormat, and only so that a test or an isolated
+// store is handed a plain text file at a known location.
 class Settings : public QObject
 {
     Q_OBJECT
@@ -64,5 +79,20 @@ private:
 
     std::unique_ptr<QSettings> m_settings;
 };
+
+// One-time carry-over of everything the 0.1.0 identity persisted, into the store this build uses.
+//
+// QSettings resolves its file/registry location from organizationName()+applicationName(), so renaming
+// the organization moves the settings too — a user who upgrades would lose their theme, ping interval,
+// last strategy and the stored zapret path with no warning at all. This imports them.
+//
+// It must run before the first Settings instance is constructed, i.e. from the entry point, and it
+// never overwrites: if the current identity already holds any value the upgrade has been imported (or
+// the user started fresh), so the legacy store is left alone. Two stored values can name a path inside
+// the folder the migration moved — the zapret root, and a strategy id, which StrategyParser stamps as
+// an absolute path into that tree for entries it cannot name — and both are rebased onto the new
+// location, but only when the old one has really gone away. See ZapretPaths::migrateManagedInstallDir(),
+// whose settings half this is.
+void importLegacySettings();
 
 } // namespace zapret

@@ -22,6 +22,7 @@
 #include "StrategyCard.h"
 #include "Theme.h"
 #include "ZapretDownloader.h"
+#include "ZapretPaths.h"
 
 #include <QApplication>
 #include <QColor>
@@ -33,7 +34,9 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
 #include <QTextBlock>
@@ -100,6 +103,207 @@ static void testSettings()
         check(reopened.theme() == QLatin1String("system"), "theme round-trip");
         check(reopened.pingIntervalSec() == 12, "ping interval round-trip");
     }
+}
+
+// Write `text` at `path`, creating parent directories on the way. The migration asserts read on-disk
+// truth — the repair only fires when a folder really exists or really went away — so an empty promise
+// of a path is not enough here.
+static bool writeTextFile(const QString &path, const QString &text)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const QByteArray bytes = text.toUtf8();
+    const bool ok = f.write(bytes) == bytes.size();
+    f.close();
+    return ok;
+}
+
+// ------------------------------------------------- Settings identity migration ----
+//
+// The settings half of the 0.1.1 organization rename. Everything here is the user-level store, so the
+// section only runs while the harness redirects the config and data locations into the build tree
+// (CMake sets XDG_CONFIG_HOME/XDG_DATA_HOME for uitest): otherwise the test would be reading and
+// writing a real desktop's settings file, which is the one thing a migration test must never do.
+static void clearTree(const QString &path)
+{
+    QDir dir(path);
+    if (dir.exists())
+        dir.removeRecursively();
+}
+
+static void testSettingsMigration()
+{
+    std::printf("\n[Settings: 0.1.1 identity migration]\n");
+
+    const QString configBase =
+        QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    const QString dataBase =
+        QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    const QString xdgConfig = qEnvironmentVariable("XDG_CONFIG_HOME");
+    const QString xdgData = qEnvironmentVariable("XDG_DATA_HOME");
+    const bool redirected =
+        !xdgConfig.isEmpty() && !xdgData.isEmpty()
+        && QDir::cleanPath(configBase) == QDir::cleanPath(xdgConfig)
+        && QDir::cleanPath(dataBase) == QDir::cleanPath(xdgData);
+    if (!redirected)
+    {
+        std::printf("  SKIP  the settings import needs XDG_CONFIG_HOME and XDG_DATA_HOME redirected "
+                    "into the build tree (run it through ctest)\n");
+        return;
+    }
+
+    const QString legacyOrg = ZapretPaths::legacyOrganizationName();
+    const QString currentOrg = QCoreApplication::organizationName();
+    const QString app = QCoreApplication::applicationName();
+    // The two stores are two directories under the redirected config root, named after the two
+    // organizations. Asserting that up front is what proves this test is sandboxed, not the paths it
+    // later rewrites.
+    const QString legacyStoreDir = QDir(configBase).filePath(legacyOrg);
+    const QString currentStoreDir = QDir(configBase).filePath(currentOrg);
+    check(legacyOrg != currentOrg && !currentOrg.isEmpty(),
+          "the test identity differs from the legacy organization");
+    check(QDir::cleanPath(legacyStoreDir).startsWith(QDir::cleanPath(configBase) + QLatin1Char('/'))
+              && QDir::cleanPath(currentStoreDir).startsWith(
+                     QDir::cleanPath(configBase) + QLatin1Char('/')),
+          "both stores live under the redirected config location");
+
+    const QString legacyManaged = ZapretPaths::legacyManagedInstallDir();
+    const QString managed = ZapretPaths::managedInstallDir();
+    check(!legacyManaged.isEmpty() && !managed.isEmpty() && legacyManaged != managed,
+          "the migration's two directory names are distinct");
+    check(QDir::cleanPath(legacyManaged).startsWith(QDir::cleanPath(dataBase) + QLatin1Char('/'))
+              && QDir::cleanPath(managed).startsWith(QDir::cleanPath(dataBase) + QLatin1Char('/')),
+          "and both live under the redirected data location");
+
+    clearTree(legacyStoreDir);
+    clearTree(currentStoreDir);
+    clearTree(legacyManaged);
+    clearTree(managed);
+
+    // ---- the state an upgraded user is in: 0.1.0's store filled, this build's not ----
+    const QString legacyLinuxRoot = legacyManaged + QStringLiteral("/linux");
+    const QString managedLinuxRoot = managed + QStringLiteral("/linux");
+    // What a portable-mode user actually has in `strategy/last`: not a name, but the absolute path of
+    // the binary the parser surfaced — inside the very folder the migration renames.
+    const QString legacyPortableId =
+        legacyManaged + QStringLiteral("/binaries/linux-x86_64/nfqws");
+    const QString managedPortableId =
+        managed + QStringLiteral("/binaries/linux-x86_64/nfqws");
+
+    // The file 0.1.0's QSettings() resolved to: this build's scope and format, the organization it
+    // replaced, the same application name. Everything the import reads comes from here.
+    const QString legacyFile =
+        QSettings(QSettings::defaultFormat(), QSettings::UserScope, legacyOrg, app).fileName();
+    check(!legacyFile.isEmpty(), "the legacy store has a resolvable file name");
+    check(QDir::cleanPath(legacyFile).startsWith(QDir::cleanPath(legacyStoreDir) + QLatin1Char('/')),
+          "and it is the file inside the legacy organization folder");
+
+    {
+        // The tree moved first (that is ZapretPaths::migrateManagedInstallDir(), covered in coretest),
+        // so what is on disk here is the post-move world: the new folder holds it, the old one is gone.
+        check(writeTextFile(managedLinuxRoot + QStringLiteral("/nfq/nfqws"), "payload\n"),
+              "planted the migrated tree at the new name");
+        check(writeTextFile(managedPortableId, "nfqws\n"),
+              "including the portable binary a stored strategy id can name");
+        check(!QFileInfo::exists(legacyManaged), "the legacy folder is vacated");
+
+        // Written through Settings itself, on the legacy store's own file name, so the key spellings
+        // the import looks for are produced by the code that reads them and cannot drift.
+        Settings legacyStore(legacyFile);
+        legacyStore.setTheme(QStringLiteral("light"));
+        legacyStore.setPingIntervalSec(7);
+        legacyStore.setLastStrategyId(legacyPortableId);
+        legacyStore.setStartLastOnLaunch(true);
+        legacyStore.setMinimizeToTray(false);
+        legacyStore.setZapretPath(legacyLinuxRoot);
+        check(QFileInfo::exists(legacyFile), "the legacy store file was written");
+    }
+
+    // ---- the import ----
+    importLegacySettings();
+
+    {
+        Settings migrated;   // this build's own store, reached by identity rather than by path
+        check(QDir::cleanPath(migrated.filePath()) != QDir::cleanPath(legacyFile),
+              "and it is a different file than the one the import read");
+        check(migrated.theme() == QLatin1String("light"), "theme carried over");
+        check(migrated.pingIntervalSec() == 7, "ping interval carried over");
+        check(migrated.lastStrategyId() == QDir::cleanPath(managedPortableId),
+              "a stored strategy path followed the tree to its new folder too");
+        check(migrated.startLastOnLaunch() == true, "start-last-on-launch carried over");
+        check(migrated.minimizeToTray() == false, "minimize-to-tray carried over");
+        check(QDir::cleanPath(migrated.zapretPath()) == QDir::cleanPath(managedLinuxRoot),
+              "the stored tree path followed the tree to its new folder");
+    }
+
+    // ---- never overwrite ----
+    //
+    // This guard is what makes running the import on every startup safe: once this identity holds any
+    // value at all, the legacy store is inert. So edit the new store, contradict it from the old one,
+    // and re-run — the user's newer choice must win.
+    {
+        Settings migrated;
+        migrated.setTheme(QStringLiteral("system"));
+
+        Settings legacyStore(legacyFile);
+        legacyStore.setTheme(QStringLiteral("dark"));
+
+        importLegacySettings();
+
+        Settings again;
+        check(again.theme() == QLatin1String("system"), "an imported store is never imported over");
+        check(QDir::cleanPath(again.zapretPath()) == QDir::cleanPath(managedLinuxRoot),
+              "and re-running the repair leaves the repaired path alone");
+    }
+
+    // ---- which stored paths the repair may touch, and which it must not ----
+    //
+    // Empty the current store, then read the import's answer for one stored value. The managed install
+    // is the only folder this migration moves, so a path that names it — itself or a child the locator
+    // resolved inside it — is rebased, while anything the user pointed elsewhere survives byte for byte.
+    {
+        auto importedPathFor = [&](const QString &storedPath) {
+            clearTree(currentStoreDir);
+            Settings legacyStore(legacyFile);
+            legacyStore.setZapretPath(storedPath);
+            importLegacySettings();
+            Settings migrated;
+            return migrated.zapretPath();
+        };
+
+        check(QDir::cleanPath(importedPathFor(legacyLinuxRoot)) == QDir::cleanPath(managedLinuxRoot),
+              "a child of the moved folder keeps its child segment");
+        check(QDir::cleanPath(importedPathFor(legacyManaged)) == QDir::cleanPath(managed),
+              "the moved folder itself is rebased");
+        const QString foreign = QStringLiteral("/opt/zapret/linux");
+        check(importedPathFor(foreign) == foreign, "a path this migration never moved is left alone");
+        check(importedPathFor(legacyLinuxRoot + QStringLiteral("/../linux"))
+                  == QDir::cleanPath(managedLinuxRoot),
+              "and an untidy spelling of a moved path is still recognised");
+    }
+
+    // A strategy id the parser could name is a bare word, and the stored root may be a folder the user
+    // picked in the dialog: neither may be edited by a repair that is looking for one directory.
+    {
+        clearTree(currentStoreDir);
+        Settings legacyStore(legacyFile);
+        legacyStore.setLastStrategyId(QStringLiteral("general"));
+        legacyStore.setZapretPath(QStringLiteral("/opt/zapret/linux"));
+        importLegacySettings();
+
+        Settings migrated;
+        check(migrated.lastStrategyId() == QLatin1String("general"),
+              "a bare strategy id is carried over as it was");
+        check(migrated.zapretPath() == QLatin1String("/opt/zapret/linux"),
+              "and a root outside the managed folder keeps its own spelling");
+    }
+
+    clearTree(legacyStoreDir);
+    clearTree(currentStoreDir);
+    clearTree(managed);
+    clearTree(legacyManaged);
 }
 
 // ---------------------------------------------------------------- LogPanel ----
@@ -591,6 +795,7 @@ int main(int argc, char **argv)
     Theme::apply(app, true);
 
     testSettings();
+    testSettingsMigration();
     testLogPanel();
     testPingIndicator();
     testStrategyCard();

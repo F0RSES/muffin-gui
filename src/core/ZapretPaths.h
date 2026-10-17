@@ -50,13 +50,45 @@ public:
     // ---- the tree this application installs for the user ----
     // "<AppDataLocation>/zapret": the one directory whose contents Muffin itself lays out, because
     // ZapretDownloader unpacks a GitHub release there and validates it before announcing success.
-    // QStandardPaths already resolves the per-OS base (%APPDATA%\Muffin\Muffin on Windows,
-    // ~/Library/Application Support/Muffin on macOS, ~/.local/share/Muffin on Linux), so this needs
-    // no #ifdef — the folder name is the only thing added here.
+    // QStandardPaths already resolves the per-OS base (~/.local/share/<org>/<app> on Linux,
+    // %APPDATA%\<org>\<app> on Windows, ~/Library/Application Support/<app> on macOS), so this needs
+    // no #ifdef — the "zapret" folder is the only thing added here.
     //
     // Empty when the host has no writable app-data location at all (applicationName unset and the
     // OS gives us nothing): callers must treat that as "no managed install", not as "the root dir".
     static QString managedInstallDir();
+
+    // managedInstallDir() as it resolves under an explicitly chosen organization, ignoring what the
+    // application identity currently says. The one-off identity migration below needs to ask the same
+    // question about a name the process no longer uses, and QStandardPaths has no other way to answer
+    // it: it reads the process-wide organization, so this adopts it for the duration of the call.
+    static QString managedInstallDirFor(const QString &organizationName);
+
+    // The organization this application was built with up to and including 0.1.0 — the very same word
+    // as the application name, which is what made the data folder read "Muffin/Muffin" twice. Named
+    // here rather than in the callers so the folder move and the settings import agree on it instead
+    // of each keeping their own copy of a historical fact.
+    static QString legacyOrganizationName();
+
+    // The managed install as 0.1.0 laid it out: "<legacy identity>/zapret". May be empty for the same
+    // reason managedInstallDir() can be.
+    static QString legacyManagedInstallDir();
+
+    // Move one whole directory onto another name. True only when `from` is gone because it became
+    // `to`. It refuses — without touching anything — when the target already exists, when there is
+    // nothing to move, and when both names describe the same directory, so a refused move always
+    // leaves a downloaded tree exactly where the previous build can still find it.
+    static bool moveManagedInstallDir(const QString &from, const QString &to);
+
+    // Carry the 0.1.0 tree into the folder this build's identity resolves to. True when a move
+    // actually happened. Called once from the entry point, before anything reads a path.
+    //
+    // It then sweeps up the folders that only ever held that tree ("<data>/Muffin/Muffin" and
+    // "<data>/Muffin"), because a renamed-away tree would otherwise leave the doubled name sitting in
+    // the file manager as an empty directory — which is the thing the migration set out to remove. Only
+    // directories that are genuinely empty are deleted, so a legacy folder holding anything else (or
+    // one this build resolves to) survives untouched.
+    static bool migrateManagedInstallDir();
 
     // ---- Layout detection (no assumptions about which root you pass) ----
     // True if `root` looks like a usable windows distribution (bin/winws.exe + *.bat).

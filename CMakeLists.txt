@@ -145,7 +145,20 @@ if (UNIX AND NOT APPLE)
 endif()
 
 enable_testing()
+
+# The 0.1.1 identity migration reads and rewrites the per-user data and config locations, so both
+# suites get those two locations redirected into the build tree: the alternative is a test run on a
+# developer's machine moving their real ~/.local/share/Muffin tree and editing their real settings
+# file. QStandardPaths takes both from the process environment and Qt caches that environment on first
+# read, so the redirection has to exist before the process starts — hence here, not in the tests.
+# Hosts that ignore XDG_* (Windows, macOS) cannot be redirected this way; each test checks whether the
+# redirection took effect and skips the affected section rather than touch the real store.
+set(ZAPRET_TEST_XDG
+    "XDG_DATA_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home/share;XDG_CONFIG_HOME=${CMAKE_CURRENT_BINARY_DIR}/test-home/config")
+
 add_test(NAME coretest COMMAND coretest)
+set_tests_properties(coretest PROPERTIES ENVIRONMENT "${ZAPRET_TEST_XDG}")
+
 add_test(NAME uitest COMMAND uitest)
 
 # A Qt installation can expose its libraries without the matching platform plugins (this project's
@@ -161,10 +174,11 @@ if (ZAPRET_OFFSCREEN_PLUGIN)
     get_filename_component(ZAPRET_PLUGIN_PLATFORM_DIR "${ZAPRET_OFFSCREEN_PLUGIN}" DIRECTORY)
     get_filename_component(ZAPRET_PLUGIN_DIR "${ZAPRET_PLUGIN_PLATFORM_DIR}" DIRECTORY)
     set_tests_properties(uitest PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${ZAPRET_PLUGIN_DIR}"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${ZAPRET_PLUGIN_DIR};${ZAPRET_TEST_XDG}"
         TIMEOUT 120)
 else()
-    set_tests_properties(uitest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
+    set_tests_properties(uitest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;${ZAPRET_TEST_XDG}" TIMEOUT 120)
 endif()
 
 # ---- packaging (CPack) ------------------------------------------------------
@@ -172,7 +186,7 @@ endif()
 # file: the release job passes -DMUFFIN_VERSION="${tag without the leading v}", which is what keeps
 # muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in agreement. The default is
 # the current release line, so local `cpack` runs still produce a sensibly named file.
-set(MUFFIN_VERSION "0.1.0" CACHE STRING "Version stamped into the generated packages")
+set(MUFFIN_VERSION "0.1.1" CACHE STRING "Version stamped into the generated packages")
 
 set(CPACK_PACKAGE_NAME "muffin")
 set(CPACK_PACKAGE_VENDOR "F0RSES")

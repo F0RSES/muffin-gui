@@ -141,6 +141,27 @@ static bool writeFile(const QString &path, const QByteArray &bytes)
     return ok;
 }
 
+// The text at `path`, or an empty string when there is nothing readable there. The migration asserts
+// use it to tell "the file moved with its directory" from "the directory name exists but holds
+// nothing", which a bare QFileInfo::exists() cannot separate.
+static QString readFileOrNull(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return QString();
+    const QByteArray bytes = f.readAll();
+    f.close();
+    return QString::fromUtf8(bytes);
+}
+
+// Remove a directory tree, treating "already absent" as success: the migration sections reset state
+// between cases and a clean slate is what they mean by that.
+static bool removeTree(const QString &path)
+{
+    QDir dir(path);
+    return !dir.exists() || dir.removeRecursively();
+}
+
 // *.bat files buildFixtureTree() writes that the parser is allowed to surface: three wrappers, with
 // service.bat and readme.bat dropped as excluded names and bin/ + lists/ as excluded dirs.
 static const int kFixtureWindowsStrategies = 3;
@@ -908,6 +929,171 @@ int main(int argc, char **argv)
             const QList<ZapretLocator::Found> viaTemp = ZapretLocator::locate({managedCopy});
             check(!ZapretLocator::firstRoot(viaTemp, Strategy::Platform::Linux).isEmpty(),
                   "a tree placed in the managed layout is located as linux");
+        }
+    }
+
+    // ---- the 0.1.1 identity migration: the folder move half ----
+    //
+    // Up to 0.1.0 the organization name equalled the application name, so QStandardPaths spelled that
+    // name twice (~/.local/share/Muffin/Muffin) and the managed install landed under a first segment
+    // that told the user nothing. Renaming the organization fixes the spelling but relocates the one
+    // directory this application downloaded and cannot re-create offline, so the tree has to be
+    // carried over — and the carry-over has to be refuse-clobber, atomic and idempotent, because it
+    // runs at every startup and only the first pass has anything to do.
+    //
+    // The round trip runs against the data location CMake redirects into the build tree; on a host
+    // that ignores XDG_* it is skipped rather than aimed at a real ~/.local/share.
+    out << "\n[identity migration: managed install dir]\n";
+    {
+        check(ZapretPaths::legacyOrganizationName() == QLatin1String("Muffin"),
+              "the legacy organization is the name 0.1.0 shipped with");
+
+        // The bug itself, stated as an assertion: two organization names resolve to two different
+        // directories differing only in the organization segment — and the answer must not depend on
+        // which one the process currently claims, which is what makes a legacy path computable.
+        const QString originalOrgName = QCoreApplication::organizationName();
+        const QString asLegacy = ZapretPaths::managedInstallDirFor(QStringLiteral("Muffin"));
+        const QString asForses = ZapretPaths::managedInstallDirFor(QStringLiteral("F0RSES"));
+        check(!asLegacy.isEmpty() && !asForses.isEmpty(), "both identities resolve a managed dir");
+        check(asLegacy != asForses, "to two different directories");
+        check(QDir::fromNativeSeparators(asLegacy).endsWith(QLatin1String("/zapret"))
+                  && QDir::fromNativeSeparators(asForses).endsWith(QLatin1String("/zapret")),
+              "both under the zapret folder the downloader writes");
+        check(pathKey(asLegacy).toLower().contains(QStringLiteral("/muffin/")),
+              "the legacy one names the old organization folder");
+        check(pathKey(asForses).toLower().contains(QStringLiteral("/f0rses/")),
+              "the new one names the vendor folder the packages use");
+        check(QCoreApplication::organizationName() == originalOrgName,
+              "managedInstallDirFor() handed the process identity back untouched");
+
+        // A move is only safe to rehearse here while both names live inside the build tree.
+        const QString xdgData = qEnvironmentVariable("XDG_DATA_HOME");
+        const bool redirected = !xdgData.isEmpty() && pathStartsWith(asLegacy, xdgData)
+                                && pathStartsWith(asForses, xdgData);
+
+        // ---- moveManagedInstallDir(), on trees built for the purpose ----
+        //
+        // Identity-free: the contract is about two directories and what may happen to them, so it can
+        // run anywhere a temporary directory can be made.
+        {
+            QTemporaryDir t;
+            check(t.isValid(), "temporary dir for the move contract");
+            if (t.isValid())
+            {
+                const QString src = t.filePath(QStringLiteral("from/zapret"));
+                const QString dst = t.filePath(QStringLiteral("to/zapret"));
+
+                check(ZapretPaths::moveManagedInstallDir(QString(), dst) == false,
+                      "an empty source is refused");
+                check(ZapretPaths::moveManagedInstallDir(src, QString()) == false,
+                      "an empty target is refused");
+                check(ZapretPaths::moveManagedInstallDir(src, dst) == false,
+                      "a source that does not exist is refused");
+                check(!QFileInfo::exists(dst), "and no target was conjured up for it");
+
+                // The happy path: payload nested two levels down, and the target's parents missing —
+                // a first launch after the identity change has no ~/.local/share/F0RSES yet.
+                check(writeFile(src + QStringLiteral("/linux/nfq/nfqws"), "payload\n"),
+                      "planted a nested tree at the source name");
+                check(ZapretPaths::moveManagedInstallDir(src, dst),
+                      "the whole tree moved onto the new name");
+                check(!QFileInfo::exists(src), "the old name is gone");
+                check(readFileOrNull(dst + QStringLiteral("/linux/nfq/nfqws")) == "payload\n",
+                      "the deepest file came with it");
+
+                // Never clobber: someone who re-downloaded under the new name already has a tree
+                // there, and a stale copy must not be allowed to replace it.
+                check(writeFile(src + QStringLiteral("/linux/nfq/nfqws"), "stale\n"),
+                      "planted a second tree at the old name");
+                check(ZapretPaths::moveManagedInstallDir(src, dst) == false,
+                      "an existing target is never replaced");
+                check(readFileOrNull(dst + QStringLiteral("/linux/nfq/nfqws")) == "payload\n",
+                      "the tree already at the target is untouched");
+                check(readFileOrNull(src + QStringLiteral("/linux/nfq/nfqws")) == "stale\n",
+                      "and the refused source was left exactly where it was");
+
+                // Two names for one directory (an identity change that moves nothing, a symlink onto
+                // itself) is not a move — treating it as one would delete the tree.
+                const QString same = t.filePath(QStringLiteral("same"));
+                check(QDir().mkpath(same), "made a directory to move onto itself");
+                check(ZapretPaths::moveManagedInstallDir(same, same) == false, "from == to is refused");
+                check(QFileInfo(same).isDir(), "and nothing was removed");
+            }
+        }
+
+        if (!redirected)
+        {
+            out << "  SKIP  the migrateManagedInstallDir() round trip needs XDG_DATA_HOME redirected "
+                   "into the build tree (run it through ctest)\n";
+        }
+        else
+        {
+            // Rehearse the round trip under the identity the entry point sets rather than coretest's
+            // own: with no organization the app-data folder *is* the data root, and the sweep that
+            // follows the move has nothing it is allowed to clean. Both names are restored afterwards,
+            // so no section below this one sees a changed identity.
+            const QString originalAppName = QCoreApplication::applicationName();
+            QCoreApplication::setOrganizationName(QStringLiteral("F0RSES"));
+            QCoreApplication::setApplicationName(QStringLiteral("Muffin"));
+
+            const QString legacy = ZapretPaths::legacyManagedInstallDir();
+            const QString managed = ZapretPaths::managedInstallDir();
+            const QString legacyAppDir = QFileInfo(legacy).dir().absolutePath();
+            const QString legacyOrgDir = QFileInfo(legacyAppDir).dir().absolutePath();
+            out << "  NOTE  legacy = " << legacy << ", managed = " << managed << '\n';
+            check(QDir::fromNativeSeparators(legacy)
+                      .endsWith(QLatin1String("/Muffin/Muffin/zapret")),
+                  "the legacy name really is the folder spelled twice");
+            check(legacy != managed, "the two names the migration works between differ");
+            check(removeTree(legacy) && removeTree(managed), "both names cleared for the round trip");
+
+            check(writeFile(legacy + QStringLiteral("/linux/nfq/nfqws"), "downloaded\n"),
+                  "planted a downloaded tree at the legacy name");
+            check(ZapretPaths::migrateManagedInstallDir(), "the migration reports a move");
+            check(!QFileInfo::exists(legacy), "the legacy name is gone");
+            check(readFileOrNull(managed + QStringLiteral("/linux/nfq/nfqws")) == "downloaded\n",
+                  "the tree is readable at the new name");
+            // The shells a rename leaves behind are the doubled folder the user sees in the file
+            // manager, so they go too — QDir::rmdir only ever removes a directory that is empty.
+            check(!QFileInfo::exists(legacyAppDir), "the emptied legacy app folder is gone");
+            check(!QFileInfo::exists(legacyOrgDir), "and so is the old organization's");
+            check(QFileInfo(managed).isDir()
+                      && QFileInfo(QFileInfo(managed).dir().absolutePath()).isDir(),
+                  "neither the destination nor its parent was swept up with them");
+
+            // Startup calls this on every launch, so the second pass must find nothing to do and must
+            // not disturb what the first one placed.
+            check(ZapretPaths::migrateManagedInstallDir() == false, "a second run moves nothing");
+            check(readFileOrNull(managed + QStringLiteral("/linux/nfq/nfqws")) == "downloaded\n",
+                  "and leaves the tree exactly where it is");
+
+            // Emptiness is the only licence this takes to delete: a legacy folder holding something
+            // that is not the tree — a user's own files, another program's — survives with them.
+            check(removeTree(managed), "cleared the destination for the crowded case");
+            check(writeFile(legacy + QStringLiteral("/linux/nfq/nfqws"), "second\n"),
+                  "planted a second tree at the legacy name");
+            check(writeFile(legacyAppDir + QStringLiteral("/not-mine.txt"), "someone else's\n"),
+                  "and an unrelated file beside it");
+            check(ZapretPaths::migrateManagedInstallDir(), "the tree still moves");
+            check(QFileInfo(legacyAppDir).isDir(), "the legacy folder holding it is left alone");
+            check(readFileOrNull(legacyAppDir + QStringLiteral("/not-mine.txt")) == "someone else's\n",
+                  "and so is the file it holds");
+            check(QFileInfo(legacyOrgDir).isDir(), "and its parent, no longer empty, likewise");
+
+            // A fresh install has no legacy tree at all: nothing to carry over is a normal, quiet
+            // outcome, not an error the entry point would have to report — and the empty folder Qt
+            // creates while computing the legacy path is swept back up rather than left behind.
+            check(removeTree(legacyOrgDir) && removeTree(managed), "every legacy name cleared again");
+            check(ZapretPaths::migrateManagedInstallDir() == false, "a first install migrates nothing");
+            check(!QFileInfo::exists(managed + QStringLiteral("/linux/nfq/nfqws")),
+                  "and fabricates no tree at the new name");
+            check(!QFileInfo::exists(legacyAppDir),
+                  "and leaves no empty folder behind where it looked");
+
+            QCoreApplication::setOrganizationName(originalOrgName);
+            QCoreApplication::setApplicationName(originalAppName);
+            removeTree(legacyOrgDir);
+            removeTree(managed);
         }
     }
 
