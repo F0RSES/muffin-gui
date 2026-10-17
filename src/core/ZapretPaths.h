@@ -47,6 +47,17 @@ public:
     // QSysInfo::currentCpuArchitecture() to a binaries/ subdir.
     static QString nativeArchDirName();
 
+    // ---- the tree this application installs for the user ----
+    // "<AppDataLocation>/zapret": the one directory whose contents Muffin itself lays out, because
+    // ZapretDownloader unpacks a GitHub release there and validates it before announcing success.
+    // QStandardPaths already resolves the per-OS base (%APPDATA%\Muffin\Muffin on Windows,
+    // ~/Library/Application Support/Muffin on macOS, ~/.local/share/Muffin on Linux), so this needs
+    // no #ifdef — the folder name is the only thing added here.
+    //
+    // Empty when the host has no writable app-data location at all (applicationName unset and the
+    // OS gives us nothing): callers must treat that as "no managed install", not as "the root dir".
+    static QString managedInstallDir();
+
     // ---- Layout detection (no assumptions about which root you pass) ----
     // True if `root` looks like a usable windows distribution (bin/winws.exe + *.bat).
     static bool isWindowsRoot(const QString &root);

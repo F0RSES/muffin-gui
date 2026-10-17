@@ -38,6 +38,14 @@ void probeOne(const QString &candidate, QList<ZapretLocator::Found> &out)
 QStringList ZapretLocator::defaultBases()
 {
     QStringList bases;
+    // The managed install comes FIRST. It is the only base whose contents this application laid out
+    // itself — ZapretDownloader unpacks and validates a release into exactly that directory — so a
+    // restart finds the tree the user downloaded without asking them to point at it again. It also
+    // cannot shadow anything a user set up by hand: the directory simply does not exist until the
+    // download feature has been used once.
+    const QString managed = ZapretPaths::managedInstallDir();
+    if (!managed.isEmpty())
+        bases << managed;
     bases << QDir::homePath() + QStringLiteral("/Documents/zapret");
     bases << QDir::homePath() + QStringLiteral("/Downloads/zapret");
     bases << QDir::currentPath() + QStringLiteral("/zapret");

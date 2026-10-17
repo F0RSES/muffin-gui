@@ -869,7 +869,47 @@ int main(int argc, char **argv)
     check(!ZapretLocator::firstRoot(found, Strategy::Platform::Windows).isEmpty(), "located a windows root");
     check(!ZapretLocator::firstRoot(found, Strategy::Platform::Linux).isEmpty(), "located a linux root");
 
+    // ---- the managed install is discoverable, or a download dies with the next restart ----
+    //
+    // ZapretDownloader installs into <AppDataLocation>/zapret. ZapretLocator has to know that base by
+    // itself: the path is also written into Settings, but a Settings file the user resets, a different
+    // desktop user on the same machine, or a tree that is simply still where the app left it all mean the
+    // GUI must be able to find it with no hint at all.
+    out << "\n[ZapretLocator: managed install base]\n";
+    {
+        const QString managed = ZapretPaths::managedInstallDir();
+        check(!managed.isEmpty(), "the host offers a managed install directory");
+        check(QDir::isAbsolutePath(managed), "and it is an absolute path");
+        check(QDir::fromNativeSeparators(managed).endsWith(QLatin1String("/zapret")),
+              "and it ends in the zapret folder the downloader writes");
+
+        const QStringList bases = ZapretLocator::defaultBases();
+        check(!bases.isEmpty() && bases.first() == managed,
+              "defaultBases() leads with it, so a restart finds the tree with no Settings at all");
+
+        // A tree dropped there must be recognised as zapret, not merely as a directory that exists.
+        QTemporaryDir root;
+        check(root.isValid(), "temporary root for the managed-layout probe");
+        if (root.isValid())
+        {
+            const QString managedCopy = root.filePath(QStringLiteral("zapret"));
+            QDir().mkpath(managedCopy);
+            // This is exactly what a download that never ran leaves behind, and it must not read as an
+            // install: the locator validates, it does not assume.
+            check(ZapretPaths::detectPlatform(managedCopy) == Strategy::Platform::Unknown,
+                  "control: an empty managed folder is not reported as a zapret root");
+
+            check(makeLinuxTree(managedCopy + QStringLiteral("/linux"), true),
+                  "built a linux tree under the managed layout");
+            const QList<ZapretLocator::Found> viaTemp = ZapretLocator::locate({managedCopy});
+            check(!ZapretLocator::firstRoot(viaTemp, Strategy::Platform::Linux).isEmpty(),
+                  "a tree placed in the managed layout is located as linux");
+        }
+    }
+
     // ---- execution backends: synchronous failure modes ----
+
+
     //
     // These assert the deterministic, event-loop-free rejection paths that every backend must satisfy
     // before it ever reaches QProcess::start(). Both backend classes compile and run their portable

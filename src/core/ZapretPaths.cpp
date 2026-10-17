@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QSysInfo>
 
@@ -73,6 +74,15 @@ QString ZapretPaths::nativeArchDirName()
     if (cpu == QLatin1String("i386") || cpu == QLatin1String("x86"))
         return QStringLiteral("linux-x86");
     return QString();
+}
+
+QString ZapretPaths::managedInstallDir()
+{
+    const QString base =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (base.isEmpty())
+        return QString();
+    return rel(base, QStringLiteral("zapret"));
 }
 
 QString ZapretPaths::nfqwsPath(const QString &root)

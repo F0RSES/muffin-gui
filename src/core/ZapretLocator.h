@@ -26,7 +26,8 @@ public:
     // Locate candidate roots. Priority order (first match wins for a given platform):
     //   1. $ZAPRET_ROOT (and its windows/ + linux/ children)
     //   2. each entry of extraRoots (and their children)
-    //   3. well-known bases: ~/Documents/zapret, <cwd>/zapret, <cwd>, /opt/zapret
+    //   3. well-known bases: the managed install (<AppDataLocation>/zapret), ~/Documents/zapret,
+    //      <cwd>/zapret, <cwd>, /opt/zapret, /usr/local/zapret
     // Each base is probed as itself plus any windows/ or linux/ child. Results are de-duplicated
     // by canonical path and keep the highest-priority occurrence.
     static QList<Found> locate(const QStringList &extraRoots = {});
