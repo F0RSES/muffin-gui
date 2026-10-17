@@ -3,7 +3,8 @@
 Source of truth: the real trees at `~/Documents/zapret/{windows,linux}`. Everything the core
 library hardcodes is an *exclusion* (helper names / payload dirs); strategy selection itself is
 always derived from what is on disk. This document records the findings that shaped
-`StrategyParser`, `ZapretPaths`, and `ZapretLocator`.
+`StrategyParser`, `ZapretPaths`, `ZapretLocator`, and the release picker/installer
+(`ZapretSource`, `ZapretDownloader`).
 
 ## 1. Layout differences
 
@@ -148,9 +149,41 @@ a single `nfqws` serves both — and each remaining omission is a decision, not 
 - **Native nfqws** preference: `binaries/<host-arch>/nfqws` → `binaries/linux-x86_64/nfqws` →
   `binaries/linux-x86/nfqws` → `./nfqws` (installed by `install_bin.sh`). Host arch from
   `QSysInfo::currentCpuArchitecture()` mapped to the `binaries/` naming.
-- **Locator priority**: `$ZAPRET_ROOT` → caller hints → `~/Documents/zapret`, `~/Downloads/zapret`,
-  `<cwd>/zapret`, `<cwd>`, `/opt/zapret`, `/usr/local/zapret`; each base probed as itself plus a
-  `windows/` and `linux/` child. De-duplicated by canonical path, highest priority kept.
+- **Locator priority**: `$ZAPRET_ROOT` → caller hints → the managed install
+  (`<AppDataLocation>/zapret`, `ZapretPaths::managedInstallDir()`), `~/Documents/zapret`,
+  `~/Downloads/zapret`, `<cwd>/zapret`, `<cwd>`, `/opt/zapret`, `/usr/local/zapret`; each base probed as
+  itself plus a `windows/` and `linux/` child. De-duplicated by canonical path, highest priority kept.
+  The managed install leads because it is the only base whose contents this application laid out itself,
+  and it does not exist until the download has been used once — so it cannot shadow a hand-placed tree.
+
+## 3.1 Downloading a distribution (`ZapretSource` / `ZapretDownloader`)
+
+The GUI can install zapret itself into `<AppDataLocation>/zapret`, which is why that base leads the
+priority list above. What the picker keys on is the shape of the two feeds, verified against
+`bol-van/zapret` `v72.13` and `Flowseal/zapret-discord-youtube` `1.10.3`:
+
+| Feed | assets, in API order | payload inside the archive |
+|------|----------------------|---------------------------|
+| Flowseal (Windows) | `.rar`, `.tar.gz`, `.zip` | `bin/winws.exe`, `*.bat`, `lists/`, `bin/WinDivert*` |
+| bol-van (Linux) | `sha256sum.txt`, `*-openwrt-embedded.tar.gz`, `.tar.gz`, `.zip` | `binaries/<arch>/nfqws`, `init.d/sysv/zapret`, `nfq/` (SOURCES ONLY) |
+
+- **One wrapping folder.** Both archives unpack to a single directory named after the release
+  (`zapret-v72.13/`, `zapret-discord-youtube-1.10.3/`), so it is lifted before installing: `ZapretPaths`
+  is written against the tree root, not against a parent holding one child.
+- **Extension priority alone picks the wrong file.** The openwrt/embedded tarball is listed BEFORE the
+  main one and ships no `binaries/linux-x86_64/`, and the `.rar` no archiver shipped with an OS can open.
+  So variant tokens (`openwrt`, `embedded`, `android`, `gpt`, `bsd`, `macos`, `ios`, matched as whole
+  name tokens rather than substrings) and undecodable suffixes are dropped, not deprioritised.
+- **`assets[].digest` is `sha256:<hex>`** and is verified after the download and before the unpack. A
+  release without a published digest is not refused — the digest is simply reported as unavailable.
+- **A downloaded linux tree is UNPACKED, not installed.** `nfq/` carries sources only, so
+  `isLinuxInstalled()` stays false until `install_easy.sh` / `install_bin.sh` has run; that is exactly the
+  state the portable tier of §2 and §4 exists for.
+- **Modes survive `tar`, and may not survive `unzip`.** The installer restores the exec bit on
+  `binaries/*/nfqws`, `nfq/nfqws` and the sysv/openrc scripts before validating on POSIX.
+- **The install is a swap, not a delete.** The incumbent is renamed aside and only removed after the new
+  tree has validated in place, so every failure path (mismatched digest, truncated archive, missing
+  archiver, refused rename) leaves the previous zapret where it was.
 
 ## 4. Weighting (presentation order only, never correctness)
 
@@ -213,6 +246,10 @@ throwaway `/bin/sh` children through a real event loop, including the whole port
 (§2) with `$ZAPRET_GUI_FIREWALL_PROG` pointed at a stand-in, so the generated rule text, the phase
 ordering, the queued stop, the failed-insert path and the teardown-after-crash are all asserted without
 touching this machine's firewall, and the installed/unpacked weight tiers are pinned on two scratch
-trees that differ by exactly `nfq/nfqws`. Current status: **ALL PASS (0 failures)** — `ctest` runs
-`coretest` plus the headless `uitest`.
+trees that differ by exactly `nfq/nfqws`. It also pins §3.1 without a socket: `pickRelease()` against
+captured copies of both live feeds (decoys included), `normalizeDigest()`, the sha256 of a fixture file
+against an externally computed digest, the archiver table, and what does and does not count as a
+completed install per platform. Current status: **ALL PASS (0 failures)** — `ctest` runs `coretest` plus
+the headless `uitest`, which builds `DownloadDialog` but never calls `startFetch()`, so no test in this
+repository reaches GitHub.
 
