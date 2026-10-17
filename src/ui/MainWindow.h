@@ -82,6 +82,11 @@ public:
 
     void refreshStrategies();
     void openSettings();
+    // Fetch the newest release for this platform, install it into the managed directory, and point the
+    // application at it. Reached from the toolbar, from SettingsDialog and from the "no strategies"
+    // placeholder — three entrances, one implementation, because a download that behaves differently
+    // depending on which button opened it is the kind of bug nobody notices until an install fails.
+    void downloadZapret();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -97,6 +102,8 @@ private slots:
     void onPingUpdated(const QString &host, int status, int latencyMs);
     void onSettingsChanged();
     void onStrategiesLoaded(int count);
+    // A download finished and validated: persist the path and rescan.
+    void zapretInstalled(const QString &path);
 
 private:
     void buildCentral();
@@ -131,7 +138,7 @@ private:
     QStackedWidget *m_stack = nullptr;      // cards list <-> "no strategies found" placeholder
     QWidget *m_cardHost = nullptr;
     QVBoxLayout *m_cardLayout = nullptr;
-    QLabel *m_placeholder = nullptr;
+    QWidget *m_placeholder = nullptr;      // "no strategies found" page: the text plus its two ways out
     QAction *m_stopAction = nullptr;         // toolbar "Остановить", enabled only while managed
     QLabel *m_statusLabel = nullptr;
     QLabel *m_dirLabel = nullptr;

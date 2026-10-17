@@ -55,6 +55,7 @@ set(ZAPRET_UI_SOURCES
     src/ui/PingIndicator.cpp
     src/ui/StrategyCard.cpp
     src/ui/LogPanel.cpp
+    src/ui/DownloadDialog.cpp
     src/ui/SettingsDialog.cpp
     src/ui/MainWindow.cpp
 )
@@ -67,6 +68,7 @@ set(ZAPRET_UI_HEADERS
     src/ui/PingIndicator.h
     src/ui/StrategyCard.h
     src/ui/LogPanel.h
+    src/ui/DownloadDialog.h
     src/ui/SettingsDialog.h
     src/ui/MainWindow.h
 )

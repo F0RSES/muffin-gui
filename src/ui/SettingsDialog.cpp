@@ -1,4 +1,5 @@
 #include "SettingsDialog.h"
+#include "DownloadDialog.h"
 #include "Settings.h"
 #include "StrategyParser.h"
 #include "Theme.h"
@@ -45,6 +46,8 @@ void SettingsDialog::build()
     m_browseButton = new QPushButton(QStringLiteral("Обзор…"), this);
     m_detectButton = new QPushButton(QStringLiteral("Автопоиск"), this);
     m_detectButton->setToolTip(QStringLiteral("Найти дерево zapret в $ZAPRET_ROOT, ~/Documents/zapret, /opt/zapret"));
+    m_downloadButton = new QPushButton(QStringLiteral("Скачать…"), this);
+    m_downloadButton->setToolTip(QStringLiteral("Загрузить последнюю версию zapret с GitHub в папку приложения"));
 
     auto *pathRow = new QHBoxLayout;
     pathRow->setContentsMargins(0, 0, 0, 0);
@@ -52,6 +55,7 @@ void SettingsDialog::build()
     pathRow->addWidget(m_pathEdit, 1);
     pathRow->addWidget(m_browseButton);
     pathRow->addWidget(m_detectButton);
+    pathRow->addWidget(m_downloadButton);
 
     m_pathState = new QLabel(this);
     m_pathState->setWordWrap(true);
@@ -107,6 +111,7 @@ void SettingsDialog::build()
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(m_browseButton, &QPushButton::clicked, this, &SettingsDialog::browse);
     connect(m_detectButton, &QPushButton::clicked, this, &SettingsDialog::autoDetect);
+    connect(m_downloadButton, &QPushButton::clicked, this, &SettingsDialog::downloadZapret);
     connect(m_pathEdit, &QLineEdit::textChanged, this, &SettingsDialog::revalidatePath);
 }
 
@@ -221,6 +226,21 @@ void SettingsDialog::autoDetect()
         return;
     }
     m_pathEdit->setText(QDir::toNativeSeparators(found.first().path));
+}
+
+void SettingsDialog::downloadZapret()
+{
+    DownloadDialog dialog(this);
+    connect(&dialog, &DownloadDialog::installed, this, [this](const QString &path) {
+        m_pathEdit->setText(QDir::toNativeSeparators(path));
+        // Said out loud rather than left to the textChanged handler: setText is a no-op when the field
+        // already reads exactly this path, and the fresh tree still has to be described.
+        revalidatePath();
+    });
+    dialog.startFetch();
+    dialog.exec();
+    // Nothing is written to Settings until the user presses OK: a download that lands in the field and
+    // a path the application will use are two decisions, and this dialog has always owned the second.
 }
 
 } // namespace zapret

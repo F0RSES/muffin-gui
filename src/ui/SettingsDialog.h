@@ -49,6 +49,9 @@ signals:
 private slots:
     void browse();
     void autoDetect();
+    // Fetch a release into the managed install and put the resulting path in the field. A third action
+    // next to "Обзор…" and "Автопоиск" because both of those assume zapret is already on this disk.
+    void downloadZapret();
     void revalidatePath();
 
 private:
@@ -61,6 +64,7 @@ private:
     QLabel *m_pathState = nullptr;
     QPushButton *m_browseButton = nullptr;
     QPushButton *m_detectButton = nullptr;
+    QPushButton *m_downloadButton = nullptr;
 
     QCheckBox *m_startLastCheck = nullptr;
     QCheckBox *m_trayCheck = nullptr;

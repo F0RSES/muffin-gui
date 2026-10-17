@@ -7,8 +7,11 @@
 // Deliberately NOT covered here: a constructed MainWindow (it needs a window manager and, for the tray
 // paths, a tray host) — its pure policy predicates are covered — anything that would spawn
 // pkexec/winws, and real network reachability (the ping test only asserts that a verdict arrives).
+// DownloadDialog is constructed but never started: startFetch() is the only thing in it that touches
+// GitHub, and a test suite must not depend on that answer.
 
 #include "IZapretBackend.h"
+#include "DownloadDialog.h"
 #include "LogPanel.h"
 #include "MainWindow.h"
 #include "PingIndicator.h"
@@ -18,6 +21,7 @@
 #include "Strategy.h"
 #include "StrategyCard.h"
 #include "Theme.h"
+#include "ZapretDownloader.h"
 
 #include <QApplication>
 #include <QColor>
@@ -533,6 +537,46 @@ static void testPingService()
     check(true, "PingService thread joined cleanly");
 }
 
+// ------------------------------------------------------------- DownloadDialog ----
+//
+// Nothing here talks to GitHub. The dialog's constructor only builds widgets and the request is
+// startFetch(), which these tests never call — that separation is precisely what makes a download UI
+// testable, and it is what the assertions below are written against.
+static void testDownloadDialog()
+{
+    std::printf("\n[DownloadDialog]\n");
+
+    DownloadDialog dialog;
+    check(!dialog.isBusy(), "a fresh dialog has nothing in flight");
+    check(!dialog.isDownloadEnabled(),
+          "the download action is disabled until a release has actually been picked");
+    check(dialog.installedPath().isEmpty(), "nothing is reported installed before anything ran");
+    check(!dialog.statusText().isEmpty(), "and the status line is never left blank");
+    check(dialog.downloader() != nullptr, "the dialog owns its downloader");
+
+    // The default target is the directory the GUI manages — the same one ZapretLocator lists first, so
+    // what is installed here is still found after a restart.
+    const QString root = ZapretDownloader::installRoot();
+    check(!root.isEmpty() && QDir::fromNativeSeparators(root).endsWith(QLatin1String("/zapret")),
+          "the managed install directory ends in zapret");
+    check(dialog.targetDir() == root, "and the dialog points at it without being told to");
+
+    QTemporaryDir tmp;
+    check(tmp.isValid(), "temporary directory for the target override");
+    const QString overrideDir = tmp.filePath(QStringLiteral("zapret-target"));
+    dialog.setTargetDir(overrideDir);
+    check(dialog.targetDir() == overrideDir, "an override is reported back verbatim");
+    check(!QDir(overrideDir).exists(),
+          "naming a target does not create it: only a finished download may write there");
+
+    // Wording the info line is built from, checked without a network answer.
+    check(DownloadDialog::humanSize(0) == QStringLiteral("0 Б"), "zero bytes has wording of its own");
+    check(DownloadDialog::humanSize(1536).contains(QStringLiteral("КиБ")), "kilobytes are spelled in КиБ");
+    check(DownloadDialog::humanSize(7844856).contains(QStringLiteral("МиБ")), "and megabytes in МиБ");
+    check(DownloadDialog::humanSize(-1) == QStringLiteral("неизвестно"),
+          "an unannounced size is called unknown, not zero");
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
@@ -554,6 +598,7 @@ int main(int argc, char **argv)
     testWindowPolicy();
     testTheme(app);
     testPingService();
+    testDownloadDialog();
 
     std::printf("\n=== %s (%d failures) ===\n", g_failures ? "FAILED" : "ALL PASS", g_failures);
     return g_failures ? 1 : 0;

@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "DownloadDialog.h"
 #include "LogPanel.h"
 #include "PingIndicator.h"
 #include "PingService.h"
@@ -18,6 +19,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSizePolicy>
@@ -161,14 +163,34 @@ void MainWindow::buildCentral()
     m_cardLayout->addStretch(1);
     m_scroll->setWidget(m_cardHost);
 
-    m_placeholder = new QLabel(m_stack);
-    m_placeholder->setObjectName(QStringLiteral("placeholder"));
-    m_placeholder->setAlignment(Qt::AlignCenter);
-    m_placeholder->setWordWrap(true);
-    m_placeholder->setText(QStringLiteral(
+    m_placeholder = new QWidget(m_stack);
+    m_placeholder->setObjectName(QStringLiteral("placeholderPage"));
+
+    // The placeholder used to be one label that ended in "укажите путь в настройках" — instructions for
+    // someone who has no zapret yet and no way to get it from here. Both ways out are now buttons:
+    // pointing at a folder that does not exist is not a fix, downloading it is.
+    auto *placeholderText = new QLabel(QStringLiteral(
         "Стратегии не найдены.\n\n"
-        "Укажите папку с zapret в настройках (Ctrl+S) —\n"
-        "нужен каталог windows/ с *.bat или linux/ с init.d/zapret."));
+        "Скачайте zapret сами — или укажите папку, которая уже есть на диске."), m_placeholder);
+    placeholderText->setObjectName(QStringLiteral("placeholder"));
+    placeholderText->setAlignment(Qt::AlignCenter);
+    placeholderText->setWordWrap(true);
+
+    auto *placeholderDownload = new QPushButton(QStringLiteral("Скачать zapret"), m_placeholder);
+    placeholderDownload->setObjectName(QStringLiteral("primaryButton"));
+    auto *placeholderSettings = new QPushButton(QStringLiteral("Настройки (Ctrl+S)"), m_placeholder);
+
+    auto *placeholderBox = new QVBoxLayout(m_placeholder);
+    placeholderBox->setContentsMargins(24, 24, 24, 24);
+    placeholderBox->setSpacing(14);
+    placeholderBox->addStretch(1);
+    placeholderBox->addWidget(placeholderText);
+    placeholderBox->addWidget(placeholderDownload, 0, Qt::AlignHCenter);
+    placeholderBox->addWidget(placeholderSettings, 0, Qt::AlignHCenter);
+    placeholderBox->addStretch(2);
+
+    connect(placeholderDownload, &QPushButton::clicked, this, &MainWindow::downloadZapret);
+    connect(placeholderSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
 
     m_stack->addWidget(m_scroll);
     m_stack->addWidget(m_placeholder);
@@ -199,6 +221,14 @@ void MainWindow::buildToolBar()
                                             QStringLiteral("Обновить"));
     refresh->setToolTip(QStringLiteral("Пересканировать папку zapret (Ctrl+R)"));
     connect(refresh, &QAction::triggered, this, &MainWindow::refreshStrategies);
+
+    // Between "Обновить" (look at what is here) and "Настройки" (change where to look): when there is
+    // nothing here yet, downloading is the action that actually helps, and it has to be one click away
+    // rather than buried in the settings sheet.
+    QAction *download = m_toolBar->addAction(Theme::themedIcon(QStringLiteral("arrow-down"), 16),
+                                             QStringLiteral("Скачать zapret"));
+    download->setToolTip(QStringLiteral("Загрузить последнюю версию zapret с GitHub"));
+    connect(download, &QAction::triggered, this, &MainWindow::downloadZapret);
 
     QAction *settings = m_toolBar->addAction(Theme::themedIcon(QStringLiteral("settings"), 16),
                                              QStringLiteral("Настройки"));
@@ -390,9 +420,7 @@ void MainWindow::populateCards()
     }
     m_cardLayout->addStretch(1);
 
-    m_stack->setCurrentWidget(list.isEmpty()
-                                  ? static_cast<QWidget *>(m_placeholder)
-                                  : static_cast<QWidget *>(m_scroll));
+    m_stack->setCurrentWidget(list.isEmpty() ? m_placeholder : m_scroll);
     updateStatusUi();
 }
 
@@ -490,6 +518,8 @@ void MainWindow::applyTheme()
             const QString text = a->text();
             if (text == QLatin1String("Обновить"))
                 a->setIcon(Theme::themedIcon(QStringLiteral("refresh"), 16));
+            else if (text == QLatin1String("Скачать zapret"))
+                a->setIcon(Theme::themedIcon(QStringLiteral("arrow-down"), 16));
             else if (text == QLatin1String("Настройки"))
                 a->setIcon(Theme::themedIcon(QStringLiteral("settings"), 16));
             else if (text == QLatin1String("Остановить"))
@@ -520,6 +550,31 @@ void MainWindow::openSettings()
     SettingsDialog dialog(*m_settings, this);
     dialog.exec();
     // SettingsDialog::apply() already wrote through Settings, which fired changed() and reloaded.
+}
+
+void MainWindow::downloadZapret()
+{
+    DownloadDialog dialog(this);
+    connect(&dialog, &DownloadDialog::installed, this, &MainWindow::zapretInstalled);
+    // The constructor only builds widgets; the request starts here. A dialog that is constructed but
+    // never started — in a test, or by a code path that closes it immediately — touches no network.
+    dialog.startFetch();
+    dialog.exec();
+}
+
+void MainWindow::zapretInstalled(const QString &path)
+{
+    m_log->appendLine(QStringLiteral("Установлен zapret: %1").arg(QDir::toNativeSeparators(path)),
+                      LogPanel::Info);
+
+    // Exactly one rescan, whichever way the path moves. Writing Settings fires changed(), and
+    // onSettingsChanged re-points the manager whenever the value actually differs; when it does not
+    // differ, the directory that was scanned a moment ago was empty, so the catalog still has to be
+    // built again by hand.
+    if (m_settings->zapretPath() != path)
+        m_settings->setZapretPath(path);
+    else
+        refreshStrategies();
 }
 
 void MainWindow::startStrategy(const QString &id, bool interactive)
