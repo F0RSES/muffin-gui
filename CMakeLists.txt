@@ -101,6 +101,29 @@ add_executable(uitest
 target_include_directories(uitest PRIVATE src/ui)
 target_link_libraries(uitest PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Network Qt6::Test)
 
+# ---- source encoding --------------------------------------------------------
+# The UI strings are Cyrillic and are written as narrow literals inside QStringLiteral("...") (see
+# src/ui/DownloadDialog.cpp, MainWindow.cpp, SettingsDialog.cpp, core/ZapretManager.cpp). Qt 6 reads such
+# literals as UTF-8, so the bytes that reach the binary have to be UTF-8.
+#
+# MSVC does not assume that: without an explicit charset it decodes the source in the system ANSI
+# codepage and re-encodes the execution charset the same way. Every Cyrillic literal then trips C4819
+# and, worse, ships as mojibake — the dialog would read "ÑÐºÐ°ÑÑÑ" instead of "Скачать". The files are
+# UTF-8 without a BOM, so /utf-8 (equivalent to /source-charset:utf-8 /execution-charset:utf-8) is the
+# fix; adding a BOM to ~17 sources would work too but is far noisier and survives no editor by accident.
+#
+# Applied per target rather than add_compile_options() so it lands on the four targets that carry the
+# literals and on nothing else. Generated sources inherit it from their owning target, which matters:
+# AUTOMOC's moc_*.cpp and rcc's qrc_resources.cpp restate strings from the headers/resources and are
+# compiled as part of these same targets. GCC/Clang already treat source and execution charsets as
+# UTF-8 by default, so this block is deliberately MSVC-only and changes nothing on Linux.
+if (MSVC)
+    target_compile_options(Muffin PRIVATE /utf-8)
+    target_compile_options(zapretcore PRIVATE /utf-8)
+    target_compile_options(coretest PRIVATE /utf-8)
+    target_compile_options(uitest PRIVATE /utf-8)
+endif()
+
 enable_testing()
 add_test(NAME coretest COMMAND coretest)
 add_test(NAME uitest COMMAND uitest)
