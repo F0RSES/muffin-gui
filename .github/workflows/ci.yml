@@ -310,6 +310,13 @@ jobs:
     permissions:
       contents: write      # `gh release create` uploads release assets; the default token is read-only.
     steps:
+      # Checkout is required here, not just for convenience: `gh release create` resolves the
+      # target repository by walking up to a .git directory, so on a bare runner it dies with
+      # "fatal: not a git repository". The download-artifact steps below write files but never
+      # create a repo. `--verify-tag` is answered from the API rather than local refs, so the
+      # default shallow checkout is enough — no fetch-depth/fetch-tags needed.
+      - uses: actions/checkout@v5.1.0
+
       - name: Fetch the .deb
         uses: actions/download-artifact@v4.3.0
         with:
