@@ -175,6 +175,20 @@ and `ZapretPaths::isLinuxInstalled()` is the single predicate that decides it. B
 `StrategyParser::applyLinuxRunModes()` is the pass that assigns `Strategy::RunMode` and these weights;
 the per-file `weightFor()` values above are only its PRE-pass guess for the tree walk to dedup on.
 
+**How "installed" is decided, per platform.** `isLinuxInstalled()` stats `nfq/nfqws` — the exact path
+`init.d/sysv/functions` hardcodes as `NFQWS="$ZAPRET_BASE/nfq/nfqws"` — and asks whether it is a
+regular file that can be exec'd. On Linux that second half is the mode's exec bit, which is worth
+checking: `install_bin.sh` can leave the binary present but not executable. On Windows it cannot be.
+Qt's NTFS permission lookup is off by default (`qt_ntfs_permission_lookup == 0`), so
+`QFileInfo::isExecutable()` is derived from the file *extension* only (`.exe`/`.com`/`.bat`/`.pif`/`.cmd`)
+and `QFile::setPermissions()` forwards just read/write to `_wchmod`, dropping every exec bit while
+still returning true. An extension-less ELF payload therefore always reads as non-executable there, so
+requiring it would pin a genuinely installed tree to the "not installed" ranking (weight 30 + a
+"start will fail" warning that is not true) for every Linux tree browsed from Windows. Windows uses
+presence of the regular file instead — which is still exactly what separates the two states, since an
+unpacked tree ships `nfq/` as sources only. `/etc/init.d/zapret` and systemctl state are deliberately
+not consulted either way: they say the service is *registered*, not that `pkexec <script> start` works.
+
 `deduplicated()` collapses duplicate `(name, kind)` pairs keeping the higher weight, then sorts by
 descending weight and ascending name.
 

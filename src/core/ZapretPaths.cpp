@@ -25,6 +25,29 @@ bool exists(const QString &path)
     return !path.isEmpty() && QFileInfo::exists(path);
 }
 
+// Can `fi` be executed? The honest answer is platform-dependent, and the difference is not cosmetic.
+//
+// On POSIX the exec bit is real, and install_bin.sh can leave a binary that exists but cannot be
+// exec'd, so the bit has to be checked.
+//
+// On Windows it cannot be. Qt's ACL-based permission lookup is OFF by default
+// (qt_ntfs_permission_lookup == 0 in qfilesystemengine_win.cpp), so the fallback derives the exec
+// permissions from the file *extension* alone -- ".exe"/".com"/".bat"/".pif"/".cmd" -- and
+// QFile::setPermissions() forwards only read/write to _wchmod, silently discarding
+// ExeOwner/ExeGroup/ExeOther. An extension-less ELF payload like nfq/nfqws therefore reads as
+// non-executable no matter what is on disk. Treating that as "not installed" would be a permanent
+// false negative misranking every linux tree viewed from Windows, so there the criterion is the
+// presence of a regular file: what install_bin.sh leaves behind and what an unpacked tree
+// (nfq/ = sources only) does not have.
+bool isRunnableNfqws(const QFileInfo &fi)
+{
+#if defined(Q_OS_WIN)
+    return fi.isFile();
+#else
+    return fi.isFile() && fi.isExecutable();
+#endif
+}
+
 } // namespace
 
 QString ZapretPaths::winwsPath(const QString &root) { return rel(root, QStringLiteral("bin/winws.exe")); }
@@ -90,8 +113,11 @@ bool ZapretPaths::isLinuxInstalled(const QString &root)
     //
     // Deliberately NOT consulted: /etc/init.d/zapret or systemctl state. Those say the service is
     // registered, which the GUI does not care about — it cares whether `pkexec <script> start` works.
+    //
+    // isRunnableNfqws() is why the executable half of that sentence means different things per
+    // platform; see its comment.
     const QFileInfo fi(nfqwsBuiltPath(root));
-    return fi.exists() && fi.isFile() && fi.isExecutable();
+    return fi.exists() && isRunnableNfqws(fi);
 }
 
 QString ZapretPaths::binariesDir(const QString &root) { return rel(root, QStringLiteral("binaries")); }

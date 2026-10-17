@@ -36,6 +36,10 @@ public:
     static QString nfqwsBuiltPath(const QString &root);       // nfq/nfqws  (what the init scripts exec)
     // True when the linux tree is INSTALLED, i.e. its sysv/openrc init script can actually bring the
     // daemon up. See the definition for the exact on-disk condition.
+    //
+    // Platform note: "can be exec'd" is checked with the POSIX exec bit, and on Windows only the
+    // presence of nfq/nfqws. Qt cannot report an extension-less ELF file as executable there, so
+    // asking it would make every installed tree look unpacked forever.
     static bool isLinuxInstalled(const QString &root);
     static QString binariesDir(const QString &root);         // binaries/
 

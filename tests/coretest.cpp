@@ -318,10 +318,17 @@ static bool pumpUntil(const std::function<bool()> &pred, int timeoutMs)
 }
 
 // Write a POSIX shell script and make it executable. Returns the path, or "" on any failure.
+//
+// Like writeFile, the parent is created: several fixtures live in their own subdirectory of a
+// temporary tree, and mkpath is not the caller's job.
+//
+// The chmod is best-effort in one way that matters for the run-mode fixtures below: on Windows
+// QFile::setPermissions() forwards only read/write to _wchmod and discards every exec bit (and it
+// still reports success), so this CANNOT produce a file Qt calls executable there. An extension-less
+// payload like nfq/nfqws is therefore "installed" by presence alone on Windows -- see
+// isRunnableNfqws() in ZapretPaths.cpp, which is why that predicate branches by platform.
 static QString makeScript(const QString &path, const QString &body)
 {
-    // Like writeFile, the parent is created: several fixtures live in their own subdirectory of a
-    // temporary tree, and mkpath is not the caller's job.
     QDir().mkpath(QFileInfo(path).absolutePath());
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -383,8 +390,10 @@ static bool makeLinuxTree(const QString &root, bool installed, bool payload = tr
                         QByteArrayLiteral("fixture payload\n"));
     if (installed)
     {
-        // The one thing that separates an installed tree from an unpacked one, and it has to be
-        // executable: isLinuxInstalled() checks exactly what the init script checks before it execs.
+        // The one thing that separates an installed tree from an unpacked one. On POSIX it has to be
+        // executable, because that is exactly what isLinuxInstalled() checks before calling the init
+        // script runnable; on Windows, where the exec bit cannot be expressed for this name, the
+        // regular file written here is enough (see makeScript()).
         ok &= !makeScript(root + QLatin1String("/nfq/nfqws"),
                           QStringLiteral("echo fixture daemon\n")).isEmpty();
     }
