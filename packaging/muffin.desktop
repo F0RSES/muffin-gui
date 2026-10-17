@@ -1,0 +1,20 @@
+# Desktop entry installed by the Linux packages (share/applications/muffin.desktop).
+# The Icon key is the themed name only ("muffin", no extension): it resolves through the hicolor icon
+# theme entry installed next to this file by CMakeLists.txt. StartupWMClass has to match the app's
+# real WM class — Qt derives it from the executable name ("Muffin") unless setOverrideCursor/
+# QGuiApplication::setDesktopFileName changes it — so if the launcher ever opens a second taskbar
+# entry, compare `xprop -class` output against the value below.
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Muffin
+GenericName=Traffic shaper control panel
+Comment=Launch and manage zapret strategies from a graphical front end
+Exec=Muffin %U
+Icon=muffin
+Terminal=false
+Categories=Network;Utility;
+Keywords=zapret;proxy;vpn;traffic;dpi;whitelist;
+TryExec=Muffin
+StartupNotify=true
+StartupWMClass=Muffin

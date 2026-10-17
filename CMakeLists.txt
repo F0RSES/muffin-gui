@@ -124,6 +124,26 @@ if (MSVC)
     target_compile_options(uitest PRIVATE /utf-8)
 endif()
 
+# ---- install rules ----------------------------------------------------------
+# These exist only to give CPack something to package; a plain build (scripts/build.sh, CI configure +
+# build + ctest) never touches them, and nothing here runs unless someone does `cmake --install` or
+# `cpack`. The test targets are deliberately not installed.
+install(TARGETS Muffin RUNTIME DESTINATION bin)
+
+# Linux-only desktop integration. A Windows build tree has no use for an icon theme or a .desktop
+# file, and the macOS case does not exist here, so the whole block is guarded — installing them on
+# Windows would put a stray share/ next to Muffin.exe for Inno Setup to trip over.
+#
+# packaging/muffin.svg rather than src/resources/icons/app.svg: the in-app copy is a currentColor
+# glyph that Theme::icon() recolours, which only works because Qt parses it — the desktop environment
+# would get an unpainted shape. It is installed as muffin.svg to match the Icon= key of the entry.
+if (UNIX AND NOT APPLE)
+    install(FILES packaging/muffin.svg
+            DESTINATION share/icons/hicolor/scalable/apps RENAME muffin.svg)
+    install(FILES packaging/muffin.desktop
+            DESTINATION share/applications)
+endif()
+
 enable_testing()
 add_test(NAME coretest COMMAND coretest)
 add_test(NAME uitest COMMAND uitest)
@@ -146,3 +166,60 @@ if (ZAPRET_OFFSCREEN_PLUGIN)
 else()
     set_tests_properties(uitest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
 endif()
+
+# ---- packaging (CPack) ------------------------------------------------------
+# Version stamped into the packages. A cache variable so a tag can override it without editing this
+# file: the release job passes -DMUFFIN_VERSION="${tag without the leading v}", which is what keeps
+# muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in agreement. The default is
+# the current release line, so local `cpack` runs still produce a sensibly named file.
+set(MUFFIN_VERSION "0.1.0" CACHE STRING "Version stamped into the generated packages")
+
+set(CPACK_PACKAGE_NAME "muffin")
+set(CPACK_PACKAGE_VENDOR "F0RSES")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Qt6 GUI for zapret")
+set(CPACK_PACKAGE_VERSION "${MUFFIN_VERSION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "Muffin")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "F0RSES")
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/F0RSES/muffin-gui")
+set(CPACK_DEBIAN_PACKAGE_SECTION "net")
+# Minimum versions, not exact ones, and deliberately pinned above the distro archive: this project's
+# real floor is Qt 6.6+ (QPalette::Accent, QStyleHints::colorScheme) and CI builds against 6.7.3. A
+# plain "libqt6widgets6" would let apt resolve to the Ubuntu 22.04/24.04 Qt (6.2 / 6.4) and the binary
+# would then die at startup with unresolved symbols — worse than an install-time dependency error.
+# (An alternative that avoids the question entirely: ship an AppImage bundling Qt; not done yet.)
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6widgets6 (>= 6.7), libqt6network6 (>= 6.7), libqt6svg6 (>= 6.7)")
+
+# Debian wants the machine-readable architecture, and CMake's CMAKE_SYSTEM_PROCESSOR gives the kernel
+# name. Mapped explicitly so the file name is deterministic (muffin_0.1.0_amd64.deb) instead of
+# whatever the host's dpkg defaults happen to be.
+if (NOT DEFINED CPACK_DEBIAN_PACKAGE_ARCHITECTURE)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "arm64")
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^i[3-6]86$")
+        set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "i386")
+    endif()
+endif()
+
+# Without this, CPack names the file after its own "<name>-<version>-<system>" default — locally that
+# came out as muffin-0.1.0-Linux.deb, which is not a Debian file name and is not what the release job
+# attaches. Underscored name_version_arch is what apt/dpkg and every other Debian package use.
+if (DEFINED CPACK_DEBIAN_PACKAGE_ARCHITECTURE)
+    set(CPACK_PACKAGE_FILE_NAME
+        "${CPACK_PACKAGE_NAME}_${MUFFIN_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
+endif()
+
+# Default generator per platform, but only when the caller did not choose one: the release job passes
+# -DCPACK_GENERATOR=DEB, and `cpack -G DEB` also works. Guarded because CPack's own default (TGZ on
+# Unix) is the right answer on a host without dpkg-deb, where a DEB default would only produce an error.
+if (NOT CPACK_GENERATOR)
+    find_program(CPACK_DPKG_DEB_PROGRAM dpkg-deb)
+    if (UNIX AND NOT APPLE AND CPACK_DPKG_DEB_PROGRAM)
+        set(CPACK_GENERATOR "DEB")
+    endif()
+endif()
+
+include(CPack)
+

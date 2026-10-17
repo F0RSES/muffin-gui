@@ -44,6 +44,19 @@ on:
 # only (g_winStrategies == -1 for an unpinned tree). uitest runs headless on the offscreen
 # platform plugin, which CMakeLists.txt locates via ${Qt6_DIR}/../../../plugins/platforms —
 # for an aqt install that resolves to $QT_ROOT_DIR/plugins/platforms, where the plugin really is.
+#
+# Packaging lives partly inside the two build jobs and partly in a fifth one:
+#   - The .deb is produced at the tail of the `linux` job. CPack needs the same build tree that
+#     just ran ctest, and dpkg-deb is available everywhere Ubuntu is, so a dedicated job would
+#     only re-install Qt and re-run cmake for no benefit.
+#   - The .exe cannot live in the `windows` job because Inno Setup's compiler (ISCC) is
+#     Delphi/Windows-only and the payload has to be validated before it is packaged; a separate
+#     `installer` job makes that gate explicit.
+#   - `release` is tag-gated and needs both packaging jobs, so a release is never published from
+#     a commit whose tests did not pass. See the two jobs at the bottom of this file.
+# Every packaging step reads MUFFIN_VERSION / AppVersion from the tag itself (Configure here,
+# ISCC in the installer job), which is what keeps the .deb file name, the .exe file name and the
+# git tag in agreement.
 
 jobs:
   linux:
@@ -67,7 +80,17 @@ jobs:
           sudo apt-get install -y ninja-build cmake g++ libgl1-mesa-dev
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR/lib/cmake"
+        # MUFFIN_VERSION is only stamped when this is a release tag: on a PR/branch build the
+        # default in CMakeLists.txt is fine (and cpack is skipped below anyway). Stripping the
+        # leading `v` is what makes muffin_<tag-without-v>_amd64.deb line up with the tag name,
+        # matching what `installer` does for the .exe.
+        run: |
+          ver_args=()
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ver_args+=("-DMUFFIN_VERSION=${GITHUB_REF_NAME#v}")
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR/lib/cmake" "${ver_args[@]}"
 
       - name: Build
         run: cmake --build build --parallel
@@ -78,13 +101,55 @@ jobs:
           ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
         run: ctest --test-dir build --output-on-failure
 
-      - name: Upload artifacts
+      # CPack runs against the tree that just passed ctest; the DEB generator is auto-selected in
+      # CMakeLists.txt because dpkg-deb is present on ubuntu-22.04. Pinning -G DEB here anyway so a
+      # future change to the auto-default cannot silently turn the release into a TGZ.
+      - name: Build the .deb
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cpack -G DEB
+        working-directory: build
+
+      # Verify the .deb actually contains what we claim. CPack would happily produce an empty or
+      # misnamed package if the install() rules or the version threading drifted.
+      - name: Verify the .deb
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          expected="muffin_${GITHUB_REF_NAME#v}_amd64.deb"
+          if [[ ! -f "build/$expected" ]]; then
+            echo "expected build/$expected, found:"; ls -la build/*.deb || true
+            exit 1
+          fi
+          # Control fields the release actually depends on.
+          dpkg-deb -f "build/$expected" Package Version Architecture Depends \
+            | tee /tmp/deb-control
+          grep -q "^Package: muffin$"                /tmp/deb-control
+          grep -q "^Version: ${GITHUB_REF_NAME#v}$"  /tmp/deb-control
+          grep -q "^Architecture: amd64$"            /tmp/deb-control
+          # Payload: binary + desktop entry + themed icon (see install() rules in CMakeLists.txt).
+          dpkg-deb -c "build/$expected" > /tmp/deb-list
+          grep -q './usr/bin/Muffin$'                                   /tmp/deb-list
+          grep -q './usr/share/applications/muffin.desktop$'            /tmp/deb-list
+          grep -q './usr/share/icons/hicolor/scalable/apps/muffin.svg$' /tmp/deb-list
+          echo "deb ok: $(du -h "build/$expected" | cut -f1)"
+
+      - name: Upload the .deb
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Muffin-deb-x64
+          path: build/muffin_*.deb
+          if-no-files-found: error
+
+      - name: Upload portable artifacts
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4.4.3
         with:
           name: Muffin-linux-x64
           path: |
             build/Muffin
+            packaging/muffin.desktop
+            packaging/muffin.svg
             README.md
             LICENSE
 
@@ -131,11 +196,148 @@ jobs:
         uses: actions/upload-artifact@v4.4.3
         with:
           name: Muffin-windows-x64
+          # The last three directories are windeployqt/Qt-version dependent. upload-artifact only
+          # reports if-no-files-found when the whole list matched nothing, so listing a directory that
+          # this Qt does not ship neither fails the job nor leaves the installer missing it: ISCC reads
+          # whatever arrived. iconengines matters most (qsvgicon.dll renders the toolbar SVG icons).
           path: |
             build/Release/Muffin.exe
             build/Release/Qt6*.dll
             build/Release/platforms/
             build/Release/imageformats/
             build/Release/styles/
+            build/Release/iconengines/
+            build/Release/networkinformation/
+            build/Release/tls/
             README.md
             LICENSE
+
+
+  installer:
+    name: Windows installer (Inno Setup)
+    runs-on: windows-2022
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v5.1.0
+
+      - name: Fetch the Windows build
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: Muffin-windows-x64
+          path: win
+          # upload-artifact keeps the workspace-relative paths it was handed, so the payload arrives
+          # under win\build\Release rather than win\. That nesting is why the .iss is given StagingDir
+          # explicitly instead of relying on its hand-run default.
+
+      - name: Check the payload
+        shell: pwsh
+        run: |
+          $rel = 'win\build\Release'
+          foreach ($f in @('Muffin.exe', 'platforms\qwindows.dll')) {
+            if (-not (Test-Path (Join-Path $rel $f))) {
+              throw "artifact is missing $f -- refusing to package a broken payload"
+            }
+          }
+          # A Qt6*.dll that simply was not deployed would otherwise compile into an installer that
+          # ships no Qt at all (the .iss tolerates a missing source), so it is asserted here.
+          if (-not (Get-ChildItem $rel -Filter 'Qt6*.dll' -File)) { throw "no Qt6*.dll in $rel" }
+          $files = @(Get-ChildItem $rel -Recurse -File)
+          $mib = [math]::Round((($files | Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Output "payload ok: $($files.Count) files, $mib MiB"
+
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          # Inno Setup's compiler is Delphi/Windows-only and Ubuntu ships no innosetup package, which is
+          # why this is a Windows job rather than a step in `release`. The image may already carry Inno
+          # Setup; install it only when it does not. One step because step scope is not shared -- a path
+          # resolved here would not survive into a later step.
+          $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+                          "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --yes --no-progress
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "ISCC.exe not found (looked in: $($candidates -join ', '))" }
+          Write-Output "compiler: $iscc"
+
+          $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          # Re-declared, not inherited: $rel came from the previous step and step scope is not shared.
+          $rel = 'win\build\Release'
+          $staging = (Resolve-Path $rel).Path
+          & $iscc "/DAppVersion=$ver" "/DStagingDir=$staging" `
+                  "/DOutputDir=$((Resolve-Path 'pkg').Path)" "packaging\windows_installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC exited with $LASTEXITCODE" }
+          Get-ChildItem pkg -Filter '*.exe' |
+            ForEach-Object { Write-Output "built: $($_.Name) ($([math]::Round($_.Length / 1MB, 1)) MiB)" }
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Muffin-setup-x64
+          path: pkg/*.exe
+          if-no-files-found: error
+
+  # The release is what turns a tag into an installable artifact feed. It is deliberately a
+  # separate job rather than a step inside `installer`: (a) installer runs on windows-2022 where
+  # `gh release` upload would be a Windows-gh build for no reason, (b) the release needs to
+  # consume both the .deb (from linux) and the .exe (from installer) — only an aggregator can see
+  # both, and pinning it to linux keeps the tooling identical between the .deb and the release.
+  #
+  # `needs` covers everything the release must have: linux -> the .deb is verified & produced;
+  # installer -> transitively needs windows, which runs ctest. So a green tag-run implies a
+  # passing test suite for both platforms before the release exists. `gh release create` will
+  # fail cleanly if the tag already has a release, which is the desired behaviour — never
+  # overwrite a shipped artifact.
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-22.04
+    needs: [linux, installer]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write      # `gh release create` uploads release assets; the default token is read-only.
+    steps:
+      - name: Fetch the .deb
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: Muffin-deb-x64
+          path: rel
+
+      - name: Fetch the installer
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: Muffin-setup-x64
+          path: rel
+
+      - name: Check the payload
+        # Exactly one .deb and one .exe: the release should fail loudly rather than silently
+        # publish a broken set. `gh release create --verify-tag` also catches tag drift, but the
+        # upstream jobs already gate on `refs/tags/v`, so this is a fast no-remote sanity pass.
+        run: |
+          set -euo pipefail
+          mapfile -t debs < <(find rel -maxdepth 2 -name '*.deb' -type f)
+          mapfile -t exes < <(find rel -maxdepth 2 -name '*.exe' -type f)
+          echo "debs: ${debs[*]:-<none>}"
+          echo "exes: ${exes[*]:-<none>}"
+          (( ${#debs[@]} == 1 )) || { echo "expected exactly one .deb"; exit 1; }
+          (( ${#exes[@]} == 1 )) || { echo "expected exactly one .exe"; exit 1; }
+          # Move to a flat dir so `gh` uploads with a clean file name (download-artifact preserves
+          # the workspace-relative path it was handed, so paths arrive as rel/build/*.deb, rel/pkg/*.exe).
+          mkdir -p out
+          mv "${debs[0]}" "${exes[0]}" out/
+          ls -la out
+
+      - name: Create the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            --title "Muffin $GITHUB_REF_NAME" \
+            out/*.deb out/*.exe
+          echo "published: $(gh release view "$GITHUB_REF_NAME" --json url -q .url)"

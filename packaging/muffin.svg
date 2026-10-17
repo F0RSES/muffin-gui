@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Application icon for packaged installs (share/icons/hicolor/scalable/apps/muffin.svg).
+
+     Deliberately a copy of src/resources/icons/app.svg with explicit paints instead of currentColor.
+     The in-app copy is a monochrome glyph that Theme::icon() recolours at load time, which only works
+     because Qt parses it; a hicolor icon is read by the desktop environment's own SVG loader, which has
+     no such recolouring step, so currentColor would resolve to whatever the DE happens to pass. This
+     file therefore carries its own colours. Keep the two glyphs in sync when the artwork changes.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+    <path d="M12 2.8l7.4 3.1v5.6c0 4.6-3 8-7.4 9.5-4.4-1.5-7.4-4.9-7.4-9.5V5.9z"
+          fill="#2f8f5b" stroke="#1c5c3a" stroke-width="1.7"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M13.4 7.6L9.3 13.1h2.9l-1 3.6 4.1-5.6h-2.9z" fill="#ffffff"/>
+</svg>
