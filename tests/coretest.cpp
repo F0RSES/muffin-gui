@@ -22,6 +22,7 @@
 #include "ZapretSource.h"
 #include "ZapretManager.h"
 #include "PrivilegeHelper.h"
+#include "MuffinInstallHelper.h"
 #include "IZapretBackend.h"
 #include "LinuxBackend.h"
 #include "WindowsBackend.h"
@@ -33,6 +34,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -1477,9 +1479,461 @@ int main(int argc, char **argv)
         }
     }
 
+    // ---- the promotion contract: what may be promoted, and how, and by whom ----
+    //
+    // MuffinInstallHelper is the single place the GUI and the root helper agree on promoting a
+    // download into ZapretPaths::systemInstallDir(). Nothing here needs root, needs pkexec, or writes
+    // outside a temporary directory: the point of these checks is that the decisions — which tree is a
+    // payload, which source is refused, which command runs in which order, and which program is
+    // trusted enough to be exec'd as root — are data a test can read, not behaviour only a root shell
+    // could observe.
+    out << "\n[MuffinInstallHelper: promotion contract]\n";
+#if defined(Q_OS_WIN)
+    // Windows has no root-owned tree and no polkit: the answer to "where would you promote this?" is
+    // "nowhere", and every caller has to treat that as "no such place" rather than "C:\".
+    check(ZapretPaths::systemInstallDir().isEmpty(), "windows reports no system install directory");
+    check(MuffinInstallHelper::namespaceDir().isEmpty() && MuffinInstallHelper::stagingDir().isEmpty()
+              && MuffinInstallHelper::backupDir().isEmpty(),
+          "and therefore no namespace, staging or backup name either");
+#else
+    {
+        const QString dest = ZapretPaths::systemInstallDir();
+        check(dest == QLatin1String("/opt/muffin/zapret"),
+              "the promoted tree is exactly the path the polkit rule exempts");
+        check(QDir::isAbsolutePath(dest), "the destination is absolute");
+        check(!dest.contains(QLatin1String("..")), "and carries no traversal");
+        check(dest != ZapretPaths::managedInstallDir(),
+              "it is a different place from the managed install the download lands in");
+        check(dest.startsWith(QLatin1String("/opt/muffin/")),
+              "it lives in this application's own namespace, not upstream's /opt/zapret");
+
+        check(MuffinInstallHelper::namespaceDir() == QLatin1String("/opt/muffin"),
+              "the namespace is the destination's parent");
+        check(MuffinInstallHelper::stagingDir() == dest + QLatin1String(".new"),
+              "staging is a sibling, named from the destination");
+        check(MuffinInstallHelper::backupDir() == dest + QLatin1String(".old"),
+              "and so is the backup");
+        // The trailing separator the polkit rule's prefix test carries is what keeps these two outside
+        // the passwordless tree. Assert the property rather than the string: a staging directory
+        // inside the destination would be a half-built, not-yet-root-owned tree pkexec may run for free.
+        check(!MuffinInstallHelper::stagingDir().startsWith(dest + QLatin1Char('/')),
+              "staging is NOT inside the destination, so the rule's prefix cannot reach it");
+        check(!MuffinInstallHelper::backupDir().startsWith(dest + QLatin1Char('/')),
+              "and neither is the backup");
+
+        check(MuffinInstallHelper::programName() == QLatin1String("muffin-install-helper"),
+              "the helper is named for what it is");
+        check(MuffinInstallHelper::installedProgram()
+                  == QLatin1String("/usr/lib/muffin/muffin-install-helper"),
+              "and installed where CMake's install(DESTINATION lib/muffin) puts it");
+
+        const QStringList cand =
+            MuffinInstallHelper::programCandidates(QStringLiteral("/tmp/some-app-dir"));
+        check(cand.first() == MuffinInstallHelper::installedProgram(),
+              "the packaged helper is looked for before any build-tree copy");
+        check(cand.contains(QStringLiteral("/tmp/some-app-dir/muffin-install-helper")),
+              "a helper sitting beside the application is the second place");
+        check(cand.contains(QStringLiteral("/tmp/some-app-dir/../lib/muffin/muffin-install-helper")),
+              "and a cmake --install prefix (bin/ beside lib/muffin/) is the third");
+        check(cand.size() == 3, "exactly three places, in that order");
+    }
+
+    // ---- what counts as a linux payload worth taking root for ----
+    {
+        QTemporaryDir tmp;
+        check(tmp.isValid(), "temporary root for the payload and source checks");
+        const QString root = tmp.filePath(QStringLiteral("h"));
+
+        const QString empty = root + QStringLiteral("/empty");
+        QDir().mkpath(empty);
+        check(!MuffinInstallHelper::looksLikeLinuxPayload(empty),
+              "an empty directory holds no payload");
+        check(!MuffinInstallHelper::looksLikeLinuxPayload(QString()),
+              "and neither does no directory at all");
+
+        // A tree with only .c files and a Makefile cannot start anything — exactly the state a freshly
+        // unpacked release is in before install_bin.sh. Dressing it up as a root-owned, passwordless
+        // payload would mean a tree that cannot run is now free to be exec'd as root.
+        const QString sourceOnly = root + QStringLiteral("/source-only");
+        check(makeLinuxTree(sourceOnly, /*installed=*/false, /*payload=*/false),
+              "wrote a linux tree with no packaged payload");
+        check(!MuffinInstallHelper::looksLikeLinuxPayload(sourceOnly),
+              "and it is not a payload: nothing in it can be started");
+
+        // Either shape of "there is a binary" is enough: the packaged binaries/<arch>/nfqws the
+        // portable card execs, or the nfq/nfqws install_bin.sh leaves for the init script.
+        const QString packaged = root + QStringLiteral("/packaged");
+        check(makeLinuxTree(packaged, false), "wrote a release tree with a packaged payload");
+        check(MuffinInstallHelper::looksLikeLinuxPayload(packaged),
+              "a packaged binaries/<arch>/nfqws is a payload");
+
+        const QString built = root + QStringLiteral("/built");
+        check(makeLinuxTree(built, /*installed=*/true, /*payload=*/false),
+              "wrote a tree with only the built nfq/nfqws");
+        check(MuffinInstallHelper::looksLikeLinuxPayload(built),
+              "and that shape is a payload too");
+
+        // ---- validateSource: every refusal a root process makes before it writes anything ----
+        QString why;
+        check(!MuffinInstallHelper::validateSource(QString(), &why),
+              "no directory is refused");
+        check(why.contains(QStringLiteral("no directory")), "and the message says so");
+
+        check(!MuffinInstallHelper::validateSource(QStringLiteral("packaged"), &why),
+              "a relative path is refused: the helper would resolve it against a cwd it did not choose");
+        check(why.contains(QStringLiteral("absolute")), "with the reason named");
+
+        check(!MuffinInstallHelper::validateSource(root + QStringLiteral("/../packaged"), &why),
+              "a path with a \"..\" component is refused rather than cleaned away");
+        check(why.contains(QStringLiteral("walks out")),
+              "and the message says the source has two spellings, which is the actual problem");
+
+        check(!MuffinInstallHelper::validateSource(root + QStringLiteral("/absent"), &why),
+              "a directory that is not there is refused");
+        check(!MuffinInstallHelper::validateSource(sourceOnly, &why),
+              "a directory that is not a payload is refused");
+        check(why.contains(QStringLiteral("payload")), "naming the payload as what is missing");
+
+        const QString file = root + QStringLiteral("/not-a-dir");
+        check(writeFile(file, QByteArrayLiteral("x")), "wrote a plain file");
+        check(!MuffinInstallHelper::validateSource(file, &why), "and a file is not a source directory");
+
+        const QString link = root + QStringLiteral("/link-to-packaged");
+        check(QFile::link(packaged, link), "created a symlink to a real payload");
+        check(!MuffinInstallHelper::validateSource(link, &why),
+              "but a link is refused: the promotion would follow whoever owns the link's target");
+        check(why.contains(QStringLiteral("link")), "and the message names it");
+
+        check(MuffinInstallHelper::validateSource(packaged, &why),
+              "a real, absolute, payload-holding directory outside the system tree is accepted");
+
+        // ---- links that leave the tree ----
+        //
+        // cp -a preserves a symlink as a symlink, the polkit rule matches the promoted path, and
+        // pkexec execs that path — which the kernel resolves through the link. So a payload whose
+        // binary is a link to bytes its owner can still edit would be a passwordless root shell behind
+        // a path nobody could rewrite. These are the two halves: the escape is refused, and an
+        // in-tree link (which upstream trees do use) is not.
+        const QString escaper = root + QStringLiteral("/escaping");
+        check(makeLinuxTree(escaper, false), "wrote a payload to plant links in");
+        check(!MuffinInstallHelper::hasEscapingSymlink(escaper),
+              "a plain payload tree holds no link out of itself");
+        check(MuffinInstallHelper::validateSource(escaper, &why),
+              "and it is accepted before any link is added");
+
+        // An absolute link straight from the binary the rule would match, to a file its owner writes.
+        const QString attacker = tmp.filePath(QStringLiteral("attacker.sh"));
+        check(writeFile(attacker, QByteArrayLiteral("#!/bin/sh\nid\n")),
+              "wrote a script outside the tree to link to");
+        const QString nfqwsPath = escaper + QStringLiteral("/binaries/") + fixtureArchDir()
+                                  + QStringLiteral("/nfqws");
+        check(QFile::remove(nfqwsPath), "removed the fixture binary");
+        check(QFile::link(attacker, nfqwsPath),
+              "linked it out of the tree to a script the user owns");
+        QString offender;
+        check(MuffinInstallHelper::hasEscapingSymlink(escaper, &offender),
+              "the escaping link is found");
+        check(offender == QFileInfo(nfqwsPath).absoluteFilePath(),
+              "and it is the link that is named, not the tree");
+        check(!MuffinInstallHelper::validateSource(escaper, &why),
+              "so the whole payload is refused as a promotion source");
+        check(why.contains(QStringLiteral("outside")) && why.contains(QStringLiteral("link")),
+              "and the message says a link leaves the tree, which is the reason to care");
+
+        // A relative link can escape too, and it is the one a name-based check would miss.
+        const QString relative = root + QStringLiteral("/escaping-relative");
+        check(makeLinuxTree(relative, false), "wrote a second payload");
+        QDir().mkpath(relative + QStringLiteral("/binaries"));
+        check(QFile::link(QStringLiteral("../../../../etc/passwd"),
+                          relative + QStringLiteral("/binaries/outside")),
+              "planted a relative link that walks out of the tree");
+        check(MuffinInstallHelper::hasEscapingSymlink(relative),
+              "a relative escape is caught as well as an absolute one");
+
+        // A link to something that is not there is the same unknowable, refused: "it points outside" is
+        // not required to make it a path whose eventual bytes nobody can predict.
+        const QString dangling = root + QStringLiteral("/dangling");
+        check(makeLinuxTree(dangling, false), "wrote a payload for the dangling link");
+        check(QFile::link(QStringLiteral("/nowhere/definitely-not-here"),
+                         dangling + QStringLiteral("/ghost")),
+              "linked to a target that does not exist");
+        check(MuffinInstallHelper::hasEscapingSymlink(dangling),
+              "and an unresolvable link is refused too, not treated as harmless");
+        check(!MuffinInstallHelper::validateSource(dangling, &why),
+              "so the tree cannot be promoted");
+
+        // The other side of the line: in-tree links are ordinary parts of a distribution, and refusing
+        // them would mean refusing the real releases this feature exists to install.
+        const QString inner = root + QStringLiteral("/in-tree-links");
+        check(makeLinuxTree(inner, false), "wrote a payload for the in-tree link case");
+        QDir().mkpath(inner + QStringLiteral("/extra"));
+        check(QFile::link(QStringLiteral("../config"), inner + QStringLiteral("/extra/self")),
+              "linked a file inside the tree");
+        check(QFile::link(QStringLiteral("extra"), inner + QStringLiteral("/selfdir")),
+              "and linked a directory inside the tree");
+        check(!MuffinInstallHelper::hasEscapingSymlink(inner),
+              "links that stay inside the promoted tree are not an escape");
+        check(MuffinInstallHelper::validateSource(inner, &why),
+              "and such a tree is still promotable");
+    }
+
+    // ---- promotionSteps: the commands that run as root, asserted as data ----
+    {
+        QTemporaryDir tmp;
+        const QString src = tmp.filePath(QStringLiteral("payload"));
+        check(makeLinuxTree(src, false), "wrote the payload the steps are composed against");
+        const QString staging = ZapretPaths::systemInstallDir() + QStringLiteral(".new");
+
+        const QList<MuffinInstallHelper::Step> steps =
+            MuffinInstallHelper::promotionSteps(src, staging);
+        check(steps.size() == 6,
+              "six steps: namespace ownership, namespace mode, copy, tree ownership, readable, "
+              "not-writable");
+
+        // No step is a shell, and no step is a bare name: every program is absolute or empty (empty
+        // meaning "this host has no such coreutils binary", which the helper refuses rather than
+        // working around). A PATH lookup here would let a directory the helper never chose supply the
+        // program root is about to run.
+        for (const MuffinInstallHelper::Step &s : steps)
+        {
+            check(s.program.isEmpty() || s.program.startsWith(QLatin1Char('/')),
+                  QStringLiteral("step '%1' resolves its program without PATH").arg(s.label));
+            check(!s.arguments.isEmpty(),
+                  QStringLiteral("step '%1' has arguments").arg(s.label));
+            // A path with a space or a glob character in it stays one argument because there is no
+            // shell; "--" is what keeps a path that begins with "-" an argument too.
+            check(s.arguments.contains(QStringLiteral("--")),
+                  QStringLiteral("step '%1' separates options from paths with --").arg(s.label));
+            for (const QString &a : s.arguments)
+                check(!a.contains(QLatin1Char(';')) && !a.contains(QLatin1Char('|'))
+                          && !a.contains(QLatin1Char('$')) && !a.contains(QLatin1Char('`')),
+                      QStringLiteral("step '%1' passes no shell metacharacter").arg(s.label));
+        }
+
+        // Which step is which, found by the program it execs rather than by an index: the count above
+        // is the ordering claim, and these are the content claims that go with it.
+        int copy = -1, chownTree = -1, chmodRead = -1, chmodNoWrite = -1;
+        for (int i = 0; i < steps.size(); ++i)
+        {
+            const QString exe = QFileInfo(steps.at(i).program).fileName();
+            const QStringList a = steps.at(i).arguments;
+            if (exe == QLatin1String("cp")) copy = i;
+            if (exe == QLatin1String("chown") && a.contains(QStringLiteral("-R"))) chownTree = i;
+            if (exe == QLatin1String("chmod") && a.contains(QStringLiteral("a+rX"))) chmodRead = i;
+            if (exe == QLatin1String("chmod") && a.contains(QStringLiteral("go-w"))) chmodNoWrite = i;
+        }
+
+        check(copy >= 0, "there is a copy step");
+        if (copy >= 0)
+        {
+            const QStringList a = steps.at(copy).arguments;
+            check(a.first() == QLatin1String("-a"),
+                  "taken with -a, which preserves symlinks instead of copying what they point at");
+            check(a.contains(src + QStringLiteral("/.")),
+                  "and copies the CONTENTS of the source, not the source directory itself");
+            check(a.last() == staging, "into the staging directory, never onto the running tree");
+        }
+
+        // The ownership step is load-bearing, not decoration: `cp -a` preserves the source's uid and
+        // gid when it runs as root, so without this the passwordless tree would still belong to the
+        // unprivileged account that downloaded it — which could then rewrite the binary polkit has
+        // been told is safe to exec.
+        check(chownTree >= 0, "there is a recursive chown");
+        if (chownTree >= 0)
+        {
+            const QStringList a = steps.at(chownTree).arguments;
+            check(a.contains(QStringLiteral("root:root")), "to root:root");
+            check(a.contains(QStringLiteral("-R")), "recursively");
+            check(a.last() == staging, "over the staged tree");
+            check(copy >= 0 && chownTree > copy,
+                  "and AFTER the copy: before it there is nothing here to take ownership of");
+        }
+
+        check(chmodRead >= 0 && chmodNoWrite >= 0,
+              "there is both a make-readable step and a make-unwritable step");
+        if (chownTree >= 0 && chmodRead >= 0 && chmodNoWrite >= 0)
+        {
+            check(chmodRead > chownTree && chmodNoWrite > chownTree,
+                  "and both chmods follow the chown: a chmod on a file somebody else still owns is a "
+                  "permission they can undo later");
+            check(chmodNoWrite == steps.size() - 1,
+                  "stripping the group/world write bit is the last thing done before the swap");
+        }
+
+        // The two properties the polkit rule's path prefix is buying, named explicitly because they
+        // are the reason the rule is allowed to exist at all.
+        QString all;
+        for (const MuffinInstallHelper::Step &s : steps)
+            all += s.label + s.arguments.join(QLatin1Char(' ')) + QLatin1Char('\n');
+        check(all.contains(QStringLiteral("go-w")),
+              "the promoted tree ends with no group or world write bit");
+        check(all.contains(QStringLiteral("a+rX")),
+              "but stays readable, because the GUI runs as the user and has to scan this tree");
+
+        // A source whose name contains spaces is still exactly one argument — the failure mode of a
+        // composed shell string, which this design must never become.
+        const QString spaced = tmp.filePath(QStringLiteral("a payload with spaces"));
+        check(makeLinuxTree(spaced, false), "wrote a payload directory whose name contains spaces");
+        const QList<MuffinInstallHelper::Step> spacedSteps =
+            MuffinInstallHelper::promotionSteps(spaced, staging);
+        bool oneArgument = false;
+        for (const MuffinInstallHelper::Step &s : spacedSteps)
+            if (QFileInfo(s.program).fileName() == QLatin1String("cp"))
+                oneArgument = s.arguments.contains(spaced + QStringLiteral("/."));
+        check(oneArgument,
+              "and the spaced path reaches cp as one argument, unquoted and unsplit");
+    }
+
+    // ---- findProgram: which helper is trusted enough to be exec'd as root ----
+    {
+        QTemporaryDir tmp;
+        const QString dir = tmp.filePath(QStringLiteral("bindir"));
+        QDir().mkpath(dir);
+        const QString planted = dir + QLatin1Char('/') + MuffinInstallHelper::programName();
+        const bool packagedExists = QFileInfo(MuffinInstallHelper::installedProgram()).isFile();
+
+        check(MuffinInstallHelper::findProgram(QStringLiteral("/nonexistent-directory")).isEmpty()
+                  || packagedExists,
+              "a directory with no helper in it finds none — which means 'stay with the managed copy', "
+              "not 'fail the download'");
+
+        // A file that is there but not executable is not a program.
+        check(writeFile(planted, QByteArrayLiteral("#!/bin/sh\n")), "planted a non-executable helper");
+        check(MuffinInstallHelper::findProgram(dir) != QFileInfo(planted).canonicalFilePath()
+                  || packagedExists,
+              "and being executable is part of what is looked for, not just being a file");
+
+        // The security half: a binary another account could rewrite is never the one chosen, no matter
+        // whose password would have unlocked it. This is the last veto available before root execs
+        // something, and it is the reason a test is allowed to hand findProgram a directory of its own.
+        QFile::setPermissions(planted, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                            | QFileDevice::ExeOwner | QFileDevice::ReadGroup
+                                            | QFileDevice::WriteGroup | QFileDevice::ExeGroup
+                                            | QFileDevice::ReadOther | QFileDevice::WriteOther
+                                            | QFileDevice::ExeOther);
+        check(MuffinInstallHelper::findProgram(dir) != QFileInfo(planted).canonicalFilePath(),
+              "a world-writable helper is refused: not a trusted program whatever else is true");
+
+        QFile::setPermissions(planted, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                            | QFileDevice::ExeOwner | QFileDevice::ReadGroup
+                                            | QFileDevice::ExeGroup | QFileDevice::ReadOther
+                                            | QFileDevice::ExeOther);
+        const QString found = MuffinInstallHelper::findProgram(dir);
+        if (packagedExists)
+            check(found == QFileInfo(MuffinInstallHelper::installedProgram()).canonicalFilePath(),
+                  "with a packaged helper installed, that one wins over a build-tree copy");
+        else
+            check(found == QFileInfo(planted).canonicalFilePath(),
+                  "an ordinary 0755 executable beside the application is accepted, so a checkout walks "
+                  "the same code path an apt user does");
+    }
+
+    // ---- composePromote: the command the GUI asks pkexec to run ----
+    {
+        QTemporaryDir tmp;
+        const QString src = tmp.filePath(QStringLiteral("payload"));
+        check(makeLinuxTree(src, false), "wrote a payload to compose a promotion against");
+
+        QString program, error;
+        QStringList args;
+        check(!MuffinInstallHelper::composePromote(QString(), &program, &args, &error),
+              "no source composes no command");
+        check(program.isEmpty() && args.isEmpty(),
+              "and a refused source leaves nothing for the caller to start");
+
+        const QString helper = MuffinInstallHelper::findProgram();
+        const bool hasPkexec = QFileInfo::exists(QStringLiteral("/usr/bin/pkexec"));
+        if (helper.isEmpty())
+        {
+            // Where the helper is not installed — a checkout that never ran cmake --install, with no
+            // packaged muffin on the host — the answer is an explanation. The caller keeps the managed
+            // copy, and this asserts it rather than letting a future change invent a fallback that
+            // runs something else instead.
+            check(!MuffinInstallHelper::composePromote(src, &program, &args, &error),
+                  "with no helper on this host the promotion is refused");
+            check(error.contains(QStringLiteral("not installed")),
+                  "and the message names the missing helper");
+        }
+        else if (PrivilegeHelper::isElevated())
+        {
+            check(MuffinInstallHelper::composePromote(src, &program, &args, &error),
+                  "already root: the composition succeeds");
+            check(program == helper,
+                  "and the helper is exec'd directly — pkexec from a root session is a prompt nobody "
+                  "can answer, not an extra permission");
+            check(args == QStringList{src}, "with the source as its only argument");
+        }
+        else if (!hasPkexec)
+        {
+            check(!MuffinInstallHelper::composePromote(src, &program, &args, &error),
+                  "no pkexec means no promotion");
+            check(error.contains(QStringLiteral("pkexec")), "named in the message");
+        }
+        else
+        {
+            check(MuffinInstallHelper::composePromote(src, &program, &args, &error),
+                  "a helper plus pkexec composes a promotion");
+            check(program == QLatin1String("pkexec"),
+                  "through pkexec, so polkit decides and a human types a password");
+            check(args.size() == 2 && args.at(0) == helper && args.at(1) == src,
+                  "pkexec <helper> <source> and nothing else — no -u, no shell, no environment flag");
+        }
+    }
+
+    // ---- the helper binary itself, called as an ordinary user ----
+    //
+    // The one end-to-end check available without root: the compiled helper must refuse to act when it
+    // is not root, and must leave nothing behind while refusing. Skipped when this process IS root —
+    // then the real promotion would run against this machine's /opt, which a test has no business
+    // doing.
+    {
+        const QString helper =
+            MuffinInstallHelper::findProgram(QCoreApplication::applicationDirPath());
+        if (helper.isEmpty())
+        {
+            out << "  SKIP  no muffin-install-helper beside coretest to invoke\n";
+        }
+        else if (PrivilegeHelper::isElevated())
+        {
+            out << "  NOTE  coretest runs as root; not invoking the helper so this host's /opt is "
+                   "left alone\n";
+        }
+        else
+        {
+            QTemporaryDir tmp;
+            const QString src = tmp.filePath(QStringLiteral("payload"));
+            check(makeLinuxTree(src, false), "wrote a payload for the unprivileged helper runs");
+
+            const QStringList calls = {src, QStringLiteral("relative"), QString()};
+            for (const QString &arg : calls)
+            {
+                QProcess p;
+                p.start(helper, arg.isEmpty() ? QStringList() : QStringList{arg});
+                check(p.waitForFinished(15000),
+                      QStringLiteral("helper answered for '%1'").arg(arg));
+                check(p.exitCode() != 0,
+                      QStringLiteral("as an ordinary user the helper refuses '%1'").arg(arg));
+                const QString text = QString::fromLocal8Bit(
+                    p.readAllStandardOutput() + p.readAllStandardError());
+                check(text.contains(QStringLiteral("root"), Qt::CaseInsensitive),
+                      QStringLiteral("and says root is what is missing, for '%1'").arg(arg));
+            }
+
+            QProcess help;
+            help.start(helper, {QStringLiteral("--help")});
+            check(help.waitForFinished(15000), "the helper answers --help");
+            check(help.exitCode() == 0, "--help exits zero");
+            check(QString::fromLocal8Bit(help.readAllStandardOutput())
+                      .contains(QStringLiteral("Usage")),
+                      "and prints a usage line naming the destination");
+
+            check(!QFileInfo::exists(ZapretPaths::systemInstallDir()),
+                  "and refusing left no system tree behind on this host");
+        }
+    }
+#endif
+
     // ---- execution backends: synchronous failure modes ----
-
-
     //
     // These assert the deterministic, event-loop-free rejection paths that every backend must satisfy
     // before it ever reaches QProcess::start(). Both backend classes compile and run their portable
