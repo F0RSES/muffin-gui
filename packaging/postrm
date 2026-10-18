@@ -4,8 +4,9 @@
 # The rule this package wrote lives in /etc/polkit-1/rules.d, which is NOT in the package's file
 # list, so dpkg does not clean it up by itself and it would outlive the application. Leaving it
 # behind is not a cosmetic issue: after removal, /usr/sbin/iptables and any
-# /usr/local/zapret/**/nfqws would stay authorised without a password on a machine that no longer
-# has a reason to run them. Removal therefore reverses installation.
+# /opt/muffin/zapret/**/nfqws would stay authorised without a password on a machine that no longer
+# has a reason to run them. Removal therefore reverses installation, and the payload the installer's
+# helper put under /opt/muffin is removed with the purge.
 #
 # dpkg passes the reason as $1. Only a real removal is handled: on `upgrade` dpkg runs the OLD
 # postrm with the new version as $2 while the new postinst has already rewritten the rule, so
@@ -16,6 +17,26 @@ set -e
 case "$1" in
     remove|purge)
         rm -f /etc/polkit-1/rules.d/49-muffin-nopasswd.rules
+        ;;
+esac
+
+# The promoted payload is deleted on purge, not on remove. /opt/muffin/zapret is not in the package's
+# file list — the root helper put it there, and dpkg therefore never sees it — so an authorised tree
+# would otherwise outlive the application that made it passwordless. `remove` keeps it, exactly as it
+# keeps a download in the user's own app-data folder: reinstalling the package finds the strategies
+# where they were. `purge` is the point where the user has said they want nothing of this program
+# left on the machine.
+#
+# The .new/.old siblings go with it: they are the helper's staging and backup names, and a crashed
+# promotion can leave one of them holding a whole copy of the tree.
+#
+# /opt/muffin itself is only removed when it has nothing left in it. `rmdir` refuses a directory that
+# holds anything, which is the guarantee wanted here: if a local administrator put something else
+# under the namespace, a package purge must not delete it.
+case "$1" in
+    purge)
+        rm -rf /opt/muffin/zapret /opt/muffin/zapret.new /opt/muffin/zapret.old
+        rmdir /opt/muffin 2>/dev/null || true
         ;;
 esac
 

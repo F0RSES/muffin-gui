@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
 project(Muffin LANGUAGES CXX)
 
+# Version stamped into the packages and into the root helper's --help output. Declared here, at the
+# top, because two sections below need it: the executable target is built with it as a compile
+# definition, and CPack uses it for the package version. A CACHE variable so a tag can override it
+# without editing this file: the release job passes -DMUFFIN_VERSION="${tag without the leading v}",
+# which is what keeps muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in
+# agreement. The default is the current release line, so local `cmake`/`cpack` runs still produce
+# sensibly named files and a helper that reports a real version.
+set(MUFFIN_VERSION "0.1.3" CACHE STRING "Version stamped into the generated packages")
+
 # ---- Qt6 -------------------------------------------------------------------
 # Core logic depends on QtCore (QString/QDir/QProcess); the reachability prober adds QtNetwork, and
 # the widget UI adds QtGui/QtWidgets. Everything is Widgets-only — no QML/Quick anywhere.
@@ -20,6 +29,7 @@ add_library(zapretcore STATIC
     src/core/ZapretLocator.cpp
     src/core/ZapretSource.cpp
     src/core/ZapretDownloader.cpp
+    src/core/MuffinInstallHelper.cpp
     src/core/PrivilegeHelper.cpp
     src/core/ZapretManager.cpp
     src/core/PingService.cpp
@@ -46,6 +56,46 @@ target_link_libraries(zapretcore PUBLIC Qt6::Core Qt6::Network)
 # PrivilegeHelper. They exist only on an MSVC/MinGW target and are omitted for host builds/tests.
 if (WIN32)
     target_link_libraries(zapretcore PUBLIC shell32 advapi32)
+endif()
+
+# ---- the root helper --------------------------------------------------------
+# The program zapret::MuffinInstallHelper describes and the GUI execs through pkexec: it takes a
+# downloaded linux tree and installs it into ZapretPaths::systemInstallDir() as root, chown'ing the
+# result to root:root and stripping the group/world write bits. Those permissions are the reason it
+# exists — packaging/postinst's polkit rule grants passwordless execution to a payload under that
+# tree, and the grant is only sound while an unprivileged account cannot replace the bytes.
+#
+# A compiled binary rather than a shell script, because `pkexec /bin/sh install_bin.sh` puts an
+# interpreter on the authorised path: the interpreter runs whatever the script says, and the script
+# sits in a directory the caller owns. This target has no degrees of freedom — one argument, a fixed
+# destination read from ZapretPaths, and its own validation.
+#
+# POSIX-only: Windows elevates winws.exe through UAC from wherever it lives, and
+# ZapretPaths::systemInstallDir() is empty there, so there would be nothing for it to do.
+#
+# The DESTINATION is part of the security contract, not a layout preference:
+# MuffinInstallHelper::installedProgram() returns this exact path, the GUI execs it through pkexec,
+# and packaging/check-polkit-rule.js reads `lib/muffin` back out of this file to assert the rule
+# refuses that path — promoting user-written bytes into a passwordless tree is the one moment a human
+# must approve. Renaming the destination without updating the rule check is a build failure, not a
+# drift.
+if (UNIX AND NOT APPLE)
+    add_executable(muffin-install-helper src/tools/muffin-install-helper.cpp)
+    target_link_libraries(muffin-install-helper PRIVATE zapretcore)
+    target_compile_definitions(muffin-install-helper PRIVATE MUFFIN_VERSION="${MUFFIN_VERSION}")
+    install(TARGETS muffin-install-helper RUNTIME DESTINATION lib/muffin)
+
+    # The build tree has to present the same permissions as the package. install() ships a program
+    # 0755, but the link step inherits the developer's umask — and under the common umask 002 that is
+    # 0775, group-writable, which MuffinInstallHelper::findProgram() correctly refuses to exec as
+    # root. Without this the helper would be invisible to a download run straight out of build/ while
+    # being found by an apt user, and programCandidates()'s whole reason for existing (one code path
+    # for both) would quietly not hold.
+    if (NOT WIN32)
+        add_custom_command(TARGET muffin-install-helper POST_BUILD
+            COMMAND chmod 755 $<TARGET_FILE:muffin-install-helper>
+            COMMENT "Matching the packaged 0755 mode on the build-tree helper")
+    endif()
 endif()
 
 # ---- the GUI ----------------------------------------------------------------
@@ -182,11 +232,10 @@ else()
 endif()
 
 # ---- packaging (CPack) ------------------------------------------------------
-# Version stamped into the packages. A cache variable so a tag can override it without editing this
-# file: the release job passes -DMUFFIN_VERSION="${tag without the leading v}", which is what keeps
-# muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in agreement. The default is
-# the current release line, so local `cpack` runs still produce a sensibly named file.
-set(MUFFIN_VERSION "0.1.3" CACHE STRING "Version stamped into the generated packages")
+# MUFFIN_VERSION — the version stamped into the packages — is set once, at the top of this file, so the
+# root helper target and CPack can never be told two different things. The release job overrides it
+# with -DMUFFIN_VERSION="${tag without the leading v}", which is what keeps muffin_<ver>_amd64.deb,
+# Muffin-Setup-<ver>.exe and the tag themselves in agreement.
 
 set(CPACK_PACKAGE_NAME "muffin")
 set(CPACK_PACKAGE_VENDOR "F0RSES")

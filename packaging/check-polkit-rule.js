@@ -67,19 +67,49 @@ const EXEC = 'org.freedesktop.policykit.exec';
 const CONSOLE = { active: true, local: true };
 
 // want === null means "not YES". want === 'YES' means the rule authorised it.
+//
+// The tree prefixes here are not invented: `systemTree` is read out of ZapretPaths::systemInstallDir()
+// below and the case list is built from it, so a rename of the destination changes the cases the rule
+// has to match rather than silently leaving a rule that authorises a directory nothing writes.
+const SYSTEM_TREE = '/opt/muffin/zapret';
 const cases = [
   // --- authorised: firewall binaries, exact and root-owned ---
   [EXEC, '/usr/sbin/iptables', CONSOLE, 'YES'],
   [EXEC, '/usr/sbin/ip6tables', CONSOLE, 'YES'],
 
   // --- authorised: payload under a tree a non-root user cannot rewrite ---
+  [EXEC, '/opt/muffin/zapret/binaries/linux-x86_64/nfqws', CONSOLE, 'YES'],
+  [EXEC, '/opt/muffin/zapret/linux/binaries/linux-x86_64/nfqws', CONSOLE, 'YES'],
+  [EXEC, '/opt/muffin/zapret/nfq/nfqws', CONSOLE, 'YES'],        // what install_bin.sh builds
+  [EXEC, '/opt/muffin/zapret/binaries/linux-x86_64/./nfqws', CONSOLE, 'YES'], // "." stays inside
   [EXEC, '/usr/local/zapret/linux/binaries/linux-x86_64/nfqws', CONSOLE, 'YES'],
   [EXEC, '/opt/zapret/linux/binaries/linux-x86_64/nfqws', CONSOLE, 'YES'],
   [EXEC, '/usr/local/zapret/nfqws', CONSOLE, 'YES'],            // install_bin.sh leaves it at the root
   [EXEC, '/usr/local/zapret/linux/binaries/linux-x86_64/./nfqws', CONSOLE, 'YES'], // "." stays inside the tree
 
+  // --- refused: the helper's staging and backup siblings, which share the prefix but not the tree ---
+  // /opt/muffin/zapret.new is the directory the promotion builds in BEFORE it is renamed into place,
+  // and /opt/muffin/zapret.old the incumbent moved aside. Both are siblings of the authorised tree, not
+  // inside it, and the rule's prefix test carries the trailing separator precisely so that they stay
+  // outside. Authorising them would mean a half-built tree — bytes still being copied, the only moment
+  // they are not yet root-owned — could be exec'd without a password.
+  [EXEC, '/opt/muffin/zapret.new/binaries/linux-x86_64/nfqws', CONSOLE, null],
+  [EXEC, '/opt/muffin/zapret.old/binaries/linux-x86_64/nfqws', CONSOLE, null],
+  [EXEC, '/opt/muffin/zapretx/binaries/linux-x86_64/nfqws', CONSOLE, null],
+  [EXEC, '/opt/muffin/nfqws', CONSOLE, null],                   // the namespace is not the tree
+
+  // --- refused: the root helper itself, which is the whole point of the split ---
+  // /usr/lib/muffin/muffin-install-helper is the program the GUI asks pkexec to run in order to put
+  // bytes this application downloaded INTO the passwordless tree. Authorising it would make the
+  // passwordless tree writable by an unprivileged user with one more passwordless pkexec — the exact
+  // exploit the promotion's chown/chmod steps exist to prevent — so promoting costs a human approval.
+  [EXEC, '/usr/lib/muffin/muffin-install-helper', CONSOLE, null],
+  [EXEC, '/usr/lib/muffin/muffin-install-helper', { active: true, local: true, inServer: true }, null],
+  [EXEC, '/usr/bin/Muffin', CONSOLE, null],                     // the GUI is never a pkexec target
+
   // --- refused: the payload wherever the GUI actually puts it (user-owned => attacker-owned) ---
   [EXEC, '/home/norman/.local/share/muffin/zapret/binaries/linux-x86_64/nfqws', CONSOLE, null],
+  [EXEC, '/home/norman/.local/share/Muffin/Muffin/zapret/nfq/nfqws', CONSOLE, null],
   [EXEC, '/home/norman/Documents/zapret/linux/binaries/linux-x86_64/nfqws', CONSOLE, null],
   [EXEC, '/home/norman/Downloads/zapret/linux/binaries/linux-x86_64/nfqws', CONSOLE, null],
   [EXEC, '/tmp/nfqws', CONSOLE, null],
@@ -193,6 +223,112 @@ if (fs.existsSync(postrmPath)) {
 if (!/\[\s*! -d "\$RULES_DIR"\s*\]/.test(sh)) {
   console.log(`FAIL  ${scriptPath} does not skip when /etc/polkit-1/rules.d is absent`);
   bad++;
+}
+
+// ---- the three files that must agree on two paths ----
+//
+// The rule, the C++ that composes the promotion, and the CMake that installs the helper each name a
+// path, and the security property only holds while they are the same path. A comment saying so is
+// worth nothing here, so each literal is read out of its source and compared against the rule that
+// was just evaluated — the drift is a CI failure instead of a passwordless tree nothing wrote.
+const repoRoot = __dirname.replace(/[/\\]packaging[/\\]?$/, '');
+const read = (rel) => {
+  try {
+    return fs.readFileSync(repoRoot + '/' + rel, 'utf8');
+  } catch (e) {
+    console.log(`FAIL  cannot read ${rel} to cross-check the rule: ${e.message}`);
+    bad++;
+    return '';
+  }
+};
+
+// 1. ZapretPaths::systemInstallDir() — the destination the helper writes and the rule exempts.
+const pathsCpp = read('src/core/ZapretPaths.cpp');
+const treeMatch = pathsCpp.match(
+  /ZapretPaths::systemInstallDir\(\)[\s\S]*?return QStringLiteral\("([^"]+)"\);/);
+if (!treeMatch) {
+  console.log('FAIL  src/core/ZapretPaths.cpp: no QStringLiteral destination in systemInstallDir()');
+  bad++;
+} else {
+  const tree = treeMatch[1];
+  if (tree !== SYSTEM_TREE) {
+    console.log(`FAIL  systemInstallDir() is ${tree} but the auth cases assume ${SYSTEM_TREE}: ` +
+      'update the case list and the rule together');
+    bad++;
+  }
+  // The rule must carry the destination WITH its trailing separator. Without it the prefix test
+  // matches /opt/muffin/zapret.new — the staging directory — as well as the tree, which is exactly the
+  // difference between "a tree nothing but root can write" and "whatever the last copy in progress is".
+  if (!rule.includes(`"${tree}/"`)) {
+    console.log(`FAIL  the rule does not exempt the tree the code installs into: no "${tree}/" prefix`);
+    bad++;
+  }
+  // And it must not carry the same destination WITHOUT the separator: a bare "${tree}" prefix test
+  // would authorise the staging and backup siblings too.
+  if (new RegExp(`indexOf\\("${tree}"\\)`).test(rule)) {
+    console.log(`FAIL  the rule tests "${tree}" without a trailing separator: the .new/.old siblings ` +
+      'would be authorised');
+    bad++;
+  }
+}
+
+// 2. The helper: its name and installed directory, then the CMake DESTINATION that puts it there.
+const helperCpp = read('src/core/MuffinInstallHelper.cpp');
+const nameMatch = helperCpp.match(/programName\(\)[\s\S]{0,120}?return QStringLiteral\("([^"]+)"\);/);
+const dirMatch = helperCpp.match(/installedProgram\(\)[\s\S]{0,900}?QStringLiteral\("([^"]+)"\)\s*\+\s*programName/);
+const cmake = read('CMakeLists.txt');
+const destMatch = cmake.match(/install\(TARGETS\s+muffin-install-helper\s+RUNTIME\s+DESTINATION\s+(\S+)\)/);
+if (!nameMatch || !dirMatch || !destMatch) {
+  console.log('FAIL  the helper path is not derivable: ' +
+    `programName=${nameMatch ? 'ok' : 'no'}, installedProgram=${dirMatch ? 'ok' : 'no'}, ` +
+    `cmake DESTINATION=${destMatch ? 'ok' : 'no'}`);
+  bad++;
+} else {
+  // CMakeLists.txt installs under a /usr prefix (CPACK_SET_DESTDIR is unset and CPACK_PACKAGING_
+  // INSTALL_PREFIX defaults to /usr), so the packaged path is /usr/<DESTINATION>/<programName> and
+  // installedProgram() must spell exactly that.
+  const installed = dirMatch[1] + nameMatch[1];
+  const packaged = '/usr/' + destMatch[1] + '/' + nameMatch[1];
+  if (installed !== packaged) {
+    console.log(`FAIL  installedProgram() is ${installed} but CMake installs it to ${packaged}`);
+    bad++;
+  }
+  // The decisive half: the helper must NOT be authorised. Read as a path from CMake rather than
+  // assumed, because "the rule refuses the helper" is only a fact if it is the same path the
+  // package ships.
+  if (decide(EXEC, packaged, CONSOLE) === Result.YES) {
+    console.log(`FAIL  the rule authorises ${packaged}: promotion would be passwordless`);
+    bad++;
+  }
+  if (!rule.includes(nameMatch[1])) {
+    console.log(`FAIL  the rule does not name ${nameMatch[1]}, so nothing documents that it is refused`);
+    bad++;
+  }
+}
+
+// 3. The sibling names the rule must keep outside the prefix: staging and backup, read from the code
+//    that creates them rather than from this file's opinion about what they should be called.
+for (const suffix of ['.new', '.old']) {
+  if (!new RegExp(`QStringLiteral\\("${suffix.replace('.', '\\.')}\"\\)`).test(helperCpp) &&
+      !new RegExp(`\\+\\s*QStringLiteral\\("${suffix.replace('.', '\\.')}\"\\)`).test(helperCpp)) {
+    console.log(`FAIL  MuffinInstallHelper no longer builds ${SYSTEM_TREE}${suffix}; ` +
+      'the staging/backup refusal cases here are stale');
+    bad++;
+  }
+  if (decide(EXEC, `${SYSTEM_TREE}${suffix}/nfqws`, CONSOLE) === Result.YES) {
+    console.log(`FAIL  the rule authorises ${SYSTEM_TREE}${suffix}: a half-built tree would be root-runnable`);
+    bad++;
+  }
+}
+
+// 4. postrm has to clean the promoted tree up as well as the rule: it is not in the package's file
+//    list, so nothing else removes it and the authorisation would outlive the application.
+if (fs.existsSync(postrmPath)) {
+  const postrm = fs.readFileSync(postrmPath, 'utf8');
+  if (!/purge\)[\s\S]{0,400}?rm -rf[^\n]*\/opt\/muffin\/zapret/.test(postrm)) {
+    console.log(`FAIL  ${postrmPath} does not delete ${SYSTEM_TREE} on purge`);
+    bad++;
+  }
 }
 
 console.log(bad === 0

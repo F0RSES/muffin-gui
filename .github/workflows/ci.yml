@@ -127,6 +127,74 @@ jobs:
       - name: Check the polkit rule
         run: node packaging/check-polkit-rule.js
 
+      # The polkit check above evaluates the rule as text. This one runs the scripts that write it,
+      # end to end, as root on the throwaway runner: postinst must create the namespace and install a
+      # 0644 root:root rule (or skip cleanly where polkit is absent), and postrm must take the rule and
+      # the promoted tree away on purge while leaving them alone mid-upgrade. The half that cannot be
+      # checked from a string is the half where mistakes actually happen -- a rule that parses but never
+      # lands, a `remove` that deletes the authorisation the upgrade still needs, a purge that leaves a
+      # passwordless payload behind on a machine with no Muffin to run it.
+      #
+      # Skipped where the runner cannot become root without a password (fork PRs run with a token that
+      # still allows sudo on the ephemeral macOS/Linux runners, so this normally runs); reporting a
+      # skip is better than a red check on a configuration that was never going to be installable.
+      - name: Exercise the maintainer scripts
+        run: |
+          set -euo pipefail
+          if ! sudo -n true 2>/dev/null; then
+            echo "no passwordless sudo on this runner; skipping"
+            exit 0
+          fi
+          RULES_DIR=/etc/polkit-1/rules.d
+          RULE="$RULES_DIR/49-muffin-nopasswd.rules"
+          NS=/opt/muffin
+
+          sudo rm -rf "$RULE" "$NS"
+          sudo bash packaging/postinst configure 0.0.0
+
+          if [ -d "$RULES_DIR" ]; then
+            test -f "$RULE" || { echo "postinst did not write the rule"; exit 1; }
+            stat -c '%a %U:%G' "$RULE" | grep -qx '644 root:root' \
+              || { echo "rule has wrong mode/owner: $(stat -c '%a %U:%G' "$RULE")"; exit 1; }
+            # A rule with a shell comment makes polkitd's JS engine throw and silently skip the whole
+            # file for the boot, which looks exactly like the feature not working.
+            node packaging/check-polkit-rule.js "$RULE" > /dev/null
+            grep -q '/opt/muffin/zapret/' "$RULE" || { echo "installed rule lacks the tree"; exit 1; }
+          else
+            echo "no rules.d on this host; postinst must have skipped cleanly"
+          fi
+          test -d "$NS" || { echo "postinst did not create $NS"; exit 1; }
+          [ "$(stat -c '%U:%G %a' "$NS")" = "root:root 755" ] \
+            || { echo "$NS is not root-owned 755: $(stat -c '%U:%G %a' "$NS")"; exit 1; }
+
+          # An upgrade must not touch either half: dpkg runs the old postrm with `upgrade` while the new
+          # postinst has already rewritten the rule.
+          if [ -d "$RULES_DIR" ]; then
+            sudo bash packaging/postrm upgrade 0.0.0
+            test -f "$RULE" || { echo "postrm deleted the rule mid-upgrade"; exit 1; }
+            test -d "$NS" || { echo "postrm deleted the tree mid-upgrade"; exit 1; }
+          fi
+
+          # A planted payload and its staging sibling both go on purge, and only on purge.
+          sudo mkdir -p "$NS/zapret/binaries" "$NS/zapret.new"
+          echo x | sudo tee "$NS/zapret/binaries/nfqws" > /dev/null
+          sudo bash packaging/postrm purge
+          test ! -e "$NS/zapret" || { echo "purge left the promoted tree"; exit 1; }
+          test ! -e "$NS/zapret.new" || { echo "purge left the staging sibling"; exit 1; }
+          test ! -d "$NS" || { echo "purge left a namespace it had emptied"; exit 1; }
+          if [ -d "$RULES_DIR" ]; then
+            test ! -e "$RULE" || { echo "purge left the passwordless rule installed"; exit 1; }
+          fi
+
+          # A namespace holding something that is not ours survives: rmdir only empties.
+          sudo rm -rf "$NS" 2>/dev/null || true
+          sudo mkdir -p "$NS"; echo keep | sudo tee "$NS/not-muffin.txt" > /dev/null
+          sudo bash packaging/postrm purge
+          test -f "$NS/not-muffin.txt" || { echo "purge deleted an unrelated file under $NS"; exit 1; }
+          sudo rm -rf "$NS"
+          echo "maintainer scripts ok"
+
+
       # CPack runs against the tree that just passed ctest; the DEB generator is auto-selected in
       # CMakeLists.txt because dpkg-deb is present on ubuntu-22.04. Pinning -G DEB here anyway so a
       # future change to the auto-default cannot silently turn the release into a TGZ.
@@ -157,6 +225,18 @@ jobs:
           grep -q './usr/bin/Muffin$'                                   /tmp/deb-list
           grep -q './usr/share/applications/muffin.desktop$'            /tmp/deb-list
           grep -q './usr/share/icons/hicolor/scalable/apps/muffin.svg$' /tmp/deb-list
+          # The root helper that promotes a download into /opt/muffin/zapret, and with it two facts the
+          # security model depends on. Its path: MuffinInstallHelper::installedProgram() execs exactly
+          # /usr/lib/muffin/muffin-install-helper through pkexec, and check-polkit-rule.js asserts the
+          # polkit rule REFUSES that path — promotion is the one write into the passwordless tree that
+          # must still cost a password, so a helper shipped elsewhere is either a feature that never
+          # runs or a rule that has stopped meaning anything. And its mode: findProgram() deliberately
+          # refuses a group- or world-writable helper, so a 0775 file here silently disables promotion
+          # on every machine the package installs on.
+          grep -qE '^-rwxr-xr-x root/root +[0-9]+ .* \./usr/lib/muffin/muffin-install-helper$' \
+            /tmp/deb-list || { echo "muffin-install-helper is missing from the deb, or not 0755 root:root"; \
+                               grep -n muffin-install-helper /tmp/deb-list || true; exit 1; }
+
           # Maintainer scripts live in the CONTROL member, so every check above passes happily without
           # them. dpkg refuses to configure a package whose postinst is not executable, and a missing
           # postrm leaves the polkit rule installed after removal — both are silent until a user hits

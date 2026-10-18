@@ -18,15 +18,35 @@
 #   the user's own home — ~/.local/share/muffin/zapret, ~/Documents/zapret, ~/Downloads/zapret, <cwd>
 #   — the user owns it and can replace nfqws with arbitrary content. Exempting "anything ending in
 #   /nfqws" therefore exempts a file the attacker wrote. Matching is confined to paths whose content
-#   a non-root user cannot change: fixed /usr/sbin binaries, and the two root-owned tree bases
-#   ZapretLocator probes (/usr/local/zapret, /opt/zapret).
+#   a non-root user cannot change: fixed /usr/sbin binaries, and a payload under one of the
+#   root-owned tree bases — /opt/muffin/zapret (which this package's root helper writes, with
+#   MuffinInstallHelper::promotionSteps guaranteeing root:root and no group/world write bit), plus
+#   the two bases ZapretLocator probes for a hand-installed tree (/usr/local/zapret, /opt/zapret).
 #
 #   A payload in a user-owned tree keeps its password prompt. That prompt is not a formality — it is
 #   the human approving execution of user-supplied bytes as root.
+#
+#   The helper itself is deliberately NOT on the authorised list either. /usr/lib/muffin/muffin-install-helper
+#   copies bytes this application downloaded into the passwordless tree, so running it is exactly the
+#   moment a human must approve: promotion costs a password, once per download, the way `apt install`
+#   did. packaging/check-polkit-rule.js asserts both halves of that — that a payload under the tree is
+#   exempt, and that the helper is not.
+#
+# /opt/muffin is created here (root:root, 0755) rather than left to the helper, so that a user who
+# never promotes a download still cannot own the namespace: the directory the passwordless tree lives
+# in has to be un-writable by them before the first promotion, not after it.
 set -e
 
 RULES_DIR=/etc/polkit-1/rules.d
 RULE="$RULES_DIR/49-muffin-nopasswd.rules"
+NAMESPACE_DIR=/opt/muffin
+
+# Created before the polkit check below and outside it: the tree is this package's business whether or
+# not the host runs polkit at all. A failure here is a genuine one (a read-only /, a full disk), so
+# set -e is left to abort it; `mkdir -p` makes the whole thing idempotent across upgrades.
+mkdir -p "$NAMESPACE_DIR"
+chown root:root "$NAMESPACE_DIR" 2>/dev/null || true
+chmod 755 "$NAMESPACE_DIR"
 
 # Absent directory means polkit isn't installed (a server, a container, a build image). Installing
 # the GUI must not fail there, and there is no polkitd to authorise anything anyway — so say so and
@@ -76,11 +96,22 @@ polkit.addRule(function (action, subject) {
     if (program === "/usr/sbin/iptables" || program === "/usr/sbin/ip6tables")
         return polkit.Result.YES;
 
-    // The payload, but only from a tree a user cannot rewrite. Ends with "/nfqws" AND starts with
-    // one of the two system-wide bases; anything under a home directory falls through and is asked.
+    // Deliberately NOT authorised: /usr/lib/muffin/muffin-install-helper, the root helper that puts a
+    // downloaded tree into the passwordless directory below. Falling through here is the point -- that
+    // one call costs a password, once per download, because approving the write into a tree that needs
+    // no approval is a decision a human should make.
+
+    // The payload, but only from a tree a non-root account cannot rewrite. Ends with "/nfqws" AND
+    // starts with one of the system-wide bases; anything under a home directory falls through and is
+    // asked. /opt/muffin/zapret is the tree this package's own root helper writes, and it is the only
+    // one of the three whose permissions Muffin itself guarantees (chown root:root, chmod -R go-w —
+    // see MuffinInstallHelper::promotionSteps); /usr/local/zapret and /opt/zapret are the two bases
+    // ZapretLocator probes for a tree the user installed by hand.
     var isNfqws = program.indexOf("/nfqws", program.length - 6) !== -1;
     if (isNfqws &&
-        (program.indexOf("/usr/local/zapret/") === 0 || program.indexOf("/opt/zapret/") === 0))
+        (program.indexOf("/opt/muffin/zapret/") === 0 ||
+         program.indexOf("/usr/local/zapret/") === 0 ||
+         program.indexOf("/opt/zapret/") === 0))
         return polkit.Result.YES;
 
     return polkit.Result.NOT_HANDLED;
