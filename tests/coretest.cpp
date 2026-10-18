@@ -1923,9 +1923,26 @@ int main(int argc, char **argv)
             help.start(helper, {QStringLiteral("--help")});
             check(help.waitForFinished(15000), "the helper answers --help");
             check(help.exitCode() == 0, "--help exits zero");
-            check(QString::fromLocal8Bit(help.readAllStandardOutput())
-                      .contains(QStringLiteral("Usage")),
-                      "and prints a usage line naming the destination");
+            const QString helpText = QString::fromLocal8Bit(help.readAllStandardOutput());
+            check(helpText.contains(QStringLiteral("Usage")),
+                  "and prints a usage line naming the destination");
+            // MUFFIN_VERSION is stamped into a root-owned binary so that a bug report can name the
+            // build that ran. A stamp nobody can read back out of an installed machine is not a stamp,
+            // so --help has to carry it — and it has to carry the value CMake was given, which is what
+            // catches a helper compiled without the define or with a stale one.
+            check(helpText.contains(QStringLiteral("\nVersion: ") + QStringLiteral(MUFFIN_VERSION)),
+                  QStringLiteral("--help reports the version stamped by the build (%1)")
+                      .arg(QStringLiteral(MUFFIN_VERSION)));
+
+            QProcess version;
+            version.start(helper, {QStringLiteral("--version")});
+            check(version.waitForFinished(15000), "the helper answers --version");
+            check(version.exitCode() == 0,
+                  "--version exits zero for an ordinary user: naming the build needs no privileges");
+            const QString versionText = QString::fromLocal8Bit(version.readAllStandardOutput());
+            check(versionText.startsWith(MuffinInstallHelper::programName()) &&
+                      versionText.contains(QStringLiteral(MUFFIN_VERSION)),
+                  "and --version names the program and reports the same version --help does");
 
             check(!QFileInfo::exists(ZapretPaths::systemInstallDir()),
                   "and refusing left no system tree behind on this host");

@@ -141,6 +141,16 @@ bool clearDir(const QString &path)
     return true;
 }
 
+// The version CMake stamps in with MUFFIN_VERSION. QCoreApplication::applicationVersion() is where
+// main() puts it, and reading it back through Qt keeps --help and --version reporting the same string
+// the .deb's Version field does. A build configured without the define gets "unknown" rather than an
+// invented number.
+QString versionText()
+{
+    const QString v = QCoreApplication::applicationVersion();
+    return v.isEmpty() ? QStringLiteral("unknown") : v;
+}
+
 void usage()
 {
     note(QStringLiteral("Usage: %1 <directory>\n"
@@ -148,8 +158,10 @@ void usage()
                         "through a staging directory so a running tree is never left half-written.\n"
                         "The argument must already be an unpacked linux payload. No environment\n"
                         "variable names the destination, and the result is owned by root:root and\n"
-                        "not writable by any other account.")
-             .arg(MuffinInstallHelper::programName(), ZapretPaths::systemInstallDir()));
+                        "not writable by any other account.\n"
+                        "Version: %3")
+             .arg(MuffinInstallHelper::programName(), ZapretPaths::systemInstallDir(),
+                  versionText()));
 }
 
 } // namespace
@@ -169,6 +181,13 @@ int main(int argc, char **argv)
         (args.at(1) == QLatin1String("-h") || args.at(1) == QLatin1String("--help")))
     {
         usage();
+        return 0;
+    }
+    // Answered before the privilege gate and before any path is looked at: knowing which build of a
+    // root-owned binary is installed is a question an ordinary user has to be able to ask.
+    if (args.size() == 2 && args.at(1) == QLatin1String("--version"))
+    {
+        note(QStringLiteral("%1 %2").arg(MuffinInstallHelper::programName(), versionText()));
         return 0;
     }
     if (args.size() != 2)

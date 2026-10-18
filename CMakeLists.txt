@@ -139,6 +139,10 @@ target_link_libraries(Muffin PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Netwo
 # coretest: QtCore-only console verifier for the parser/locator/manager/backends.
 add_executable(coretest tests/coretest.cpp)
 target_link_libraries(coretest PRIVATE zapretcore)
+# The root helper stamps MUFFIN_VERSION into its --help and --version output, and coretest asserts the
+# stamp actually reached the binary. It needs the same value the helper target was given to compare
+# against, or "the version is stamped" would be checking a string against nothing.
+target_compile_definitions(coretest PRIVATE MUFFIN_VERSION="${MUFFIN_VERSION}")
 
 # uitest: headless widget tests (QtTest + QSignalSpy). Runs under the offscreen platform; see the
 # QT_PLUGIN_PATH logic below for hosts whose Qt prefix carries no platform plugins.

@@ -237,6 +237,16 @@ jobs:
             /tmp/deb-list || { echo "muffin-install-helper is missing from the deb, or not 0755 root:root"; \
                                grep -n muffin-install-helper /tmp/deb-list || true; exit 1; }
 
+          # The helper is a root-owned binary whose behaviour changed across releases, so a report has
+          # to be able to say which one ran. MUFFIN_VERSION reaches it as a compile definition, which
+          # means a packaging slip could ship a stale one while every file name and control field says
+          # the truth. Read the version out of the binary inside the package and hold it to the tag.
+          rm -rf /tmp/deb-root && mkdir -p /tmp/deb-root
+          dpkg-deb -x "build/$expected" /tmp/deb-root
+          /tmp/deb-root/usr/lib/muffin/muffin-install-helper --help | tee /tmp/deb-helper-help
+          grep -q "^Version: ${GITHUB_REF_NAME#v}$" /tmp/deb-helper-help \
+            || { echo "the helper in the deb does not report the tag version"; exit 1; }
+
           # Maintainer scripts live in the CONTROL member, so every check above passes happily without
           # them. dpkg refuses to configure a package whose postinst is not executable, and a missing
           # postrm leaves the polkit rule installed after removal — both are silent until a user hits
