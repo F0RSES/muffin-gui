@@ -1,5 +1,6 @@
 #include "ZapretDownloader.h"
 
+#include "MuffinInstallHelper.h"
 #include "ZapretPaths.h"
 
 #include <QCoreApplication>
@@ -146,6 +147,16 @@ QString ZapretDownloader::targetDir() const
 QString ZapretDownloader::installRoot()
 {
     return ZapretPaths::managedInstallDir();
+}
+
+void ZapretDownloader::setPromoteAfterInstall(bool on)
+{
+    m_promoteAfterInstall = on;
+}
+
+bool ZapretDownloader::promoteAfterInstall() const
+{
+    return m_promoteAfterInstall;
 }
 
 QString ZapretDownloader::sha256OfFile(const QString &path, bool *ok)
@@ -340,7 +351,14 @@ void ZapretDownloader::cancel()
 
     // Verifying and installing are short local steps with nothing to abort; a cancel landing there is
     // resolved here, once the operation had no chance to notice it any other way.
-    if (m_stage != Stage::Fetching && m_stage != Stage::Downloading && m_stage != Stage::Extracting)
+    //
+    // Promoting is deliberately NOT in the "nothing to abort" branch. The download it is following has
+    // already succeeded — the tree is installed and validated — so what a cancel can mean here is only
+    // "stop waiting for the password", and its finished() handler reports that as a finished install
+    // with a failed promotion rather than as cancelled(), which would tell the user the download itself
+    // never happened.
+    if (m_stage != Stage::Fetching && m_stage != Stage::Downloading &&
+        m_stage != Stage::Extracting && m_stage != Stage::Promoting)
     {
         m_cancelRequested = false;
         cleanup();
@@ -719,8 +737,99 @@ void ZapretDownloader::installAndFinish(const QString &extractDir)
     }
 
     cleanup();
+    // A linux download can be handed to the root helper as well. That call owns the end of the
+    // operation — it emits downloadFinished itself, because the path worth reporting depends on
+    // whether the promotion landed.
+    if (m_promoteAfterInstall && m_platform == Strategy::Platform::Linux)
+    {
+        beginPromotion(target);
+        return;
+    }
+
     setStage(Stage::Idle);
     emit downloadFinished(target);
+}
+
+void ZapretDownloader::beginPromotion(const QString &managedDir)
+{
+    QString program;
+    QStringList args;
+    QString why;
+    if (!MuffinInstallHelper::composePromote(managedDir, &program, &args, &why))
+    {
+        // Nothing to attempt: no helper installed, no pkexec, or the tree failed the source checks.
+        // The download is complete and usable either way, which is why this path reports and finishes
+        // rather than failing — the managed copy is exactly what every earlier build used.
+        setStage(Stage::Idle);
+        emit promotionFailed(why);
+        emit downloadFinished(managedDir);
+        return;
+    }
+
+    m_promoteFrom = managedDir;
+    setStage(Stage::Promoting);
+
+    auto *proc = new QProcess(this);
+    m_process = proc;
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    proc->setProgram(program);
+    proc->setArguments(args);
+
+    connect(proc, &QProcess::finished, this,
+            [this, proc, managedDir](int code, QProcess::ExitStatus status) {
+        if (m_process == proc)
+            m_process = nullptr;
+        const QString output = QString::fromLocal8Bit(proc->readAll()).trimmed();
+        proc->deleteLater();
+        if (m_stage != Stage::Promoting)
+            return;   // errorOccurred already reported this run, or a destroy took it
+
+        // A pkexec the user walked away from exits non-zero (polkit's NOT_AUTHORIZED / an
+        // authentication failure), and so does a helper that refused the tree. Both mean the same
+        // thing to the caller: the managed install stands, the system-wide one does not.
+        if (status != QProcess::NormalExit || code != 0)
+        {
+            setStage(Stage::Idle);
+            emit promotionFailed(QStringLiteral(
+                                     "ZapretDownloader: the system-wide install into %1 did not happen "
+                                     "(exit code %2), so zapret keeps asking for a password when it "
+                                     "starts from the managed folder.%3")
+                                     .arg(ZapretPaths::systemInstallDir(), QString::number(code),
+                                          output.isEmpty() ? QString()
+                                                           : QStringLiteral("\n%1").arg(output.left(500))));
+            emit downloadFinished(managedDir);
+            return;
+        }
+
+        // Report the tree that was just made root-owned, so the caller stores the path whose payload
+        // the polkit rule authorises without a password.
+        setStage(Stage::Idle);
+        m_promoteFrom.clear();
+        emit downloadFinished(ZapretPaths::systemInstallDir());
+    });
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError e) {
+        // FailedToStart is the only failure that never produces finished(): here that means pkexec
+        // itself vanished between the existence check and the exec.
+        if (e != QProcess::FailedToStart)
+            return;
+        if (m_process == proc)
+            m_process = nullptr;
+        const QString text = proc->errorString();
+        proc->deleteLater();
+        if (m_stage != Stage::Promoting)
+            return;
+        const QString from = m_promoteFrom;
+        m_promoteFrom.clear();
+        setStage(Stage::Idle);
+        emit promotionFailed(QStringLiteral(
+                                 "ZapretDownloader: the root helper could not be started (%1); the "
+                                 "download is installed and works, it just keeps asking for a "
+                                 "password when it starts.").arg(text));
+        emit downloadFinished(from);
+    });
+
+    proc->start();
 }
 
 bool ZapretDownloader::installTree(const QString &payloadDir, const QString &target, QString *error)

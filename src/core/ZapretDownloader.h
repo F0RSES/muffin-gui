@@ -43,7 +43,8 @@ public:
         Fetching,     // asking the release API
         Downloading,  // streaming the archive to disk
         Verifying,    // hashing the archive
-        Extracting    // running the system archiver
+        Extracting,   // running the system archiver
+        Promoting     // handing the installed tree to the root helper
     };
     Q_ENUM(Stage)
 
@@ -57,6 +58,20 @@ public:
     // Where the finished tree is installed. Defaults to installRoot().
     void setTargetDir(const QString &dir);
     QString targetDir() const;
+
+    // ---- system-wide promotion (POSIX) ----
+    //
+    // Turn on, and a finished linux download is also handed to the root helper
+    // (MuffinInstallHelper), which installs a copy into ZapretPaths::systemInstallDir() as
+    // root:root with no group/world write bit. That tree is the one packaging/postinst's polkit rule
+    // lets pkexec run WITHOUT a password; the managed copy in the user's own app-data folder can
+    // never be authorised, because the user owns the bytes there and could swap in anything.
+    //
+    // Off by default: asking a human for a password is not something a library does behind a
+    // caller's back, and a headless test that never opts in can therefore never reach pkexec.
+    // Promotion also never fails a download — see promotionFailed.
+    void setPromoteAfterInstall(bool on);
+    bool promoteAfterInstall() const;
 
     Stage stage() const { return m_stage; }
     bool isBusy() const { return m_stage != Stage::Idle; }
@@ -100,8 +115,16 @@ signals:
     // totalBytes is -1 when the server did not say, so the UI shows activity instead of a percentage.
     void downloadProgress(qint64 receivedBytes, qint64 totalBytes);
     void extractionStarted();
+    // Emitted once, after the promotion attempt has resolved (or immediately when promotion is off),
+    // and it names the tree the caller should use: the system directory when the root helper put one
+    // there, the managed directory otherwise.
     void downloadFinished(QString installedPath);
     void downloadFailed(QString message);
+    // The managed copy is installed and usable when this fires — promotion is an addition, never a
+    // requirement, and a declined password prompt must not read as a failed download. The text says
+    // which of the two it was (no helper installed, validation refused, pkexec exit status) and is the
+    // reason the payload keeps asking for a password at start.
+    void promotionFailed(QString message);
     void cancelled();
 
 private:
@@ -112,6 +135,9 @@ private:
     void installAndFinish(const QString &extractDir);
     // Move the unpacked tree into the target, keeping the previous install recoverable.
     bool installTree(const QString &payloadDir, const QString &target, QString *error);
+    // The promotion phase. Resolves to downloadFinished itself, so installAndFinish returns to the
+    // event loop instead of announcing an install that is not yet settled.
+    void beginPromotion(const QString &managedDir);
 
     QNetworkAccessManager *m_nam = nullptr;   // created on first use, child of this
     QNetworkReply *m_reply = nullptr;         // non-null only during an in-flight request
@@ -126,6 +152,8 @@ private:
     bool m_cancelRequested = false;
     qint64 m_received = 0;
     QString m_writeError;                   // a disk write that failed mid-download; reported at finish
+    bool m_promoteAfterInstall = false;     // see setPromoteAfterInstall
+    QString m_promoteFrom;                  // the managed dir the promotion was started from
 
 };
 

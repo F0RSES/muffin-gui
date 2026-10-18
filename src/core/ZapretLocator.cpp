@@ -43,9 +43,21 @@ QStringList ZapretLocator::defaultBases()
     // restart finds the tree the user downloaded without asking them to point at it again. It also
     // cannot shadow anything a user set up by hand: the directory simply does not exist until the
     // download feature has been used once.
+    //
+    // It also stays first after a promotion. /opt/muffin/zapret is a copy of this directory taken by
+    // the root helper, so the two hold the same release — but a download whose promotion was declined
+    // or failed leaves the managed copy NEWER than the system one, and silently preferring the stale
+    // tree would mean running an older zapret than the one the user just installed. The promoted tree
+    // reaches the GUI through Settings (zapretInstalled is told the system path when the promotion
+    // succeeded), which outranks this list; the entry here is the fallback that keeps it findable when
+    // Settings is reset or another user logs in.
     const QString managed = ZapretPaths::managedInstallDir();
     if (!managed.isEmpty())
         bases << managed;
+    // The root-owned tree a download is promoted into. Empty on Windows, where there is no such place.
+    const QString system = ZapretPaths::systemInstallDir();
+    if (!system.isEmpty())
+        bases << system;
     bases << QDir::homePath() + QStringLiteral("/Documents/zapret");
     bases << QDir::homePath() + QStringLiteral("/Downloads/zapret");
     bases << QDir::currentPath() + QStringLiteral("/zapret");
