@@ -1,168 +1,278 @@
 /* ============================================================================
-   Muffin — dark theme.  Tokens: bg #1E1E2E surface #2A2A3C hover #34344A
-   accent #7C3AED / #8B5CF6  text #E4E4E7 / #9CA3AF  ok #10B981 err #EF4444 warn #F59E0B
+   Muffin — dark theme, "dark dashboard".
+
+   Tokens (mirrored by Theme.cpp::tokensFor(true) — change both, they are one palette):
+     bg #0B0C10   rail #101219   surface #15161C   recessed #090A0D   hover #1F222D
+     border #262A36   edge #343A4A   text #E7E9F2   muted #8A91A6   faint #5A6175
+     accent #C084FC (hover #D8B4FE, pressed #A855F7, tint #1C1727)   accent2 #22D3EE
+     ok #34D399   err #F87171   warn #FBBF24
+
+   Shape: a fixed rail on the left carries the brand and the navigation; the page stack to its right
+   shows one full-width page at a time (strategy cards, then the log). Rules are grouped in that
+   order — rail, pages, toolbar, cards, buttons, inputs, log, chrome.
+
+   Every object name below is a contract with the C++ side (setObjectName in MainWindow / LogPanel /
+   StrategyCard / SettingsDialog / PingIndicator), and several are asserted by tests/uitest.cpp —
+   renaming one silently unstyles the widget it targets.
    ==========================================================================*/
-QMainWindow, QDialog { background-color: #1E1E2E; }
+
+QMainWindow, QDialog { background-color: #0B0C10; }
 
 QWidget {
     background-color: transparent;
-    color: #E4E4E7;
-    font-family: "Segoe UI", "Inter", "Noto Sans", sans-serif;
+    color: #E7E9F2;
+    font-family: "Inter", "Segoe UI", "Noto Sans", "Cantarell", sans-serif;
     font-size: 10pt;
 }
 QToolTip {
-    background-color: #2A2A3C; color: #E4E4E7;
-    border: 1px solid #3A3A4E; padding: 5px 8px; border-radius: 6px;
+    background-color: #15161C; color: #E7E9F2;
+    border: 1px solid #262A36; padding: 6px 9px; border-radius: 8px;
 }
 
+/* ---------- sidebar rail ---------- */
+QWidget#sidebar {
+    background-color: #101219;
+    border-right: 1px solid #1F2230;
+}
+QLabel#brandLogo { background-color: transparent; }
+QLabel#brandName {
+    background-color: transparent;
+    font-size: 12pt; font-weight: 700; letter-spacing: 0.5px; color: #E7E9F2;
+}
+QLabel#brandCaption {
+    background-color: transparent;
+    font-size: 8pt; font-weight: 500; letter-spacing: 1.2px; color: #5A6175;
+}
+QFrame#sidebarRule { background-color: #1F2230; border: none; }
+
+/* One rule for every rail button: the two page switches (checkable, driven by an exclusive
+   QButtonGroup) and the two actions at the bottom (Настройки, power) which never get a checked
+   state and so fall through to the hover rule only. */
+QPushButton#navButton {
+    background-color: transparent; color: #8A91A6;
+    border: 1px solid transparent; border-radius: 10px;
+    padding: 9px 12px; text-align: left; font-size: 10pt; font-weight: 500;
+}
+QPushButton#navButton:hover {
+    background-color: #191B23; color: #E7E9F2; border-color: #22252F;
+}
+QPushButton#navButton:pressed { background-color: #15161C; }
+QPushButton#navButton:checked {
+    background-color: #1C1727; color: #C084FC; border-color: #2E2545;
+    font-weight: 600;
+}
+QPushButton#navButton:focus { outline: none; }
+QPushButton#navButton:disabled { color: #454A5C; background-color: transparent; }
+/* The journal tab while the page it opens is hidden: a new warning or error went unnoticed, so the
+   label carries the alert colour (the rail glyph is a baked pixmap and cannot recolour itself). */
+QPushButton#navButton[alert="true"] { color: #F87171; }
+
+/* ---------- pages ---------- */
+QStackedWidget#pageStack { background-color: #0B0C10; }
+QWidget#dashboardPage, QWidget#logsPage { background-color: #0B0C10; }
+QLabel#pageTitle {
+    background-color: transparent;
+    font-size: 15pt; font-weight: 700; color: #E7E9F2;
+}
+QLabel#pageSubtitle {
+    background-color: transparent;
+    font-size: 9pt; color: #8A91A6;
+}
 /* ---------- toolbar ---------- */
-QToolBar, QToolBar::separator { background-color: #22222F; border: none; spacing: 6px; }
-QToolBar { padding: 6px 10px; }
+/* The rail owns navigation now, so the toolbar is a thin action strip: same glyphs, no page tabs. */
+QToolBar, QToolBar::separator { background-color: #0B0C10; border: none; spacing: 6px; }
+QToolBar#mainToolBar {
+    background-color: #0B0C10;
+    border-bottom: 1px solid #1A1D26;
+    padding: 7px 14px;
+    spacing: 6px;
+}
 QToolButton {
-    background-color: transparent; color: #E4E4E7;
-    border: 1px solid transparent; border-radius: 8px; padding: 6px 10px;
+    background-color: transparent; color: #B8BED0;
+    border: 1px solid transparent; border-radius: 9px; padding: 6px 11px;
+    font-size: 9pt; font-weight: 500;
 }
-QToolButton:hover  { background-color: #34344A; border-color: #3A3A4E; }
-QToolButton:pressed { background-color: #2A2A3C; }
-QToolButton:disabled { color: #5B5B6E; }
+QToolButton:hover  { background-color: #1F222D; border-color: #262A36; color: #E7E9F2; }
+QToolButton:pressed { background-color: #15161C; }
+QToolButton:disabled { color: #454A5C; background-color: transparent; border-color: transparent; }
 
-/* ---------- surfaces ---------- */
+/* ---------- cards ---------- */
 QFrame#card, StrategyCard, QFrame#strategyCard {
-    background-color: #2A2A3C;
-    border: 1px solid #34344A;
-    border-radius: 12px;
+    background-color: #15161C;
+    border: 1px solid #262A36;
+    border-radius: 14px;
 }
-StrategyCard:hover, QFrame#strategyCard:hover { background-color: #34344A; }
+/* A hover edge in the accent colour, matched by the animated drop shadow StrategyCard installs: the
+   shadow is tinted with Theme::accent() so the two glow in the same hue. */
+StrategyCard:hover, QFrame#strategyCard:hover {
+    background-color: #191C24;
+    border: 1px solid #C084FC;
+}
 StrategyCard[active="true"], QFrame#strategyCard[active="true"] {
-    border: 2px solid #7C3AED;
-    background-color: #2E2A44;
+    border: 1px solid #C084FC;
+    background-color: #17131F;
 }
+StrategyCard[active="true"]:hover, QFrame#strategyCard[active="true"]:hover { background-color: #1C1727; }
 /* A failed start keeps its reason on the card itself, not only in the log panel. */
 StrategyCard[error="true"], QFrame#strategyCard[error="true"] {
-    border: 2px solid #EF4444;
-    background-color: #2E2531;
+    border: 1px solid #F87171;
+    background-color: #1B1215;
 }
-QLabel#cardError      { color: #EF4444; font-size: 9pt; }
-QLabel#cardTitle { font-size: 11pt; font-weight: 700; color: #E4E4E7; }
-QLabel#cardDesc  { font-size: 9pt;  color: #9CA3AF; }
-QLabel#cardHint  { font-size: 8pt;  color: #6B7280; }
-QLabel#muted     { color: #9CA3AF; }
-QLabel#placeholder { color: #6B7280; font-size: 11pt; }
+QLabel#cardTitle { font-size: 11pt; font-weight: 700; color: #E7E9F2; background: transparent; }
+QLabel#cardDesc  { font-size: 9pt;  color: #8A91A6; background: transparent; }
+QLabel#cardHint  { font-size: 8pt;  color: #5A6175; background: transparent; }
+QLabel#muted     { color: #8A91A6; background: transparent; }
+QLabel#placeholder { color: #5A6175; font-size: 11pt; background: transparent; }
+QLabel#cardError { color: #F87171; font-size: 9pt; background: transparent; }
+QWidget#cardErrorRow, QFrame#cardErrorRow {
+    background-color: #221418; border: 1px solid #3A1F24; border-radius: 8px;
+}
+QLabel#cardErrorIcon { background: transparent; }
 
 /* ---------- buttons ---------- */
 QPushButton {
-    background-color: #34344A; color: #E4E4E7;
-    border: 1px solid #3F3F55; border-radius: 8px; padding: 7px 14px;
+    background-color: #1F222D; color: #E7E9F2;
+    border: 1px solid #2A2E3B; border-radius: 9px; padding: 7px 14px;
+    font-size: 9pt; font-weight: 500;
 }
-QPushButton:hover   { background-color: #3E3E56; border-color: #4B4B66; }
-QPushButton:pressed { background-color: #2A2A3C; }
-QPushButton:disabled { color: #5B5B6E; background-color: #2A2A3C; border-color: #2A2A3C; }
+QPushButton:hover   { background-color: #262A36; border-color: #343A4A; }
+QPushButton:pressed { background-color: #15161C; }
+QPushButton:disabled { color: #454A5C; background-color: #15161C; border-color: #1A1D26; }
+QPushButton:focus   { outline: none; }
+/* The neon pair: purple carries "this starts something", and the ink is the app background because
+   #C084FC is light enough that white-on-purple fails contrast. */
 QPushButton#primaryButton {
-    background-color: #7C3AED; color: #FFFFFF; border: 1px solid #7C3AED;
-    border-radius: 8px; padding: 8px 16px; font-weight: 600;
+    background-color: #C084FC; color: #0B0C10; border: 1px solid #C084FC;
+    border-radius: 9px; padding: 8px 18px; font-weight: 700; font-size: 9pt;
 }
-QPushButton#primaryButton:hover   { background-color: #8B5CF6; border-color: #8B5CF6; }
-QPushButton#primaryButton:pressed { background-color: #6D28D9; }
-QPushButton#primaryButton:disabled { background-color: #3A3A4E; border-color: #3A3A4E; color: #6B7280; }
-QPushButton#dangerButton { background-color: #34344A; border-color: #5B2330; color: #FCA5A5; }
-QPushButton#dangerButton:hover { background-color: #43272F; }
+QPushButton#primaryButton:hover   { background-color: #D8B4FE; border-color: #D8B4FE; }
+QPushButton#primaryButton:pressed { background-color: #A855F7; border-color: #A855F7; }
+QPushButton#primaryButton:disabled { background-color: #241F31; border-color: #2E2545; color: #5A5470; }
+QPushButton#dangerButton {
+    background-color: transparent; border: 1px solid #4B2530; color: #F87171;
+    font-weight: 600;
+}
+QPushButton#dangerButton:hover { background-color: #2A1418; border-color: #F87171; }
+QPushButton#dangerButton:pressed { background-color: #221418; }
 /* An id selector outranks a pseudo-state in QSS specificity, so QPushButton:disabled above does NOT
    reach this button: without this rule a greyed-out "Остановить" keeps its full live red and reads as
    clickable, which is precisely the misleading state during a teardown. Keep the neutral disabled
    tokens so it looks like every other unavailable control. */
-QPushButton#dangerButton:disabled { background-color: #2A2A3C; border-color: #2A2A3C; color: #5B5B6E; }
-
+QPushButton#dangerButton:disabled { background-color: #15161C; border-color: #1A1D26; color: #454A5C; }
 /* ---------- inputs ---------- */
 QLineEdit, QSpinBox, QComboBox {
-    background-color: #22222F; color: #E4E4E7;
-    border: 1px solid #3A3A4E; border-radius: 8px; padding: 6px 10px;
-    selection-background-color: #7C3AED; selection-color: #FFFFFF;
+    background-color: #0F1116; color: #E7E9F2;
+    border: 1px solid #262A36; border-radius: 9px; padding: 6px 10px;
+    selection-background-color: #C084FC; selection-color: #0B0C10;
 }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #7C3AED; }
-QLineEdit:read-only { color: #9CA3AF; }
-QLineEdit#pathOk   { border: 1px solid #10B981; }
-QLineEdit#pathBad  { border: 1px solid #EF4444; }
-QLabel#validOk  { color: #10B981; font-size: 9pt; }
-QLabel#validBad { color: #EF4444; font-size: 9pt; }
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #C084FC; }
+QLineEdit:read-only { color: #8A91A6; }
+QLineEdit#pathOk   { border: 1px solid #34D399; }
+QLineEdit#pathBad  { border: 1px solid #F87171; }
+QLabel#validOk  { color: #34D399; font-size: 9pt; }
+QLabel#validBad { color: #F87171; font-size: 9pt; }
 /* "Minimize to tray" that this desktop cannot honour — a warning, not an error. */
-QLabel#trayNote { color: #F59E0B; font-size: 8pt; }
+QLabel#trayNote { color: #FBBF24; font-size: 8pt; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;
     width: 22px; border: none; }
 QComboBox::down-arrow { image: url(:/icons/arrow-down.svg); width: 14px; height: 14px; }
 QComboBox QAbstractItemView {
-    background-color: #2A2A3C; color: #E4E4E7;
-    border: 1px solid #3A3A4E; border-radius: 8px; padding: 4px;
-    selection-background-color: #7C3AED; selection-color: #FFFFFF; outline: none;
+    background-color: #15161C; color: #E7E9F2;
+    border: 1px solid #262A36; border-radius: 9px; padding: 4px;
+    selection-background-color: #1C1727; selection-color: #C084FC; outline: none;
 }
-QSpinBox::up-button, QSpinBox::down-button { background: #34344A; width: 16px; border: none; }
+QSpinBox::up-button, QSpinBox::down-button { background: #1F222D; width: 16px; border: none; }
 QSpinBox::up-arrow, QSpinBox::down-arrow { width: 10px; height: 10px; }
 
-QCheckBox { spacing: 8px; color: #E4E4E7; background: transparent; }
+QCheckBox { spacing: 8px; color: #E7E9F2; background: transparent; }
 QCheckBox::indicator {
     width: 16px; height: 16px; border-radius: 5px;
-    border: 1px solid #4B5563; background-color: #22222F;
+    border: 1px solid #343A4A; background-color: #0F1116;
 }
-QCheckBox::indicator:hover  { border-color: #7C3AED; }
-QCheckBox::indicator:checked { background-color: #7C3AED; border-color: #7C3AED;
+QCheckBox::indicator:hover  { border-color: #C084FC; }
+QCheckBox::indicator:checked { background-color: #C084FC; border-color: #C084FC;
     image: url(:/icons/check.svg); }
 
 /* ---------- log ---------- */
+/* The well is darker than the page so the journal reads as a console sunk into the dashboard, and
+   the mono stack is what makes a column of timestamps line up. */
 QPlainTextEdit#logView {
-    background-color: #181825; color: #E4E4E7;
-    border: 1px solid #34344A; border-radius: 10px;
+    background-color: #090A0D; color: #E7E9F2;
+    border: 1px solid #262A36; border-radius: 12px;
     font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
-    font-size: 9pt; padding: 6px;
+    font-size: 9pt; padding: 8px;
 }
-QFrame#logPanel { background-color: #22222F; border: 1px solid #34344A; border-radius: 12px; }
+QFrame#logPanel { background-color: #12131A; border: 1px solid #262A36; border-radius: 14px; }
 QFrame#logHeader { background: transparent; border: none; }
 
 /* ---------- scroll ---------- */
-QScrollArea { background: transparent; border: none; }
+QScrollArea, QScrollArea#cardScroll { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
-QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
-QScrollBar::handle:vertical { background: #34344A; border-radius: 4px; min-height: 28px; }
-QScrollBar::handle:vertical:hover { background: #4B4B66; }
-QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #34344A; border-radius: 4px; min-width: 28px; }
+QScrollBar:vertical { background: transparent; width: 9px; margin: 2px; }
+QScrollBar::handle:vertical { background: #262A36; border-radius: 4px; min-height: 28px; }
+QScrollBar::handle:vertical:hover { background: #C084FC; }
+QScrollBar:horizontal { background: transparent; height: 9px; margin: 2px; }
+QScrollBar::handle:horizontal { background: #262A36; border-radius: 4px; min-width: 28px; }
+QScrollBar::handle:horizontal:hover { background: #C084FC; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: none; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
-
 /* ---------- status bar ---------- */
-QStatusBar { background-color: #181825; color: #9CA3AF; border-top: 1px solid #2A2A3C; }
+QStatusBar { background-color: #0B0C10; color: #8A91A6; border-top: 1px solid #1A1D26; }
 QStatusBar::item { border: none; }
-QLabel#statusLabel { font-weight: 600; padding: 2px 8px; border-radius: 6px; }
-QLabel#statusLabel[statusKind="stopped"] { color: #9CA3AF; }
-QLabel#statusLabel[statusKind="starting"] { color: #F59E0B; }
-QLabel#statusLabel[statusKind="running"]  { color: #10B981; }
-QLabel#statusLabel[statusKind="error"]    { color: #EF4444; }
-QLabel#dirLabel { color: #6B7280; font-size: 9pt; }
+QLabel#statusLabel {
+    font-weight: 600; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid #262A36; background-color: #15161C;
+}
+QLabel#statusLabel[statusKind="stopped"] { color: #8A91A6; border-color: #262A36; }
+QLabel#statusLabel[statusKind="starting"] { color: #FBBF24; border-color: #4A3A18; background-color: #1E1810; }
+QLabel#statusLabel[statusKind="running"]  { color: #34D399; border-color: #1B4A3A; background-color: #0F1F1A; }
+QLabel#statusLabel[statusKind="error"]    { color: #F87171; border-color: #4B2530; background-color: #1B1215; }
+QLabel#dirLabel { color: #5A6175; font-size: 9pt; }
+/* Reachability chips: a friendly name and a measured latency, both quieter than the status pill. */
+QLabel#pingName { color: #8A91A6; font-size: 9pt; }
+QLabel#pingValue { color: #E7E9F2; font-size: 9pt; font-weight: 600; }
 
 /* ---------- menus ---------- */
 QMenu {
-    background-color: #2A2A3C; color: #E4E4E7;
-    border: 1px solid #3A3A4E; border-radius: 10px; padding: 6px;
+    background-color: #15161C; color: #E7E9F2;
+    border: 1px solid #262A36; border-radius: 12px; padding: 6px;
 }
-QMenu::item { padding: 6px 22px 6px 14px; border-radius: 6px; }
-QMenu::item:selected { background-color: #7C3AED; color: #FFFFFF; }
-QMenu::separator { height: 1px; background: #3A3A4E; margin: 5px 8px; }
+QMenu::item { padding: 7px 24px 7px 14px; border-radius: 8px; }
+QMenu::item:selected { background-color: #1C1727; color: #C084FC; }
+QMenu::item:disabled { color: #454A5C; }
+QMenu::separator { height: 1px; background: #262A36; margin: 6px 8px; }
 
 /* ---------- misc ---------- */
-QSplitter::handle { background-color: #2A2A3C; width: 3px; }
-QGroupBox { border: 1px solid #3A3A4E; border-radius: 10px; margin-top: 12px; padding-top: 8px; }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #9CA3AF; }
-QHeaderView::section { background-color: #2A2A3C; color: #9CA3AF; border: none; padding: 6px; }
-QDialogButtonBox QPushButton { min-width: 84px; }
-QProgressBar { border: 1px solid #3A3A4E; border-radius: 6px; background: #22222F; color: #E4E4E7; }
-QProgressBar::chunk { background-color: #7C3AED; border-radius: 5px; }
+/* Splitter rules survive for the layouts that still use one; the main window does not, having moved
+   to a rail plus a page stack. */
+QSplitter::handle { background-color: #15161C; width: 3px; }
+QGroupBox { border: 1px solid #262A36; border-radius: 12px; margin-top: 12px; padding-top: 8px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #8A91A6; }
+QHeaderView::section { background-color: #15161C; color: #8A91A6; border: none; padding: 6px; }
+QDialogButtonBox QPushButton { min-width: 88px; }
+QProgressBar {
+    border: 1px solid #262A36; border-radius: 8px; background: #0F1116; color: #E7E9F2;
+    text-align: center;
+}
+/* The one cyan surface in the app: an indeterminate download reads as energy moving, not as a second
+   primary button. */
+QProgressBar::chunk { background-color: #22D3EE; border-radius: 7px; }
 
 /* ---------- window surfaces (keep this block last) ---------------------------
    The generic `QWidget { background-color: transparent }` near the top is what lets cards, rows and
    labels composite over their parents. It has the same specificity as a plain type rule, and in Qt's
-   stylesheet cascade the last match wins — so a top-level window, a stacked widget or a scroll viewport
-   left transparent composites onto *black*. Invisible in the dark theme, glaring in the light one, so
-   every surface that is meant to carry the app background is re-asserted here, after all generic rules.
-   LogPanel/QScrollArea's inner host need it because they are the only thing behind the card list. */
-QMainWindow, QDialog, QStackedWidget, QSplitter, QScrollArea,
-QScrollArea > QWidget > QWidget, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader {
-    background-color: #1E1E2E;
+   stylesheet cascade the last match wins — so a top-level window, a stacked widget or a scroll
+   viewport left transparent composites onto *black*. Invisible in the dark theme, glaring in the light
+   one, so every surface meant to carry the app background is re-asserted here, after all generic
+   rules. The rail is re-asserted too, with its own colour: it is an id rule like these and must not
+   lose the tie to the block above. */
+QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
+QScrollArea, QScrollArea > QWidget > QWidget,
+QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,
+QWidget#dashboardPage, QWidget#logsPage, QWidget#placeholderPage {
+    background-color: #0B0C10;
 }
+QWidget#sidebar { background-color: #101219; }
+
+
+

@@ -56,10 +56,13 @@ LogPanel::LogPanel(QWidget *parent)
     levelCaption->setObjectName(QStringLiteral("muted"));
 
     m_levelBox = new QComboBox(header);
-    m_levelBox->addItem(QStringLiteral("All"), int(All));
-    m_levelBox->addItem(QStringLiteral("Info"), int(Info));
-    m_levelBox->addItem(QStringLiteral("Warn"), int(Warn));
-    m_levelBox->addItem(QStringLiteral("Error"), int(Error));
+    // Display text only — the filter reads itemData() (the int level), so nothing keys off these
+    // words. They were Latin ("All"/"Info"/...) while every other label here is Russian, which the
+    // redesign made conspicuous by giving the journal a full-width page of its own.
+    m_levelBox->addItem(QStringLiteral("Все"), int(All));
+    m_levelBox->addItem(QStringLiteral("Инфо"), int(Info));
+    m_levelBox->addItem(QStringLiteral("Предупреждение"), int(Warn));
+    m_levelBox->addItem(QStringLiteral("Ошибка"), int(Error));
     m_levelBox->setCurrentIndex(0);
 
     m_copyButton = new QPushButton(QStringLiteral("Копировать"), header);

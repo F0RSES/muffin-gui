@@ -23,8 +23,20 @@
 namespace zapret {
 
 namespace {
-constexpr int kShadowBlurHover = 26;
+constexpr int kShadowBlurHover = 24;
 constexpr int kShadowBlurIdle = 0;
+
+// The hover glow is the accent, not black: on a #0B0C10 canvas a dark shadow is invisible, while a
+// purple one reads as the card lifting into the theme's own light. The alpha has to stay low:
+// QGraphicsDropShadowEffect blurs a *filled* rounded rect, so a saturated tint at this radius lands
+// as a purple slab along the card's bottom edge instead of a halo (seen in a screenshot of the
+// rendered window). The border in the QSS carries the neon edge; the glow only softens it.
+QColor glowColor()
+{
+    QColor glow = Theme::accent();
+    glow.setAlpha(56);
+    return glow;
+}
 
 // Quote a token the way a shell would need it, so a copied command line can be pasted and run.
 QString quoteArg(const QString &token)
@@ -82,6 +94,10 @@ void StrategyCard::build()
     m_button->setCursor(Qt::PointingHandCursor);
     m_button->setAutoDefault(false);
     m_button->setDefault(false);
+    // The three labels this button takes — "Запустить", "Остановить", "Повторить" — differ in width, and
+    // a button that resizes with them moves the card's right edge from row to row. Pinning the width
+    // keeps every card in the column on the same grid.
+    m_button->setMinimumWidth(124);
     // The idle appearance has to be applied here: setRunning() ignores a no-op transition, so the
     // label/objectName a fresh card starts with would otherwise stay empty.
     m_button->setText(QStringLiteral("Запустить"));
@@ -135,16 +151,23 @@ void StrategyCard::build()
     });
 
     // Hover elevation. The effect is installed once and only its blur radius animates, so the card
-    // costs nothing while idle.
+    // costs nothing while idle — but "nothing" has to be explicit: QGraphicsDropShadowEffect with
+    // blurRadius 0 does not disable itself, it draws an unblurred copy of the widget's rect at the
+    // offset, so a coloured shadow at rest is a hard purple slab under every card. Idle therefore
+    // paints with a transparent ink, and enterEvent() puts the accent on before the blur grows.
     m_shadow = new QGraphicsDropShadowEffect(this);
     m_shadow->setBlurRadius(kShadowBlurIdle);
-    m_shadow->setColor(QColor(0, 0, 0, 140));
-    m_shadow->setOffset(0, 6);
+    m_shadow->setColor(Qt::transparent);
+    m_shadow->setOffset(0, 4);
     setGraphicsEffect(m_shadow);
 
     m_shadowAnim = new QPropertyAnimation(m_shadow, QByteArrayLiteral("blurRadius"), this);
     m_shadowAnim->setDuration(140);
     m_shadowAnim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(m_shadowAnim, &QPropertyAnimation::finished, this, [this] {
+        if (m_shadow->blurRadius() <= kShadowBlurIdle)
+            m_shadow->setColor(Qt::transparent);
+    });
 
     setStrategy(m_strategy);
 }
@@ -403,6 +426,9 @@ void StrategyCard::enterEvent(QEnterEvent *event)
     if (!m_shadowAnim)
         return;
     m_shadowAnim->stop();
+    // Put the accent on before the blur grows: leaveEvent() hands the ink back to transparent once the
+    // radius is home, so this is the only place the glow colour is ever set.
+    m_shadow->setColor(glowColor());
     m_shadowAnim->setStartValue(m_shadow->blurRadius());
     m_shadowAnim->setEndValue(kShadowBlurHover);
     m_shadowAnim->start();

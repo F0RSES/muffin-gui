@@ -59,6 +59,10 @@ public:
     static QColor text();
     static QColor mutedText();
     static QColor accent();
+    // The secondary accent (cyan in the dark sheet, teal-blue in the light one): progress, links and
+    // the "alive" edge of a card. accent() is theme-dependent for the same reason the QSS is — a
+    // #C084FC glyph on a #F4F5FA dialog is unreadable, and this colour is baked into icons.
+    static QColor accentSecondary();
     static QColor success();
     static QColor error();
     static QColor warning();

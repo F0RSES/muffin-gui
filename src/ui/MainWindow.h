@@ -10,8 +10,8 @@
 class QAction;
 class QCloseEvent;
 class QLabel;
+class QPushButton;
 class QScrollArea;
-class QSplitter;
 class QStackedWidget;
 class QSystemTrayIcon;
 class QTimer;
@@ -28,13 +28,14 @@ class Settings;
 class StrategyCard;
 class ZapretManager;
 
-// The application window: strategy cards on the left, live log on the right, reachability in the
-// status bar, everything driven through ZapretManager + Settings.
+// The application window: a navigation rail down the left, one full-width page at a time to its
+// right (strategy cards, then the journal), reachability in the status bar, everything driven through
+// ZapretManager + Settings.
 //
 // It owns no domain logic. Cards come from the manager's catalog (which is the parser's output), the
 // start/stop path is the manager's, and persisted values are Settings'. What lives here is only
 // presentation state: which card is flagged active, what the title says, whether closing hides to the
-// tray.
+// tray, and which page the rail is showing.
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -94,6 +95,22 @@ public:
     // The card a failure was pinned to ("" when none). Test hook for the inline error badge.
     QString errorCardId() const;
 
+    // ---- rail navigation ------------------------------------------------------------
+    // The rail replaced a splitter that kept the journal permanently beside the cards; at the 1100 px
+    // minimum width both halves were too narrow to read anything, so each is now a full-width page.
+    // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
+    // one without walking the widget tree.
+    enum Page : int
+    {
+        PageDashboard = 0,
+        PageLogs      = 1
+    };
+    int currentPage() const;
+    void setCurrentPage(int page);
+    // Set while the journal is hidden and a warning or error arrives, cleared by opening it: the page
+    // switch costs the user the passive view of the log, so something has to say "there is news here".
+    bool logAlertActive() const;
+
     void refreshStrategies();
     void openSettings();
     // Fetch the newest release for this platform, install it into the managed directory, and point the
@@ -121,6 +138,15 @@ private slots:
 
 private:
     void buildCentral();
+    // The left rail: brand, the two page switches, and the settings/power actions at its foot.
+    QWidget *buildSidebar();
+    // One rail button. The glyph name goes in a property so applyTheme() can re-tint it: Theme::icon()
+    // bakes the colour into a pixmap, so a theme switch cannot repaint an already-loaded glyph.
+    QPushButton *addNavButton(QVBoxLayout *box, const QString &glyph, const QString &text);
+    // Turns the journal's tab red while it holds a warning or error the user has not opened. The
+    // property is what the QSS [alert="true"] rule keys off, so it needs the same unpolish/polish
+    // dance StrategyCard uses for [active] and [error].
+    void setLogAlert(bool on);
     void buildToolBar();
     void buildStatusBar();
     // Create the tray icon if the platform has a tray host. Idempotent; returns whether one exists.
@@ -147,7 +173,13 @@ private:
     LogPanel *m_log = nullptr;
 
     QToolBar *m_toolBar = nullptr;
-    QSplitter *m_splitter = nullptr;
+    QWidget *m_sidebar = nullptr;          // the rail: brand, page switches, foot actions
+    QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageLogs
+    QPushButton *m_navDashboard = nullptr;
+    QPushButton *m_navLogs = nullptr;      // carries the [alert="true"] property
+    QPushButton *m_navPower = nullptr;     // its tooltip is the only place the tray policy is spelled out
+    QWidget *m_dashboardPage = nullptr;
+    QWidget *m_logsPage = nullptr;
     QScrollArea *m_scroll = nullptr;
     QStackedWidget *m_stack = nullptr;      // cards list <-> "no strategies found" placeholder
     QWidget *m_cardHost = nullptr;

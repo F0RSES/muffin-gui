@@ -12,10 +12,13 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QButtonGroup>
 #include <QCloseEvent>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
@@ -23,7 +26,6 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSizePolicy>
-#include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
@@ -59,6 +61,12 @@ QString friendlyHostName(const QString &host)
 // unavailable while a teardown runs, and has to restore this exact text afterwards — spelling it twice
 // is how the two drift.
 const QString kStopActionHint = QStringLiteral("Остановить запущенную стратегию (Ctrl+Shift+X)");
+
+// The rail is fixed, not resizable: it carries glyphs and short labels only, and a width that fits
+// "Главная" at 10 pt with a 20 px glyph is a width that never needs to change.
+constexpr int kSidebarWidth = 216;
+constexpr int kNavGlyphPx = 20;
+constexpr int kBrandGlyphPx = 30;
 
 } // namespace
 
@@ -148,12 +156,39 @@ MainWindow::~MainWindow()
 
 void MainWindow::buildCentral()
 {
-    m_splitter = new QSplitter(Qt::Horizontal, this);
-    m_splitter->setObjectName(QStringLiteral("mainSplit"));
-    m_splitter->setChildrenCollapsible(false);
-    m_splitter->setHandleWidth(3);
+    // Rail + page stack. The splitter this replaces kept the journal permanently beside the cards,
+    // which read well on a wide monitor and badly at the 1100 px minimum: two columns, each too narrow
+    // for a strategy name and a log line. One page at a time now gets the whole canvas, and the rail
+    // says which one you are looking at.
+    auto *root = new QWidget(this);
+    root->setObjectName(QStringLiteral("rootCanvas"));
 
-    m_stack = new QStackedWidget(m_splitter);
+    auto *rootBox = new QHBoxLayout(root);
+    rootBox->setContentsMargins(0, 0, 0, 0);
+    rootBox->setSpacing(0);
+    rootBox->addWidget(buildSidebar());
+
+    m_pages = new QStackedWidget(root);
+    m_pages->setObjectName(QStringLiteral("pageStack"));
+
+    m_dashboardPage = new QWidget(m_pages);
+    m_dashboardPage->setObjectName(QStringLiteral("dashboardPage"));
+
+    auto *dashBox = new QVBoxLayout(m_dashboardPage);
+    dashBox->setContentsMargins(20, 18, 20, 18);
+    dashBox->setSpacing(12);
+
+    auto *dashTitle = new QLabel(QStringLiteral("Стратегии"), m_dashboardPage);
+    dashTitle->setObjectName(QStringLiteral("pageTitle"));
+    auto *dashSubtitle = new QLabel(QStringLiteral(
+        "Одна стратегия за раз. Правый клик по карточке — скопировать команду."), m_dashboardPage);
+    dashSubtitle->setObjectName(QStringLiteral("pageSubtitle"));
+    dashBox->addWidget(dashTitle);
+    dashBox->addWidget(dashSubtitle);
+
+    // m_stack is still what it always was — the cards list or the "nothing found" page — it only
+    // moved inside the dashboard page instead of sitting directly in the window.
+    m_stack = new QStackedWidget(m_dashboardPage);
 
     m_scroll = new QScrollArea(m_stack);
     m_scroll->setObjectName(QStringLiteral("cardScroll"));
@@ -200,18 +235,164 @@ void MainWindow::buildCentral()
     m_stack->addWidget(m_scroll);
     m_stack->addWidget(m_placeholder);
     m_stack->setCurrentWidget(m_scroll);
-    m_stack->setMinimumWidth(400);
+    dashBox->addWidget(m_stack, 1);
 
-    m_log = new LogPanel(m_splitter);
-    m_log->setMinimumWidth(400);
+    // --- journal page ---------------------------------------------------------------
+    // The log used to be half the window; here it has the whole canvas, which is what a 5000-line ring
+    // buffer of aligned timestamps actually wants. Filtering, copying and saving are LogPanel's own.
+    m_logsPage = new QWidget(m_pages);
+    m_logsPage->setObjectName(QStringLiteral("logsPage"));
 
-    m_splitter->addWidget(m_stack);
-    m_splitter->addWidget(m_log);
-    m_splitter->setStretchFactor(0, 2);
-    m_splitter->setStretchFactor(1, 3);
-    m_splitter->setSizes({520, 640});
+    auto *logsBox = new QVBoxLayout(m_logsPage);
+    logsBox->setContentsMargins(20, 18, 20, 18);
+    logsBox->setSpacing(12);
 
-    setCentralWidget(m_splitter);
+    auto *logsTitle = new QLabel(QStringLiteral("Журнал"), m_logsPage);
+    logsTitle->setObjectName(QStringLiteral("pageTitle"));
+    auto *logsSubtitle = new QLabel(QStringLiteral(
+        "Всё, что сообщает бэкенд: уровень, время, строка."), m_logsPage);
+    logsSubtitle->setObjectName(QStringLiteral("pageSubtitle"));
+    logsBox->addWidget(logsTitle);
+    logsBox->addWidget(logsSubtitle);
+
+    m_log = new LogPanel(m_logsPage);
+    logsBox->addWidget(m_log, 1);
+
+    m_pages->addWidget(m_dashboardPage);
+    m_pages->addWidget(m_logsPage);
+    m_pages->setCurrentIndex(PageDashboard);
+
+    rootBox->addWidget(m_pages, 1);
+    setCentralWidget(root);
+}
+
+// The rail: brand, the two page switches, and the two actions that are not pages. It takes 216 px of
+// the window and it is the piece that says what this application is — a title bar alone never did.
+QWidget *MainWindow::buildSidebar()
+{
+    auto *bar = new QWidget(this);
+    m_sidebar = bar;
+    bar->setObjectName(QStringLiteral("sidebar"));
+    bar->setFixedWidth(kSidebarWidth);
+
+    auto *box = new QVBoxLayout(bar);
+    box->setContentsMargins(14, 18, 14, 16);
+    box->setSpacing(6);
+
+    auto *brandRow = new QHBoxLayout;
+    brandRow->setSpacing(10);
+    auto *logo = new QLabel(bar);
+    logo->setObjectName(QStringLiteral("brandLogo"));
+    logo->setPixmap(Theme::icon(QStringLiteral("app"), Theme::accent(), kBrandGlyphPx)
+                        .pixmap(kBrandGlyphPx, kBrandGlyphPx));
+    brandRow->addWidget(logo);
+
+    auto *names = new QVBoxLayout;
+    names->setSpacing(0);
+    auto *name = new QLabel(QStringLiteral("Muffin"), bar);
+    name->setObjectName(QStringLiteral("brandName"));
+    auto *caption = new QLabel(QStringLiteral("ZAPRET"), bar);
+    caption->setObjectName(QStringLiteral("brandCaption"));
+    names->addWidget(name);
+    names->addWidget(caption);
+    brandRow->addLayout(names);
+    brandRow->addStretch(1);
+    box->addLayout(brandRow);
+
+    auto *rule = new QFrame(bar);
+    rule->setObjectName(QStringLiteral("sidebarRule"));
+    rule->setFrameShape(QFrame::HLine);
+    rule->setFixedHeight(1);
+    box->addWidget(rule);
+    box->addSpacing(8);
+
+    // The two pages as one exclusive group: the id each button was added with is exactly the
+    // QStackedWidget index it switches to, so the group's signal goes straight to setCurrentPage.
+    m_navDashboard = addNavButton(box, QStringLiteral("home"), QStringLiteral("Главная"));
+    m_navLogs = addNavButton(box, QStringLiteral("logs"), QStringLiteral("Журнал"));
+    m_navDashboard->setCheckable(true);
+    m_navLogs->setCheckable(true);
+    m_navDashboard->setChecked(true);
+
+    auto *group = new QButtonGroup(bar);
+    group->setExclusive(true);
+    group->addButton(m_navDashboard, PageDashboard);
+    group->addButton(m_navLogs, PageLogs);
+    connect(group, &QButtonGroup::idClicked, this, &MainWindow::setCurrentPage);
+
+    box->addStretch(1);
+
+    // Below the fold: the things that are not pages. Настройки still opens its own sheet rather than
+    // becoming a page — it is a modal commit, not a view you glance at, and SettingsDialog::apply() is
+    // written as a dialog accept.
+    QPushButton *navSettings = addNavButton(box, QStringLiteral("settings"),
+                                           QStringLiteral("Настройки"));
+    navSettings->setToolTip(QStringLiteral("Настройки (Ctrl+S)"));
+    connect(navSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
+
+    m_navPower = addNavButton(box, QStringLiteral("power"), QStringLiteral("Свернуть"));
+    connect(m_navPower, &QPushButton::clicked, this, [this] {
+        // Closing the window already applies this policy; deciding it a second way here would be the
+        // third place that has to remember whether a tray host exists. updateStatusUi() words it.
+        if (hideOnClose(m_settings->minimizeToTray(), m_tray && m_tray->isVisible()))
+            hide();
+        else
+            requestQuit();
+    });
+
+    return bar;
+}
+
+QPushButton *MainWindow::addNavButton(QVBoxLayout *box, const QString &glyph, const QString &text)
+{
+    auto *b = new QPushButton(text, m_sidebar);
+    b->setObjectName(QStringLiteral("navButton"));
+    b->setProperty("glyph", glyph);
+    b->setCursor(Qt::PointingHandCursor);
+    b->setAutoDefault(false);
+    b->setDefault(false);
+    b->setFocusPolicy(Qt::TabFocus);
+    b->setIconSize(QSize(kNavGlyphPx, kNavGlyphPx));
+    b->setIcon(Theme::themedIcon(glyph, kNavGlyphPx));
+    b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    box->addWidget(b);
+    return b;
+}
+
+int MainWindow::currentPage() const
+{
+    return m_pages ? m_pages->currentIndex() : PageDashboard;
+}
+
+void MainWindow::setCurrentPage(int page)
+{
+    if (!m_pages)
+        return;
+    const int target = (page == PageLogs) ? PageLogs : PageDashboard;
+    m_pages->setCurrentIndex(target);
+
+    // A page chosen from code has to move the rail with it, or the window shows one page while a
+    // different tab is lit.
+    if (QPushButton *tab = (target == PageLogs) ? m_navLogs : m_navDashboard)
+        tab->setChecked(true);
+    // Opening the journal is what acknowledges whatever made it light up.
+    if (target == PageLogs)
+        setLogAlert(false);
+}
+
+bool MainWindow::logAlertActive() const
+{
+    return m_navLogs && m_navLogs->property("alert").toBool();
+}
+
+void MainWindow::setLogAlert(bool on)
+{
+    if (!m_navLogs || m_navLogs->property("alert").toBool() == on)
+        return;
+    m_navLogs->setProperty("alert", on);
+    m_navLogs->style()->unpolish(m_navLogs);
+    m_navLogs->style()->polish(m_navLogs);
+    m_navLogs->update();
 }
 
 void MainWindow::buildToolBar()
@@ -565,6 +746,18 @@ void MainWindow::updateStatusUi()
         m_stopAction->setToolTip(canStop || busy.isEmpty() ? kStopActionHint : busy);
     }
 
+    if (m_navPower) {
+        // The rail's power button means one of two things depending on whether this desktop publishes a
+        // tray host, and the button itself is the only place that difference can be said: "Свернуть"
+        // while there is somewhere to come back from, "Выйти" when the click ends the session.
+        const bool trayUp = m_tray && m_tray->isVisible();
+        const bool hides = hideOnClose(m_settings->minimizeToTray(), trayUp);
+        m_navPower->setText(hides ? QStringLiteral("Свернуть") : QStringLiteral("Выйти"));
+        m_navPower->setToolTip(hides
+                                   ? QStringLiteral("Свернуть в трей — zapret продолжит работать")
+                                   : QStringLiteral("Выйти из Muffin и остановить zapret"));
+    }
+
     const QString activeId = m_manager->activeStrategyId();
     for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it) {
         const bool isActive = activeIsUp && it.key() == activeId;
@@ -611,6 +804,20 @@ void MainWindow::applyTheme()
                 a->setIcon(Theme::themedIcon(QStringLiteral("stop"), 16));
         }
     }
+    // The rail's glyphs are baked pixmaps too, so they follow the toolbar: every button that carries a
+    // "glyph" property gets its icon re-tinted, and the brand mark re-drawn in the new accent.
+    if (m_sidebar) {
+        const auto navs = m_sidebar->findChildren<QPushButton *>();
+        for (QPushButton *b : navs) {
+            const QString glyph = b->property("glyph").toString();
+            if (!glyph.isEmpty())
+                b->setIcon(Theme::themedIcon(glyph, kNavGlyphPx));
+        }
+        if (QLabel *logo = m_sidebar->findChild<QLabel *>(QStringLiteral("brandLogo")))
+            logo->setPixmap(Theme::icon(QStringLiteral("app"), Theme::accent(), kBrandGlyphPx)
+                                .pixmap(kBrandGlyphPx, kBrandGlyphPx));
+    }
+
     setWindowIcon(Theme::icon(QStringLiteral("app"), Theme::accent(), 32));
     updateTrayIcon();
 }
@@ -758,6 +965,10 @@ void MainWindow::onStrategyStopped()
 void MainWindow::onLogMessage(const QString &line, int level)
 {
     m_log->appendLine(line, level);
+    // The journal no longer shares the screen with the cards, so a failure that lands while the user is
+    // reading strategy names has to announce itself from the rail instead of scrolling past unseen.
+    if (level >= LogPanel::Warn && currentPage() != PageLogs)
+        setLogAlert(true);
 }
 
 void MainWindow::onErrorOccurred(const QString &message)

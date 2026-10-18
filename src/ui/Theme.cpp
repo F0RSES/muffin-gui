@@ -19,17 +19,27 @@ Theme::Mode g_mode = Theme::Mode::Dark;
 struct Tokens
 {
     QColor window, surface, hover, border, text, muted, logText;
+    // Added for the dashboard redesign: the sidebar rail, the recessed fields/log well, the two
+    // accents and the three state colours. Every one of these is mirrored by a hex in both .qss
+    // sheets — see the token comment at the top of each sheet, and change the two together.
+    QColor sidebar, recessed, accent, accent2, ok, err, warn;
 };
 
 Tokens tokensFor(bool dark)
 {
     if (dark)
-        return {QColor(0x1E, 0x1E, 0x2E), QColor(0x2A, 0x2A, 0x3C), QColor(0x34, 0x34, 0x4A),
-                QColor(0x3A, 0x3A, 0x4E), QColor(0xE4, 0xE4, 0xE7), QColor(0x9C, 0xA3, 0xAF),
-                QColor(0xE4, 0xE4, 0xE7)};
-    return {QColor(0xF4, 0xF5, 0xFA), QColor(0xFF, 0xFF, 0xFF), QColor(0xE4, 0xE6, 0xF1),
-            QColor(0xDC, 0xDE, 0xEA), QColor(0x1F, 0x29, 0x37), QColor(0x6B, 0x72, 0x80),
-            QColor(0x1F, 0x29, 0x37)};
+        return {QColor(0x0B, 0x0C, 0x10), QColor(0x15, 0x16, 0x1C), QColor(0x1F, 0x22, 0x2D),
+                QColor(0x26, 0x2A, 0x36), QColor(0xE7, 0xE9, 0xF2), QColor(0x8A, 0x91, 0xA6),
+                QColor(0xE7, 0xE9, 0xF2),
+                QColor(0x10, 0x12, 0x19), QColor(0x09, 0x0A, 0x0D), QColor(0xC0, 0x84, 0xFC),
+                QColor(0x22, 0xD3, 0xEE), QColor(0x34, 0xD3, 0x99), QColor(0xF8, 0x71, 0x71),
+                QColor(0xFB, 0xBF, 0x24)};
+    return {QColor(0xF4, 0xF5, 0xFA), QColor(0xFF, 0xFF, 0xFF), QColor(0xEE, 0xF0, 0xF8),
+            QColor(0xDD, 0xE0, 0xEC), QColor(0x1F, 0x29, 0x37), QColor(0x6B, 0x72, 0x80),
+            QColor(0x1F, 0x29, 0x37),
+            QColor(0xE9, 0xEB, 0xF3), QColor(0xFF, 0xFF, 0xFF), QColor(0x7C, 0x3A, 0xED),
+            QColor(0x08, 0x91, 0xB2), QColor(0x05, 0x96, 0x69), QColor(0xDC, 0x26, 0x26),
+            QColor(0xD9, 0x77, 0x06)};
 }
 
 bool resolvingDark(Theme::Mode mode)
@@ -42,7 +52,7 @@ QPalette paletteFor(bool dark)
     const Tokens t = tokensFor(dark);
     QPalette p;
     p.setColor(QPalette::Window, t.window);
-    p.setColor(QPalette::Base, dark ? QColor(0x22, 0x22, 0x2F) : QColor(Qt::white));
+    p.setColor(QPalette::Base, t.recessed);
     p.setColor(QPalette::AlternateBase, t.surface);
     p.setColor(QPalette::ToolTipBase, t.surface);
     p.setColor(QPalette::ToolTipText, t.text);
@@ -50,11 +60,13 @@ QPalette paletteFor(bool dark)
     p.setColor(QPalette::WindowText, t.text);
     p.setColor(QPalette::Button, t.surface);
     p.setColor(QPalette::ButtonText, t.text);
-    p.setColor(QPalette::BrightText, QColor(0xEF, 0x44, 0x44));
-    p.setColor(QPalette::Highlight, QColor(0x7C, 0x3A, 0xED));
-    p.setColor(QPalette::HighlightedText, QColor(Qt::white));
+    p.setColor(QPalette::BrightText, t.err);
+    p.setColor(QPalette::Highlight, t.accent);
+    // White text on #C084FC is a 2.4:1 contrast ratio; the neon accents are dark-on-light by design,
+    // so the highlighted pair inverts to the app background instead of to white.
+    p.setColor(QPalette::HighlightedText, dark ? t.window : QColor(Qt::white));
     p.setColor(QPalette::PlaceholderText, t.muted);
-    p.setColor(QPalette::Link, QColor(0x8B, 0x5C, 0xF6));
+    p.setColor(QPalette::Link, t.accent2);
     // Disabled variants: dimmed text on the same surfaces, never a light-on-light grey box.
     p.setColor(QPalette::Disabled, QPalette::Text, t.muted);
     p.setColor(QPalette::Disabled, QPalette::ButtonText, t.muted);
@@ -62,6 +74,14 @@ QPalette paletteFor(bool dark)
     p.setColor(QPalette::Disabled, QPalette::Highlight, t.border);
     p.setColor(QPalette::Disabled, QPalette::HighlightedText, t.muted);
     return p;
+}
+
+// The two greys the sheet uses for icons and for the quietest labels. Kept as literals rather than
+// Tokens members because they are derived, not chosen: an icon must sit between text and muted text
+// in luminance so a toolbar glyph never reads as body copy.
+QColor iconColorFor(bool dark)
+{
+    return dark ? QColor(0xB8, 0xBE, 0xD0) : QColor(0x40, 0x46, 0x55);
 }
 } // namespace
 
@@ -157,14 +177,15 @@ QColor Theme::hover()            { return tokensFor(isDark()).hover; }
 QColor Theme::border()           { return tokensFor(isDark()).border; }
 QColor Theme::text()             { return tokensFor(isDark()).text; }
 QColor Theme::mutedText()        { return tokensFor(isDark()).muted; }
-QColor Theme::accent()           { return QColor(0x7C, 0x3A, 0xED); }
-QColor Theme::success()          { return QColor(0x10, 0xB9, 0x81); }
-QColor Theme::error()            { return QColor(0xEF, 0x44, 0x44); }
-QColor Theme::warning()          { return QColor(0xF5, 0x9E, 0x0B); }
+QColor Theme::accent()           { return tokensFor(isDark()).accent; }
+QColor Theme::accentSecondary()  { return tokensFor(isDark()).accent2; }
+QColor Theme::success()          { return tokensFor(isDark()).ok; }
+QColor Theme::error()            { return tokensFor(isDark()).err; }
+QColor Theme::warning()          { return tokensFor(isDark()).warn; }
 QColor Theme::pingUnknown()      { return QColor(0x6B, 0x72, 0x80); }
-QColor Theme::pingWaiting()      { return QColor(0xF5, 0x9E, 0x0B); }
-QColor Theme::pingOk()           { return QColor(0x10, 0xB9, 0x81); }
-QColor Theme::pingFail()         { return QColor(0xEF, 0x44, 0x44); }
+QColor Theme::pingWaiting()      { return tokensFor(isDark()).warn; }
+QColor Theme::pingOk()           { return tokensFor(isDark()).ok; }
+QColor Theme::pingFail()         { return tokensFor(isDark()).err; }
 
 QColor Theme::logColor(int level)
 {
@@ -178,7 +199,7 @@ QColor Theme::logColor(int level)
 
 QColor Theme::iconColor()
 {
-    return isDark() ? QColor(0xC7, 0xCA, 0xD6) : QColor(0x40, 0x46, 0x55);
+    return iconColorFor(isDark());
 }
 
 QIcon Theme::icon(const QString &name, const QColor &color, int size)

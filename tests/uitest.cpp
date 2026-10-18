@@ -685,8 +685,13 @@ static void testTheme(QApplication &app)
     Theme::apply(app, true);
     check(Theme::isDark(), "dark mode is active");
     check(!app.styleSheet().isEmpty(), "dark stylesheet loaded from resources");
-    check(app.styleSheet().contains(QStringLiteral("#7C3AED")), "accent colour present in the sheet");
+    check(app.styleSheet().contains(QStringLiteral("#C084FC")), "accent colour present in the sheet");
+    check(app.styleSheet().contains(QStringLiteral("#0B0C10")), "dashboard background present in the sheet");
     check(app.styleSheet().contains(QStringLiteral("strategyCard")), "card rules present");
+    // The rail and the page stack are the window's new skeleton: if their rules go missing, the nav
+    // buttons render as default raised buttons and the pages composite onto black.
+    check(app.styleSheet().contains(QStringLiteral("navButton")), "rail button rules present");
+    check(app.styleSheet().contains(QStringLiteral("pageStack")), "page stack rules present");
     check(app.palette().color(QPalette::Window) == Theme::windowBackground(), "palette matches tokens");
 
     Theme::apply(app, false);
@@ -707,6 +712,25 @@ static void testTheme(QApplication &app)
         check(sheet.contains(QStringLiteral("trayNote")),
               QStringLiteral("%1 sheet colours the tray notice").arg(dark ? QStringLiteral("dark")
                                                                          : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("navButton")),
+              QStringLiteral("%1 sheet styles the rail").arg(dark ? QStringLiteral("dark")
+                                                                 : QStringLiteral("light")));
+        // The unread-journal alert is a dynamic property like [error], and its colour has the same two
+        // sources as the accent: the rail label reads it off the sheet, while the badge glyph on a failed
+        // card is tinted with Theme::error() in C++. One red, or the tab and the card disagree.
+        check(sheet.contains(QStringLiteral("[alert=\"true\"]")),
+              QStringLiteral("%1 sheet styles the unread-journal alert").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        check(sheet.contains(Theme::error().name(QColor::HexRgb).toUpper()),
+              QStringLiteral("%1 sheet's alert red is the red the code paints with").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        // The accent is painted by C++ code (icons, the window icon, QPalette::Highlight) *and* by the
+        // sheet (buttons, borders, the checked tab). Those are one design, so the sheet must contain
+        // the very hex the accessor returns — otherwise a code-drawn glyph drifts from the button
+        // beside it, which is the quietest possible way for a theme to break.
+        check(sheet.contains(Theme::accent().name(QColor::HexRgb).toUpper()),
+              QStringLiteral("%1 sheet carries the accent the code paints with").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
     }
 
     check(Theme::modeFromName(QStringLiteral("light")) == Theme::Mode::Light, "name -> Light");
@@ -738,10 +762,32 @@ static void testTheme(QApplication &app)
                                 QStringLiteral("refresh"), QStringLiteral("settings"),
                                 QStringLiteral("tray"), QStringLiteral("clear"), QStringLiteral("copy"),
                                 QStringLiteral("ping-ok"), QStringLiteral("ping-fail"),
-                                QStringLiteral("ping-wait"), QStringLiteral("error")};
+                                QStringLiteral("ping-wait"), QStringLiteral("error"),
+                                // The rail's own set: brand, the two pages and the foot action.
+                                QStringLiteral("home"), QStringLiteral("logs"),
+                                QStringLiteral("power")};
     for (const QString &g : glyphs)
         check(QFile::exists(QStringLiteral(":/icons/%1.svg").arg(g)),
               QStringLiteral("icon file exists: %1").arg(g));
+
+    // The rail draws each glyph at 20 px through Theme::icon(), which rewrites the SVG's declared
+    // width/height and its currentColor. A glyph that breaks that contract — a hardcoded fill, a
+    // missing size — still "exists" as a file and shows up as a grey hole in the sidebar, so existence
+    // alone is not enough for the ones the redesign added.
+    Theme::apply(app, true);
+    for (const QString &g : {QStringLiteral("home"), QStringLiteral("logs"), QStringLiteral("power"),
+                             QStringLiteral("app")}) {
+        const QPixmap pm = Theme::icon(g, Theme::accent(), 20).pixmap(20, 20);
+        check(!pm.isNull(), QStringLiteral("rail glyph rasterises: %1").arg(g));
+        bool inked = false;
+        if (!pm.isNull()) {
+            const QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+            for (int y = 0; y < img.height() && !inked; ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) > 40) { inked = true; break; }
+        }
+        check(inked, QStringLiteral("rail glyph has ink: %1").arg(g));
+    }
 
     // The badge glyph must actually rasterise in both themes, or a failed start shows a red hole.
     check(!Theme::icon(QStringLiteral("error"), Theme::error(), 16).pixmap(16, 16).isNull(),

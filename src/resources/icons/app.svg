@@ -1,7 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Monochrome glyph: every paint uses currentColor so Theme::icon() can recolour it at load time. -->
+<!-- The Muffin mark: a domed muffin in its pleated wrapper with one berry on top.
+
+     Monochrome by contract — every paint is currentColor, because Theme::icon() recolours the glyph by
+     rewriting that token before rasterising (Qt's stylesheet engine cannot do it through image: url()).
+     The declared width/height of 24 is part of the same contract: Theme::icon() rewrites them to the
+     requested pixel size so the SVG plugin rasterises crisply at 16/24/32 instead of scaling one 24 px
+     bitmap up. Keep both, or the logo silently loses its colour and its sharpness. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
      stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 2.8l7.4 3.1v5.6c0 4.6-3 8-7.4 9.5-4.4-1.5-7.4-4.9-7.4-9.5V5.9z"/>
-    <path d="M13.4 7.6L9.3 13.1h2.9l-1 3.6 4.1-5.6h-2.9z" fill="currentColor" stroke="none"/>
+    <!-- muffin top: domed, overhanging the wrapper -->
+    <path d="M3.7 12.3c0-3.9 3.3-6.4 8.3-6.4s8.3 2.5 8.3 6.4"/>
+    <!-- wrapper -->
+    <path d="M5.2 12.3h13.6l-1.5 7.3a1.7 1.7 0 0 1-1.66 1.33H8.36A1.7 1.7 0 0 1 6.7 19.6z"/>
+    <!-- pleats -->
+    <path d="M9.7 13.6l.5 6.1"/>
+    <path d="M14.3 13.6l-.5 6.1"/>
+    <!-- berry on its stem -->
+    <path d="M12 5.9V4.4"/>
+    <circle cx="12" cy="2.9" r="1.5" fill="currentColor" stroke="none"/>
 </svg>

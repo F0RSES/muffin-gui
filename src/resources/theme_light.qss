@@ -15,14 +15,57 @@ QToolTip {
 }
 
 QToolBar, QToolBar::separator { background-color: #E9EBF3; border: none; spacing: 6px; }
-QToolBar { padding: 6px 10px; }
+QToolBar#mainToolBar {
+    background-color: #F4F5FA;
+    border-bottom: 1px solid #DCDEEA;
+    padding: 7px 14px;
+    spacing: 6px;
+}
 QToolButton {
-    background-color: transparent; color: #1F2937;
+    background-color: transparent; color: #404655;
     border: 1px solid transparent; border-radius: 8px; padding: 6px 10px;
 }
 QToolButton:hover  { background-color: #DCDFEB; border-color: #C9CCDC; }
 QToolButton:pressed { background-color: #CDD1E0; }
 QToolButton:disabled { color: #A7ABBB; }
+
+/* ---------- sidebar rail: same structure as the dark sheet, daylight tokens ---------- */
+QWidget#sidebar { background-color: #E9EBF3; border-right: 1px solid #DCDEEA; }
+QLabel#brandLogo { background-color: transparent; }
+QLabel#brandName {
+    background-color: transparent;
+    font-size: 12pt; font-weight: 700; letter-spacing: 0.5px; color: #111827;
+}
+QLabel#brandCaption {
+    background-color: transparent;
+    font-size: 8pt; font-weight: 500; letter-spacing: 1.2px; color: #9CA3AF;
+}
+QFrame#sidebarRule { background-color: #D8DBE8; border: none; }
+QPushButton#navButton {
+    background-color: transparent; color: #6B7280;
+    border: 1px solid transparent; border-radius: 10px;
+    padding: 9px 12px; text-align: left; font-size: 10pt; font-weight: 500;
+}
+QPushButton#navButton:hover { background-color: #DCDFEB; color: #1F2937; border-color: #D0D4E3; }
+QPushButton#navButton:pressed { background-color: #D0D4E3; }
+QPushButton#navButton:checked {
+    background-color: #F4EFFF; color: #7C3AED; border-color: #DDD0F5; font-weight: 600;
+}
+QPushButton#navButton:focus { outline: none; }
+QPushButton#navButton:disabled { color: #B4B8C6; background-color: transparent; }
+QPushButton#navButton[alert="true"] { color: #DC2626; }
+
+/* ---------- pages ---------- */
+QStackedWidget#pageStack { background-color: #F4F5FA; }
+QWidget#dashboardPage, QWidget#logsPage { background-color: #F4F5FA; }
+QLabel#pageTitle {
+    background-color: transparent;
+    font-size: 15pt; font-weight: 700; color: #111827;
+}
+QLabel#pageSubtitle {
+    background-color: transparent;
+    font-size: 9pt; color: #6B7280;
+}
 
 QFrame#card, StrategyCard, QFrame#strategyCard {
     background-color: #FFFFFF;
@@ -120,12 +163,17 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 QStatusBar { background-color: #E7E9F2; color: #6B7280; border-top: 1px solid #DCDEEA; }
 QStatusBar::item { border: none; }
-QLabel#statusLabel { font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+QLabel#statusLabel {
+    font-weight: 600; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid #DCDEEA; background-color: #FFFFFF;
+}
 QLabel#statusLabel[statusKind="stopped"] { color: #6B7280; }
-QLabel#statusLabel[statusKind="starting"] { color: #D97706; }
-QLabel#statusLabel[statusKind="running"]  { color: #059669; }
-QLabel#statusLabel[statusKind="error"]    { color: #DC2626; }
+QLabel#statusLabel[statusKind="starting"] { color: #D97706; border-color: #F6DFB0; background-color: #FDF6E7; }
+QLabel#statusLabel[statusKind="running"]  { color: #059669; border-color: #B7E4D2; background-color: #ECFDF5; }
+QLabel#statusLabel[statusKind="error"]    { color: #DC2626; border-color: #FCA5A5; background-color: #FEF2F2; }
 QLabel#dirLabel { color: #9CA3AF; font-size: 9pt; }
+QLabel#pingName { color: #6B7280; font-size: 9pt; }
+QLabel#pingValue { color: #1F2937; font-size: 9pt; font-weight: 600; }
 
 QMenu {
     background-color: #FFFFFF; color: #1F2937;
@@ -141,13 +189,15 @@ QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #6B7280; }
 QHeaderView::section { background-color: #EDEEF5; color: #6B7280; border: none; padding: 6px; }
 QDialogButtonBox QPushButton { min-width: 84px; }
 QProgressBar { border: 1px solid #DCDEEA; border-radius: 6px; background: #F3F4F8; color: #1F2937; }
-QProgressBar::chunk { background-color: #7C3AED; border-radius: 5px; }
+QProgressBar::chunk { background-color: #0891B2; border-radius: 5px; }
 
 /* ---------- window surfaces (keep this block last) ---------------------------
    Same cascade trap as the dark sheet: the generic transparent QWidget rule outranks the window rule at
    the top of the file, so anything with nothing behind it (the window itself, the stacked widget, the
    card list's viewport) painted black instead of the light background. */
-QMainWindow, QDialog, QStackedWidget, QSplitter, QScrollArea,
-QScrollArea > QWidget > QWidget, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader {
+QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
+QScrollArea > QWidget > QWidget, QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel,
+QWidget#logHeader, QWidget#dashboardPage, QWidget#logsPage, QWidget#placeholderPage {
     background-color: #F4F5FA;
 }
+QWidget#sidebar { background-color: #E9EBF3; }

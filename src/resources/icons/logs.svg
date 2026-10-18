@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sidebar "Логи": a terminal panel with a prompt. Monochrome currentColor + declared 24px box —
+     see icons/app.svg for why both halves of that contract matter to Theme::icon(). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3.4" y="4.6" width="17.2" height="14.8" rx="2.6"/>
+    <path d="M7.2 9.6 10 12.4l-2.8 2.8"/>
+    <path d="M12.6 15.6h4.2"/>
+</svg>
