@@ -1,0 +1,98 @@
+#!/bin/sh
+# Post-installation script for the muffin .deb (see CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA in
+# CMakeLists.txt). Runs as root, in the package's own unpacked state, with /bin/sh = dash on
+# Debian/Ubuntu — so: no bashisms, and `set -e` means a genuine write failure leaves the package
+# half-configured and loud instead of shipping a silently unauthorised app.
+#
+# What this buys: every privileged step in LinuxBackend goes through pkexec, and a desktop polkit
+# agent (Muffin's included) authenticates each one, so a single start/stop cycle asked for the
+# password more than once. Installing a rules.d entry moves that authorisation to `apt install`,
+# where dpkg is already root and the admin has just said "install this".
+#
+# What this deliberately does NOT buy, and why the boundary is drawn exactly here:
+#
+#   polkit hands a rule the `program` detail = the path of the PROGRAM pkexec is about to exec, not
+#   pkexec itself (polkit(8): action.lookup("program"); its own example shows pkexec running
+#   `/usr/bin/bash -i` as program='/usr/bin/bash'). So a rule keyed on the payload's NAME is a local
+#   root exploit: the zapret tree this GUI downloads itself (ZapretDownloader::fixExec) lives under
+#   the user's own home — ~/.local/share/muffin/zapret, ~/Documents/zapret, ~/Downloads/zapret, <cwd>
+#   — the user owns it and can replace nfqws with arbitrary content. Exempting "anything ending in
+#   /nfqws" therefore exempts a file the attacker wrote. Matching is confined to paths whose content
+#   a non-root user cannot change: fixed /usr/sbin binaries, and the two root-owned tree bases
+#   ZapretLocator probes (/usr/local/zapret, /opt/zapret).
+#
+#   A payload in a user-owned tree keeps its password prompt. That prompt is not a formality — it is
+#   the human approving execution of user-supplied bytes as root.
+set -e
+
+RULES_DIR=/etc/polkit-1/rules.d
+RULE="$RULES_DIR/49-muffin-nopasswd.rules"
+
+# Absent directory means polkit isn't installed (a server, a container, a build image). Installing
+# the GUI must not fail there, and there is no polkitd to authorise anything anyway — so say so and
+# succeed. This is the only branch allowed to skip; the writes below are not guarded, so a real
+# failure (read-only /etc, disk full) still aborts the configure step.
+if [ ! -d "$RULES_DIR" ]; then
+    echo "muffin: $RULES_DIR does not exist (polkit not installed?) - not installing the passwordless rule." >&2
+    exit 0
+fi
+
+# Written to a sibling temp file and renamed, so polkitd's inotify reload can never observe a
+# half-written rule: a truncated file that fails to parse makes polkitd skip the whole file, which
+# would look like the feature silently not working. chmod/chown are explicit because the umask dpkg
+# runs under is not ours to assume; 0644 root:root is what polkitd needs to read.
+TMP="$RULE.new"
+cat <<'RULE_EOF' > "$TMP"
+// Installed by the muffin package (packaging/postinst). Edit or delete as you like; a file in this
+// directory named earlier than 49-* is consulted first, and polkitd reloads on change.
+//
+// Passwordless pkexec for the firewall binaries and for a system-wide zapret payload. Kept to
+// ES5 (indexOf everywhere, no ES6 string helpers) so it also evaluates on the older polkit in LTS
+// desktops. Comments here must be JavaScript (// or slash-star), never shell hash: polkitd hands the
+// whole file to its JS engine as top-level source, and a hash on line 1 makes the engine throw, so
+// polkit logs "Error evaluating rule" and silently skips the file for the entire boot. That failure
+// mode looks exactly like "the feature is just not working", which is why packaging/check-polkit-rule.js
+// parses this rule before we ship it.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec")
+        return polkit.Result.NOT_HANDLED;
+
+    // Only a real console session. An inactive or remote one must not get root without a password.
+    if (subject.active !== true || subject.local !== true)
+        return polkit.Result.NOT_HANDLED;
+
+    var program = action.lookup("program");
+    if (typeof program !== "string" || program === "")
+        return polkit.Result.NOT_HANDLED;
+
+    // No ".." anywhere. A prefix test only anchors at index 0, so without this an unresolved
+    // "/opt/zapret/../../tmp/x/nfqws" would read as system-wide. The rule therefore does not depend
+    // on pkexec having canonicalised the path it reports, and a real payload path never contains "..".
+    if (program.indexOf("..") !== -1)
+        return polkit.Result.NOT_HANDLED;
+
+    // The firewall binaries, by exact path. /usr/sbin is root-owned, so the bytes being exec'd are
+    // not something an unprivileged user chose.
+    if (program === "/usr/sbin/iptables" || program === "/usr/sbin/ip6tables")
+        return polkit.Result.YES;
+
+    // The payload, but only from a tree a user cannot rewrite. Ends with "/nfqws" AND starts with
+    // one of the two system-wide bases; anything under a home directory falls through and is asked.
+    var isNfqws = program.indexOf("/nfqws", program.length - 6) !== -1;
+    if (isNfqws &&
+        (program.indexOf("/usr/local/zapret/") === 0 || program.indexOf("/opt/zapret/") === 0))
+        return polkit.Result.YES;
+
+    return polkit.Result.NOT_HANDLED;
+});
+RULE_EOF
+
+chmod 0644 "$TMP"
+chown root:root "$TMP" 2>/dev/null || true
+mv -f "$TMP" "$RULE"
+
+# No service is restarted from here, on purpose. polkitd watches rules.d and reloads rules when the
+# files change; `systemctl restart polkit` would drop every in-flight authorisation on the machine
+# (including other users' sessions) to apply one app's policy, and `systemctl daemon-reload` reloads
+# unit files, which this has nothing to do with.
+exit 0

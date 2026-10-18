@@ -1,0 +1,24 @@
+#!/bin/sh
+# Post-removal script for the muffin .deb (see CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA).
+#
+# The rule this package wrote lives in /etc/polkit-1/rules.d, which is NOT in the package's file
+# list, so dpkg does not clean it up by itself and it would outlive the application. Leaving it
+# behind is not a cosmetic issue: after removal, /usr/sbin/iptables and any
+# /usr/local/zapret/**/nfqws would stay authorised without a password on a machine that no longer
+# has a reason to run them. Removal therefore reverses installation.
+#
+# dpkg passes the reason as $1. Only a real removal is handled: on `upgrade` dpkg runs the OLD
+# postrm with the new version as $2 while the new postinst has already rewritten the rule, so
+# deleting here would take the authorisation away mid-upgrade and the user would be prompted again
+# after what looks like a successful update. `failed-upgrade`/`abort-upgrade` land in the same trap.
+set -e
+
+case "$1" in
+    remove|purge)
+        rm -f /etc/polkit-1/rules.d/49-muffin-nopasswd.rules
+        ;;
+esac
+
+# Same reasoning as in postinst: polkitd reloads rules.d on its own, and restarting a system-wide
+# authentication service from a removal script of one package is not ours to do.
+exit 0

@@ -111,6 +111,22 @@ jobs:
           ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
         run: ctest --test-dir build --output-on-failure
 
+      # The polkit rule that packaging/postinst installs is what makes `apt install muffin` a
+      # one-time authorisation instead of a per-pkexec prompt. Getting it wrong in the loose
+      # direction is a local root: polkit hands a rule the `program` detail = the exact binary
+      # pkexec will exec, and the zapret payload this GUI downloads lives in the user's own home,
+      # so a rule that matches by filename suffix exempts attacker-controlled bytes. Getting it
+      # wrong in the strict direction is silent too: a `#` shell-style comment anywhere in the
+      # rule makes polkitd's JS parser throw at boot and the whole file is skipped.
+      #
+      # packaging/check-polkit-rule.js evaluates the rule against a stub of the polkit JS API and
+      # asserts both directions. Runs on every push/PR (not just tags) because the bug it catches
+      # is in a text file, not in the built artefact -- by the time a tag build happens the
+      # regression has already been merged. Node is pre-installed on ubuntu-22.04 runners; the
+      # harness has no runtime dependencies beyond the standard library.
+      - name: Check the polkit rule
+        run: node packaging/check-polkit-rule.js
+
       # CPack runs against the tree that just passed ctest; the DEB generator is auto-selected in
       # CMakeLists.txt because dpkg-deb is present on ubuntu-22.04. Pinning -G DEB here anyway so a
       # future change to the auto-default cannot silently turn the release into a TGZ.
@@ -141,6 +157,29 @@ jobs:
           grep -q './usr/bin/Muffin$'                                   /tmp/deb-list
           grep -q './usr/share/applications/muffin.desktop$'            /tmp/deb-list
           grep -q './usr/share/icons/hicolor/scalable/apps/muffin.svg$' /tmp/deb-list
+          # Maintainer scripts live in the CONTROL member, so every check above passes happily without
+          # them. dpkg refuses to configure a package whose postinst is not executable, and a missing
+          # postrm leaves the polkit rule installed after removal — both are silent until a user hits
+          # them, so both are asserted here instead. sh -n parses (dash on Ubuntu, like the target).
+          rm -rf /tmp/deb-ctl && mkdir -p /tmp/deb-ctl
+          dpkg-deb --ctrl-tarfile "build/$expected" | tar -xC /tmp/deb-ctl
+          for s in postinst postrm; do
+            if [ ! -f "/tmp/deb-ctl/$s" ] || [ ! -x "/tmp/deb-ctl/$s" ]; then
+              echo "$s is missing from the control member or not executable:"
+              ls -la /tmp/deb-ctl
+              exit 1
+            fi
+            sh -n "/tmp/deb-ctl/$s"
+          done
+          # Regression guard on the shape of the rule, not its wording: polkit's `program` detail is
+          # whatever binary pkexec execs, and the payload the GUI downloads sits in the user's own
+          # home. Authorising it by name suffix is a local root, so suffix-only matching must never
+          # come back. (A proxy for the invariant, and cheap enough to keep.)
+          if grep -q 'endsWith\|startsWith' /tmp/deb-ctl/postinst; then
+            echo "postinst must not authorise a pkexec target by name prefix/suffix alone:"
+            grep -n 'endsWith\|startsWith' /tmp/deb-ctl/postinst
+            exit 1
+          fi
           echo "deb ok: $(du -h "build/$expected" | cut -f1)"
 
       - name: Upload the .deb

@@ -235,5 +235,34 @@ if (NOT CPACK_GENERATOR)
     endif()
 endif()
 
+# Everything privileged in LinuxBackend goes through pkexec, and a desktop polkit agent (Muffin's
+# included) authenticates every one of those calls — so a start/stop cycle asked for the password on
+# several phases at once. packaging/postinst installs a rules.d entry so that authorisation happens
+# once, at `apt install`, where dpkg is already root and the admin has just approved the install.
+# CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA is how a DEB package gets maintainer scripts, and packaging/postrm
+# is its counterpart: the rule lives in /etc, which is not in the package's file list, so dpkg would
+# otherwise leave a passwordless iptables entry behind after the application was removed.
+#
+# The rule authorises only programs whose bytes a non-root user cannot replace (exact /usr/sbin
+# binaries, and a payload under the root-owned /usr/local/zapret or /opt/zapret trees). It is NOT a
+# name match: `program` is the binary pkexec execs, so exempting "anything ending in /nfqws" would
+# exempt a file the user wrote himself in his own home — a local root. See the header in postinst.
+#
+# Kept UNIX-only for the same reason the install() rules and the DEB default above are: a Windows tree
+# has no dpkg to receive the script, and the script is /bin/sh. The path must be absolute.
+#
+# dpkg will not configure a package whose postinst is not executable, and CPack copies the file
+# verbatim — permissions included — so the exec bit is re-asserted at configure time instead of being
+# trusted to whatever the checkout happened to preserve. An unguarded file(CHMOD) is deliberate: if
+# a script goes missing, configuring should fail loudly rather than quietly ship a package that
+# asks for a password again, or one that leaves its rule installed forever.
+if (UNIX AND NOT APPLE)
+    file(CHMOD "${CMAKE_SOURCE_DIR}/packaging/postinst" "${CMAKE_SOURCE_DIR}/packaging/postrm"
+         PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                     GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+        "${CMAKE_SOURCE_DIR}/packaging/postinst;${CMAKE_SOURCE_DIR}/packaging/postrm")
+endif()
+
 include(CPack)
 
