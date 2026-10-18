@@ -199,14 +199,38 @@ priority list above. What the picker keys on is the shape of the two feeds, veri
 | other `*.sh` shell scripts | 55 | not the zapret daemon: `weightForInitScript` only re-ranks entries named `zapret` |
 | `init.d/sysv/zapret`, tree **not installed** | 30 | ranked *below* portable: `pkexec <script> start` execs `nfq/nfqws`, which an unpacked tree does not have |
 | `init.d/openrc/zapret`, **not installed** | 29 | same verdict, sysv still wins the dedup |
+| `init.d/{sysv,openrc}/zapret`, tree has **no `config`** | — | **not offered at all.** `init.d/sysv/functions` sources `$ZAPRET_RW/config` as its first act; a release that was unpacked but never installed has no such file, so `pkexec <script> start` dies on "cannot open config" before it reads an option |
 | direct `winws.exe` (unresolved wrapper) | 40 | advanced; no list loading |
 
 The Linux pair straddles the portable weight on purpose: the moment `install_easy.sh` /
 `install_bin.sh` puts `nfq/nfqws` in place the daemon jumps from 30 to 100 and swaps places with it,
-and `ZapretPaths::isLinuxInstalled()` is the single predicate that decides it. Both entries are always
-*offered* whatever the state — the weights only order the list, they never hide the working option.
-`StrategyParser::applyLinuxRunModes()` is the pass that assigns `Strategy::RunMode` and these weights;
-the per-file `weightFor()` values above are only its PRE-pass guess for the tree walk to dedup on.
+and `ZapretPaths::isLinuxInstalled()` is the single predicate that decides it. The weights only ever
+order the list — they never hide a working option.
+
+Hiding happens one level earlier, on a different predicate: `ZapretPaths::isLinuxConfigured()` asks for
+the `config` file, and when it is absent `applyLinuxRunModes()` **removes** every `RunMode::InitScript`
+entry instead of ranking it. Two questions, two verdicts, because the two failures are different in kind:
+an uninstalled script is a real launcher that needs one more step (`install_bin.sh`), while an
+unconfigured one cannot start at all and a card that promises it is worse than no card. A tree the GUI
+downloaded itself therefore presents exactly one card — portable `nfqws` — and gaining the second is
+whatever creates `config`. `StrategyParser::applyLinuxRunModes()` is the pass that assigns
+`Strategy::RunMode`, these weights and that removal; the per-file `weightFor()` values above are only
+its PRE-pass guess for the tree walk to dedup on.
+
+**Why portable mode needs `--user=root`.** nfqws drops root by itself: `main()` asks
+`can_drop_root()` — on Linux, "do I hold `CAP_SETUID|CAP_SETGID`", which a pkexec'd child always does —
+and then sets `params.uid = params.gid[0] = 0x7FFFFFFF` with `droproot = true` (`nfq/nfqws.c:2348`).
+That drop happens at `nfq/nfqws.c:302`, **before** `nfq_init()`, so the process reaches
+`nfq_create_queue()` without `CAP_NET_ADMIN` and reports `Operation not permitted` — after the GUI had
+already inserted the firewall rules. `0x7FFFFFFF` is not a user; it is zapret's sentinel, and the log
+line `Running as UID=2147483647 GID=2147483647` is its signature. There is no `--no-droproot` switch, so
+`--user=root` is the only lever, and it is the same one upstream pulls (`init.d/sysv/functions:64`
+builds `USEROPT="--user=$WS_USER"`): `getpwnam("root")` resolves to uid/gid 0, so `initgroups`,
+`setgid` and `setuid` all succeed and change nothing, the capability set survives, and the queue binds.
+It is applied by `LinuxBackend::composeCommand()` only where the child is known to be root — passing it
+to an unprivileged nfqws makes the same drop target uid 0, `setuid` fails with `EPERM`, and a run that
+would otherwise work exits 1. `PortableMode.h` holds the flag and `portableArgvWithUser()`; a user's own
+`--user=`/`--uid=` is never overridden.
 
 **How "installed" is decided, per platform.** `isLinuxInstalled()` stats `nfq/nfqws` — the exact path
 `init.d/sysv/functions` hardcodes as `NFQWS="$ZAPRET_BASE/nfq/nfqws"` — and asks whether it is a

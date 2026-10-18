@@ -29,6 +29,10 @@ namespace zapret {
 // and an installed zapret daemon agree on the numbers, and a user who later switches from one to the
 // other does not have to reconcile two configurations.
 //
+// A third thing the payload needs and the firewall does not: `--user=` set to kPortableNfUser, so the
+// child keeps the privileges creating the queue requires. See kPortableNfUser for why that is not
+// optional, and for the one situation where adding it would break a run that otherwise works.
+//
 // All of this is header-only: nothing here spawns a process, so the core stays testable headlessly.
 
 // The NFQUEUE number the portable backend binds and the firewall rules enqueue into.
@@ -37,6 +41,63 @@ inline constexpr int kPortableNfQueueNum = 200;
 // The firewall mark written on desync packets, formatted exactly the way both iptables (`--mark`)
 // and nfqws (`--dpi-desync-fwmark`) accept it. zapret's upstream default.
 inline constexpr const char *kPortableNfDesyncMark = "0x40000000";
+
+// The account the payload must stay as when it is started with root privileges.
+//
+// nfqws drops root by itself, and the drop is not optional: main() asks can_drop_root() — which on
+// Linux is "do I hold CAP_SETUID|CAP_SETGID", and a pkexec'd child always does — and then sets
+// `params.uid = params.gid[0] = 0x7FFFFFFF` with droproot = true (nfq/nfqws.c:2348). 0x7FFFFFFF is not
+// a user at all; it is zapret's sentinel for "nobody-ish", and it is what the log line
+// "Running as UID=2147483647 GID=2147483647" reports.
+//
+// That drop happens before the queue is created (nfq/nfqws.c:302 runs droproot() then dropcaps(), and
+// only then nfq_init()), so by the time nfqws asks the kernel for a queue it is no longer root. The
+// resulting log pair is the signature of the bug: "Running as UID=2147483647 GID=2147483647" straight
+// into "nfq_create_queue(): Operation not permitted", exit 1 — portable mode inserted its rules and
+// started nothing.
+//
+// `--user=root` is what upstream itself does with the same option (init.d/sysv/functions:64 builds
+// `USEROPT="--user=$WS_USER"`): IDX_USER resolves the name with getpwnam() and reuses it for uid/gid,
+// so droproot() ends up calling initgroups("root", 0), setgid(0), setuid(0) on a process that is
+// already uid 0. All three succeed and change nothing, the capability set is untouched, and
+// nfq_create_queue() still holds CAP_NET_ADMIN. The log then reads "Running as UID=0 GID=0": the drop
+// ran, and it dropped to root.
+//
+// It is therefore ONLY correct for a child that really is root. For an unprivileged nfqws the same
+// flag sets droproot = true with uid 0 as the target, initgroups("root") / setuid(0) fail with EPERM,
+// and nfqws exits 1 — turning a working unprivileged run into a broken one. That is why
+// portableArgvWithUser() is applied behind the backend's elevation gate rather than baked into the
+// default argv every strategy inherits.
+inline constexpr const char *kPortableNfUser = "root";
+
+// The argv-level switches that choose a privilege endpoint: `--user=<name>` (also in its separated
+// `--user <name>` form, which nfqws' getopt_long accepts because the argument is required), and
+// `--uid=uid[:gid,...]` / `--uid <n>`. Both set params.droproot themselves.
+inline bool portableArgvSelectsPrivileges(const QStringList &argv)
+{
+    for (const QString &a : argv)
+    {
+        if (a.startsWith(QLatin1String("--user")) || a.startsWith(QLatin1String("--uid")))
+            return true;
+    }
+    return false;
+}
+
+// The argv with `--user=root` appended, unless it already picks its own privilege endpoint.
+//
+// A user who edits the flags in the GUI may deliberately drop privileges (zapret's own service does,
+// and it is the safer shape); that choice is theirs and is never overridden — an existing --user or
+// --uid wins, exactly as it would if we appended anyway. An argv that says nothing about privileges
+// gets kPortableNfUser appended LAST, after the DPI policy, so it reads as what it is: the launch
+// wrapper's concern, not part of the desync profile.
+inline QStringList portableArgvWithUser(const QStringList &argv)
+{
+    if (portableArgvSelectsPrivileges(argv))
+        return argv;
+    QStringList out = argv;
+    out << QStringLiteral("--user=%1").arg(QLatin1String(kPortableNfUser));
+    return out;
+}
 
 // The transport/destination-port pairs portable mode steers into the queue. One source of truth for
 // both the iptables rules and the nfqws filters, so the two can never drift apart.

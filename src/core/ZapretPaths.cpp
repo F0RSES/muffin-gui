@@ -264,7 +264,31 @@ QString ZapretPaths::sysvScriptPath(const QString &root) { return rel(root, QStr
 QString ZapretPaths::openrcScriptPath(const QString &root) { return rel(root, QStringLiteral("init.d/openrc/zapret")); }
 QString ZapretPaths::systemdUnitPath(const QString &root) { return rel(root, QStringLiteral("init.d/systemd/zapret.service")); }
 QString ZapretPaths::configDefaultPath(const QString &root) { return rel(root, QStringLiteral("config.default")); }
+QString ZapretPaths::configPath(const QString &root) { return rel(root, QStringLiteral("config")); }
 QString ZapretPaths::nfqwsBuiltPath(const QString &root) { return rel(root, QStringLiteral("nfq/nfqws")); }
+
+bool ZapretPaths::isLinuxConfigured(const QString &root)
+{
+    // What this decides is whether the tree's init script can get past its own first lines.
+    // init.d/sysv/functions opens with
+    //
+    //   ZAPRET_BASE=${ZAPRET_BASE:-/opt/zapret}
+    //   ZAPRET_RW=${ZAPRET_RW:-"$ZAPRET_BASE"}
+    //   ZAPRET_CONFIG=${ZAPRET_CONFIG:-"$ZAPRET_RW/config"}
+    //   . "$ZAPRET_CONFIG"
+    //
+    // and that dot-source is unconditional. A release unpacked by the GUI ships config.default — the
+    // template — and no `config`; install_easy.sh creates the latter from the former (`cp
+    // "$ZAPRET_CONFIG_DEFAULT" "$ZAPRET_CONFIG"`) and then appends the user's answers to it. Pointed at
+    // an unpacked tree the script aborts on "cannot open .../config", or worse continues with every
+    // option variable unset, so a card that looks like the documented one-click launcher cannot work.
+    //
+    // The file only has to be readable, not executable: it is sourced, never exec'd. It is deliberately
+    // a different question from isLinuxInstalled(), which asks whether the daemon BINARY the same
+    // script later execs exists — a tree can be configured without being built, or built by hand
+    // without ever having been configured.
+    return QFileInfo::exists(configPath(root));
+}
 
 bool ZapretPaths::isLinuxInstalled(const QString &root)
 {

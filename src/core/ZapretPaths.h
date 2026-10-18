@@ -33,7 +33,14 @@ public:
     static QString openrcScriptPath(const QString &root);    // init.d/openrc/zapret
     static QString systemdUnitPath(const QString &root);     // init.d/systemd/zapret.service
     static QString configDefaultPath(const QString &root);   // config.default
+    // The live config the init scripts source. install_easy.sh creates it (cp config.default config)
+    // and it is the file named by init.d/sysv/functions: ZAPRET_CONFIG="${ZAPRET_CONFIG:-$ZAPRET_RW/config}".
+    static QString configPath(const QString &root);          // config  (the sourced one, not the template)
     static QString nfqwsBuiltPath(const QString &root);       // nfq/nfqws  (what the init scripts exec)
+    // True when the linux tree has the config file its init scripts source. An unpacked release ships
+    // only config.default, so `. "$ZAPRET_CONFIG"` fails at the very top of init.d/sysv/functions and
+    // the script cannot bring anything up; install_easy.sh is what creates the file.
+    static bool isLinuxConfigured(const QString &root);
     // True when the linux tree is INSTALLED, i.e. its sysv/openrc init script can actually bring the
     // daemon up. See the definition for the exact on-disk condition.
     //

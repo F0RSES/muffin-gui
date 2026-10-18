@@ -325,6 +325,7 @@ void StrategyParser::applyLinuxRunModes(QList<Strategy> &strategies, const QStri
         return;   // windows trees have no bring-up choice to make
 
     const bool installed = ZapretPaths::isLinuxInstalled(rootPath);
+    const bool configured = ZapretPaths::isLinuxConfigured(rootPath);
 
     for (Strategy &s : strategies)
     {
@@ -349,6 +350,28 @@ void StrategyParser::applyLinuxRunModes(QList<Strategy> &strategies, const QStri
                         .arg(QFileInfo(ZapretPaths::nfqwsBuiltPath(rootPath)).fileName());
                 }
             }
+        }
+    }
+
+    // ---- an unpacked tree gets no init-script card at all ----
+    //
+    // Ranking a launcher below the payload says "this one is less good"; hiding it says "this one is
+    // not a choice". A tree without <root>/config is the second case, and it is the case the GUI's own
+    // download path puts every user in: init.d/sysv/functions sources $ZAPRET_RW/config as its first
+    // act, so `pkexec <script> start` dies on "cannot open config" before it can read a single option.
+    // A card that reproduces a guaranteed failure is worse than no card — the user has one working
+    // bring-up (portable nfqws) and one that only looks like the documented zapret install.
+    //
+    // The entries are removed rather than left in and disabled: the parser is what both the card list
+    // and the tray menu read, so one decision here cannot drift into a place that forgot to check it.
+    // Running install_easy.sh creates the file and brings the card back on the next rescan — this is a
+    // statement about the tree's state, not about a platform being unsupported.
+    if (!configured)
+    {
+        for (int i = strategies.size() - 1; i >= 0; --i)
+        {
+            if (strategies.at(i).runMode == Strategy::RunMode::InitScript)
+                strategies.removeAt(i);
         }
     }
 

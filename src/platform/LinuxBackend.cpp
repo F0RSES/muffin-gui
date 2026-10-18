@@ -256,6 +256,19 @@ bool LinuxBackend::composeCommand(const Strategy &s, const QString &action, QStr
     }
 
     QStringList a = baseArgs(s);
+
+    // A payload that starts as root must not be allowed to drop it. nfqws does so on its own
+    // initiative — main() sees CAP_SETUID, sets uid/gid to 0x7FFFFFFF and drops — and by the time it
+    // reaches nfq_create_queue() it no longer holds CAP_NET_ADMIN, so the queue bind fails with
+    // "Operation not permitted" after the firewall rules are already in. `--user=root` is the fix, and
+    // kPortableNfUser in PortableMode.h records both why it works and why it is only ever correct here:
+    // this is the one place that knows the child WILL be root (already elevated, or handed to pkexec
+    // just below), and passing --user=root to an unprivileged child would break a run that otherwise
+    // works. Windows-side entries are left untouched — there is no posix uid to keep.
+    if (s.platform == Strategy::Platform::Linux &&
+        (PrivilegeHelper::isElevated() || s.requiresRoot))
+        a = portableArgvWithUser(a);
+
     if (s.requiresRoot && !PrivilegeHelper::isElevated())
     {
         if (!QFileInfo::exists(pkexecPath()))
@@ -515,6 +528,19 @@ void LinuxBackend::launchPortablePayload()
     }
 
     m_phase = PortablePhase::Payload;
+    // Say what the backend added to the user's flags, and why, before the child's own output starts:
+    // a "--user=root" nobody asked for is exactly the sort of thing a user is entitled to object to,
+    // and pkexec's prompt does not explain it. Only when we supplied it ourselves — an argv that
+    // already names --user or --uid is the user's own privilege choice and needs no commentary.
+    if (!portableArgvSelectsPrivileges(baseArgs(m_active)) &&
+        (PrivilegeHelper::isElevated() || m_active.requiresRoot))
+    {
+        emit logMessage(QStringLiteral("LinuxBackend: adding --user=%1 to the payload: nfqws drops "
+                                       "root by itself and would then be unable to create NFQUEUE %2")
+                            .arg(QLatin1String(kPortableNfUser))
+                            .arg(m_queueNum), 0);
+    }
+
     resetProcess();
     m_process->setProgram(program);
     m_process->setArguments(args);

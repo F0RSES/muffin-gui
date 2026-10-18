@@ -402,7 +402,17 @@ static QString fixtureArchDir()
     return native.isEmpty() ? QStringLiteral("linux-x86_64") : native;
 }
 
-static bool makeLinuxTree(const QString &root, bool installed, bool payload = true)
+// The one file that separates "the user ran install_easy.sh" from "the GUI unpacked a release": the
+// config init.d/sysv/functions sources before it can read a single option.
+const QByteArray kFixtureConfig = QByteArrayLiteral("MODE_FILTER=none\n");
+
+// A tree with a known install state and a known config state. `installed` decides whether
+// nfq/nfqws — the binary the init script execs — is there; `configured` decides whether <root>/config,
+// the file the same script sources as its first act, is. Both are needed for `start` to work, and the
+// parser treats them differently: an uninstalled script is ranked last, an unconfigured one is not
+// offered at all.
+static bool makeLinuxTree(const QString &root, bool installed, bool payload = true,
+                          bool configured = true)
 {
     const QByteArray initBody = QByteArrayLiteral(
         "#!/bin/sh\ncase \"$1\" in\n  start) echo starting ;;\n  stop) echo stopping ;;\nesac\n");
@@ -410,6 +420,8 @@ static bool makeLinuxTree(const QString &root, bool installed, bool payload = tr
     ok &= writeFile(root + QLatin1String("/init.d/sysv/zapret"), initBody);
     ok &= writeFile(root + QLatin1String("/init.d/openrc/zapret"), initBody);
     ok &= writeFile(root + QLatin1String("/config.default"), QByteArrayLiteral("#!/bin/sh\n# options\n"));
+    if (configured)
+        ok &= writeFile(root + QLatin1String("/config"), kFixtureConfig);
     if (payload)
         ok &= writeFile(root + QLatin1String("/binaries/") + fixtureArchDir() + QLatin1String("/nfqws"),
                         QByteArrayLiteral("fixture payload\n"));
@@ -748,7 +760,13 @@ int main(int argc, char **argv)
         out << "    - " << s.name << " [" << kindName(s.kind) << "] w=" << s.weight
             << "  " << s.filePath << "\n";
     const Strategy *z = findByName(lin, "zapret");
-    check(z != nullptr, "sysv 'zapret' present");
+    // An init script is only offered when its tree is configured (see the run-mode section below), and
+    // this machine's tree may be either: a developer's install_easy.sh run leaves <root>/config behind,
+    // a bare unpack does not. Assert whatever the state is, from the same predicate the parser reads.
+    const bool linConfigured = ZapretPaths::isLinuxConfigured(linuxRoot);
+    check((z != nullptr) == linConfigured,
+          QStringLiteral("sysv 'zapret' present exactly when the tree is configured (configured=%1)")
+              .arg(linConfigured));
     if (z)
     {
         // The init script's rank is not a constant: it depends on whether the tree was ever
@@ -836,17 +854,57 @@ int main(int argc, char **argv)
                                    QStringLiteral("--qnum=-1"), QStringLiteral("-qnum=9")})
             check(portableQueueNum({bad}) == kPortableNfQueueNum,
                   QStringLiteral("%1 is rejected, not interpolated into a root shell script").arg(bad));
+
+        // ---- who the payload runs as ----
+        //
+        // nfqws drops root by itself as soon as it holds CAP_SETUID, landing on the uid 0x7FFFFFFF
+        // sentinel — and it does that before nfq_create_queue(), so a pkexec'd portable run inserts its
+        // firewall rules and then dies with "nfq_create_queue(): Operation not permitted". `--user=root`
+        // is the only lever nfqws offers (there is no --no-droproot), and upstream uses the same one.
+        // The default argv deliberately says nothing about privileges: it is the DPI policy the GUI
+        // shows and lets the user edit, and appending a root-only flag to it would put a flag in every
+        // argv that breaks an unprivileged run. The backend adds it, behind its elevation gate.
+        check(!portableArgvSelectsPrivileges(defs), "the default argv picks no privilege endpoint");
+        check(portableArgvWithUser(defs).last() ==
+                  QStringLiteral("--user=%1").arg(QLatin1String(kPortableNfUser)),
+                  "appending lands last, after the policy flags");
+        check(portableArgvWithUser(defs).mid(0, defs.size()) == defs,
+              "and it adds nothing but the one flag");
+
+        // A user who names their own account is never overridden — that is a privilege decision, not
+        // policy drift. Both the attached (`--user=x`) and the separated (`--user x`) form nfqws'
+        // getopt_long accepts must be recognised, which is why the test is a prefix, not an equality.
+        for (const QString &own : {QStringLiteral("--user=nobody"), QStringLiteral("--user"),
+                                   QStringLiteral("--uid=65534"), QStringLiteral("--uid"),
+                                   QStringLiteral("--user=")})
+            check(portableArgvSelectsPrivileges({QStringLiteral("--filter-tcp=80"), own}),
+                  QStringLiteral("%1 counts as a privilege endpoint").arg(own));
+        check(portableArgvWithUser({QStringLiteral("--user=nobody")}) ==
+                  QStringList{QStringLiteral("--user=nobody")},
+              "an explicit --user is passed through untouched");
+        check(portableArgvWithUser({QStringLiteral("--uid=65534:65534")}) ==
+                  QStringList{QStringLiteral("--uid=65534:65534")},
+              "an explicit --uid is passed through untouched");
+
+        // The empty argv is the shape a hand-built Strategy has before anyone sets flags: it must still
+        // end up running as the account that can bind the queue.
+        check(portableArgvWithUser(QStringList{}) ==
+                  QStringList{QStringLiteral("--user=%1").arg(QLatin1String(kPortableNfUser))},
+              "an empty argv gets the flag alone");
+        check(QLatin1String(kPortableNfUser) == QLatin1String("root"),
+              "the account is root: the drop becomes a no-op and CAP_NET_ADMIN survives to the queue");
     }
 
     // ---- run modes: both install states, on trees built for the purpose ----
     out << "\n[run modes: unpacked vs installed]\n";
     {
-        QTemporaryDir unpackedTmp, installedTmp, noPayTmp;
-        check(unpackedTmp.isValid() && installedTmp.isValid() && noPayTmp.isValid(),
+        QTemporaryDir unpackedTmp, installedTmp, noPayTmp, bareTmp;
+        check(unpackedTmp.isValid() && installedTmp.isValid() && noPayTmp.isValid() && bareTmp.isValid(),
               "run-mode fixture directories created");
         const QString up = unpackedTmp.filePath(QStringLiteral("linux"));
         const QString ins = installedTmp.filePath(QStringLiteral("linux"));
         const QString noPay = noPayTmp.filePath(QStringLiteral("linux"));
+        const QString bare = bareTmp.filePath(QStringLiteral("linux"));
         check(makeLinuxTree(up, false), "unpacked tree written");
         check(makeLinuxTree(ins, true), "installed tree written");
         checkRunModes(up, false);
@@ -882,6 +940,69 @@ int main(int argc, char **argv)
                   "payload-less tree offers no portable card");
             check(findByName(list, QStringLiteral("zapret")) != nullptr,
                   "payload-less tree still offers the init script");
+        }
+
+        // ---- the tree the GUI's own download path produces ----
+        //
+        // A release that was unpacked but never installed has no <root>/config, and init.d/sysv/functions
+        // sources that file as its very first act — `. "$ZAPRET_CONFIG"` is unconditional — so
+        // `pkexec <script> start` fails with "cannot open config" before a single option is read. The
+        // card cannot be made to work, so it must not be offered: portable nfqws is the only bring-up
+        // such a tree has. This is exactly the Kali case that the card ranking was wrong about.
+        {
+            check(makeLinuxTree(bare, false, /*payload=*/true, /*configured=*/false),
+                  "bare tree written");
+            check(!ZapretPaths::isLinuxConfigured(bare),
+                  "bare tree has no config for the init script to source");
+            check(QFileInfo::exists(ZapretPaths::configDefaultPath(bare)),
+                  "and it is not a missing-tree artefact: config.default, the template, is there");
+
+            const QList<Strategy> list = StrategyParser::parseTree(bare, Strategy::Platform::Linux, 3);
+            const Strategy *port = findByName(list, QStringLiteral("nfqws (portable)"));
+            check(port != nullptr, "bare tree offers the portable payload");
+            check(findByName(list, QStringLiteral("zapret")) == nullptr,
+                  "bare tree offers no init-script card");
+            int scripts = 0;
+            int initModes = 0;
+            for (const Strategy &s : list)
+            {
+                if (s.kind == Strategy::Kind::ShellScript)
+                    ++scripts;
+                if (s.runMode == Strategy::RunMode::InitScript)
+                    ++initModes;
+            }
+            // Not just the dedup winner: the openrc twin goes too, or it would resurface on a tree
+            // where sysv is absent.
+            check(scripts == 0 && initModes == 0,
+                  QStringLiteral("no linux shell launcher survives the pass (%1 scripts, %2 InitScript)")
+                      .arg(scripts).arg(initModes));
+            check(list.size() == 1,
+                  QStringLiteral("a downloaded tree presents exactly the one card that works (%1)")
+                      .arg(list.size()));
+
+            // The verdict is about the file, not about the directory or the platform: put config back
+            // and the documented launcher returns, still ranked below the payload that works today.
+            check(writeFile(bare + QLatin1String("/config"), kFixtureConfig),
+                  "bare tree: the config file created");
+            check(ZapretPaths::isLinuxConfigured(bare), "bare tree: now reads as configured");
+            const QList<Strategy> after = StrategyParser::parseTree(bare, Strategy::Platform::Linux, 3);
+            const Strategy *aInit = findByName(after, QStringLiteral("zapret"));
+            check(aInit != nullptr && aInit->weight == 30,
+                  "bare tree: the init script comes back, ranked below the payload");
+            check(aInit && aInit->runMode == Strategy::RunMode::InitScript,
+                  "bare tree: and it is labelled as a controller again");
+            check(findByName(after, QStringLiteral("nfqws (portable)")) != nullptr,
+                  "bare tree: portable mode is still offered next to it");
+
+            // Neither a payload nor a config leaves the GUI with nothing it could honestly offer.
+            QFile::remove(ZapretPaths::nfqwsPath(bare));
+            const QList<Strategy> none = StrategyParser::parseTree(bare, Strategy::Platform::Linux, 3);
+            check(none.size() == 1 && none.first().runMode == Strategy::RunMode::InitScript,
+                  QStringLiteral("without a payload only the configured launcher is left (%1)")
+                      .arg(none.size()));
+            QFile::remove(ZapretPaths::configPath(bare));
+            check(StrategyParser::parseTree(bare, Strategy::Platform::Linux, 3).isEmpty(),
+                  "without a payload and without a config the tree offers no card at all");
         }
     }
 
@@ -1799,6 +1920,15 @@ int main(int argc, char **argv)
                   "the firewall step says what it will do before the prompt, not after");
             check(probe->sawLog(QStringLiteral("nfqueue rules installed")), "and what it did afterwards");
 
+            // The privilege flag belongs to a root child and to nothing else. requiresRoot=false here is
+            // the unprivileged case: adding --user=root to it would set nfqws' droproot with uid 0 as
+            // the target, setuid(0) would fail EPERM, and a payload that runs today would exit 1 — so
+            // what the GUI shows in the log must be exactly the argv the card carries.
+            check(!probe->sawLog(QStringLiteral("--user")),
+                  "an unprivileged portable payload is launched with the argv the GUI shows, unmodified");
+            check(!probe->sawLog(QStringLiteral("adding --user")),
+                  "and the backend does not explain a flag it never added");
+
             // What was actually handed to the kernel-side command: the load-bearing properties of
             // portable mode, asserted on the generated text rather than on the code that writes it.
             const QString up = readFileText(fwUpLog);
@@ -2040,6 +2170,31 @@ int main(int argc, char **argv)
             {
                 check(accepted, "gate: running as root is not blocked");
                 pumpUntil([&] { return lb.state() == S::Running; }, 8000);
+                // The branch the Kali failure lives on: a root child must be told not to drop, or it
+                // reaches nfq_create_queue() as uid 0x7FFFFFFF with no CAP_NET_ADMIN. Reaching here
+                // requires a root test run — CI is unprivileged, where the pure functions in the
+                // vocabulary section above pin the same token.
+                check(probe->sawLog(QStringLiteral("--user=%1")
+                                        .arg(QLatin1String(kPortableNfUser))),
+                      "gate: a root payload is launched with the privilege flag it needs");
+                check(probe->sawLog(QStringLiteral("adding --user")),
+                      "gate: and the log says who added it and why");
+                lb.stop();
+                pumpUntil([&] { return lb.state() == S::Stopped; }, 8000);
+
+                // An argv that already chose its own account is the user's decision, never overridden.
+                const QString keptLog = tmp.filePath(QStringLiteral("firewall-gated-user.log"));
+                const QString keeper = makeScript(tmp.filePath(QStringLiteral("echo-user.sh")),
+                                                  QStringLiteral("printf '%s\\n' \"$@\" >> '%1'\n").arg(keptLog));
+                Strategy owns = portableStrategy(QStringLiteral("portable-owns-user"), keeper, true);
+                owns.argv = {QStringLiteral("--user=nobody"), QStringLiteral("--qnum=200")};
+                lb.start(owns, nullptr);
+                pumpUntil([&] { return QFile::exists(keptLog); }, 8000);
+                const QString seen = readFileText(keptLog);
+                check(seen.contains(QStringLiteral("--user=nobody")),
+                      "gate: the account the user asked for is the account that runs");
+                check(!seen.contains(QStringLiteral("--user=root")),
+                      "gate: and it is not silently upgraded to root");
                 lb.stop();
                 pumpUntil([&] { return lb.state() == S::Stopped; }, 8000);
             }
