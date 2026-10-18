@@ -848,6 +848,11 @@ void MainWindow::downloadZapret()
 {
     DownloadDialog dialog(this);
     connect(&dialog, &DownloadDialog::installed, this, &MainWindow::zapretInstalled);
+    // A desktop window is the one place a password prompt makes sense: the user is here, the polkit
+    // agent is reachable, and the answer decides whether the payload they just downloaded will ask
+    // again on every start. Off in every other caller — a headless test must never be able to reach
+    // pkexec by constructing a downloader.
+    dialog.setPromoteAfterInstall(true);
     // The constructor only builds widgets; the request starts here. A dialog that is constructed but
     // never started — in a test, or by a code path that closes it immediately — touches no network.
     dialog.startFetch();

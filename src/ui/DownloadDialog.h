@@ -37,6 +37,12 @@ public:
     void setTargetDir(const QString &dir);
     QString targetDir() const;
 
+    // Also hand a finished linux download to the root helper, so the payload ends up root-owned under
+    // the system directory the polkit rule authorises. Forwarded to the downloader; off unless the
+    // caller turns it on, because it is the one step in this dialog that costs a password.
+    void setPromoteAfterInstall(bool on);
+    bool promoteAfterInstall() const;
+
     // ---- read-only views used by tests ----
     QString installedPath() const;
     QString statusText() const;
@@ -61,6 +67,7 @@ private slots:
     void onExtractionStarted();
     void onDownloadFinished(QString path);
     void onDownloadFailed(QString message);
+    void onPromotionFailed(QString message);
     void onCancelled();
     void chooseDownload();
     void chooseCancel();
@@ -81,6 +88,7 @@ private:
 
     ZapretRelease m_release;
     QString m_installedPath;
+    QString m_promotionNote;     // why the system-wide copy did not happen, if it did not
     bool m_replaceConfirmed = false;   // asked once per dialog; a retry does not ask again
 };
 

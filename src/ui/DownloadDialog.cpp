@@ -1,5 +1,7 @@
 #include "DownloadDialog.h"
 
+#include "ZapretPaths.h"
+
 #include <QDir>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -72,6 +74,7 @@ void DownloadDialog::build()
     connect(m_downloader, &ZapretDownloader::extractionStarted, this, &DownloadDialog::onExtractionStarted);
     connect(m_downloader, &ZapretDownloader::downloadFinished, this, &DownloadDialog::onDownloadFinished);
     connect(m_downloader, &ZapretDownloader::downloadFailed, this, &DownloadDialog::onDownloadFailed);
+    connect(m_downloader, &ZapretDownloader::promotionFailed, this, &DownloadDialog::onPromotionFailed);
     connect(m_downloader, &ZapretDownloader::cancelled, this, &DownloadDialog::onCancelled);
 }
 
@@ -101,6 +104,16 @@ void DownloadDialog::startFetch()
 void DownloadDialog::setTargetDir(const QString &dir)
 {
     m_downloader->setTargetDir(dir);
+}
+
+void DownloadDialog::setPromoteAfterInstall(bool on)
+{
+    m_downloader->setPromoteAfterInstall(on);
+}
+
+bool DownloadDialog::promoteAfterInstall() const
+{
+    return m_downloader->promoteAfterInstall();
 }
 
 QString DownloadDialog::targetDir() const
@@ -205,6 +218,15 @@ void DownloadDialog::onExtractionStarted()
     setStatus(QStringLiteral("SHA-256 совпал. Распаковываю…"));
 }
 
+void DownloadDialog::onPromotionFailed(QString message)
+{
+    // Kept, not shown here: downloadFinished follows in the same signal sequence, and one dialog that
+    // says "installed here, and here is why it is not installed system-wide" is worth more than two
+    // that a user has to click through in order to learn the same thing.
+    m_promotionNote = message.section(QLatin1Char('\n'), 0, 0);
+    setStatus(m_promotionNote);
+}
+
 void DownloadDialog::onDownloadFinished(QString path)
 {
     m_installedPath = path;
@@ -213,9 +235,24 @@ void DownloadDialog::onDownloadFinished(QString path)
     setStatus(QStringLiteral("Установлено в %1").arg(QDir::toNativeSeparators(path)));
     setBusy(false);
 
-    QMessageBox::information(
-        this, QStringLiteral("Скачать zapret"),
-        QStringLiteral("zapret установлен в:\n%1").arg(QDir::toNativeSeparators(path)));
+    // The path decides the message. A promoted install lands in the root-owned tree whose payload the
+    // polkit rule exempts, so starts are passwordless; anything else is the managed folder, which
+    // works exactly the same but asks for the password each time.
+    const bool promoted =
+        !ZapretPaths::systemInstallDir().isEmpty() && path == ZapretPaths::systemInstallDir();
+    QString text = QStringLiteral("zapret установлен в:\n%1")
+                       .arg(QDir::toNativeSeparators(path));
+    if (promoted)
+    {
+        text += QStringLiteral("\n\nСистемная копия принадлежит root, поэтому запуск стратегий "
+                               "не будет требовать пароль.");
+    }
+    else if (!m_promotionNote.isEmpty())
+    {
+        text += QStringLiteral("\n\n%1").arg(m_promotionNote);
+    }
+
+    QMessageBox::information(this, QStringLiteral("Скачать zapret"), text);
 
     // Announced before accept() so the owner holds the path while this dialog is still the window any
     // follow-up message belongs to.
