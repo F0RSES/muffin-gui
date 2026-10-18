@@ -829,6 +829,10 @@ int main(int argc, char **argv)
     // ---- portable-mode vocabulary: the numbers both halves must agree on ----
     out << "\n[portable vocabulary]\n";
     {
+        // The number itself is pinned, not just its single-source-ness: falling back to upstream's 200
+        // would still pass every round-trip check above and still break on a machine where some other
+        // wrapper already holds queue 200.
+        check(kPortableNfQueueNum == 2000, "the portable default is queue 2000, not upstream's 200");
         const QStringList defs = portableNfqwsDefaultArgs();
         check(defs.contains(QStringLiteral("--qnum=%1").arg(kPortableNfQueueNum)),
               "default argv binds the shared queue number");
@@ -1934,7 +1938,10 @@ int main(int argc, char **argv)
             const QString up = readFileText(fwUpLog);
             check(!up.isEmpty(), "the firewall stand-in was invoked");
             check(up.contains(QStringLiteral("insert nfqueue rules")), "with the insert variant");
-            check(up.contains(QStringLiteral("Q=200")), "on the shared queue number");
+            check(up.contains(QStringLiteral("Q=%1").arg(kPortableNfQueueNum)),
+                  "on the shared queue number");
+            check(kPortableNfQueueNum != 200,
+                  "and that number is not the one other wrappers fight over");
             check(up.contains(QStringLiteral("M=0x40000000")), "with the shared anti-loop mark");
             check(up.contains(QStringLiteral("-t mangle -C OUTPUT")),
                   "each rule is probed before it is added, so a repeated start cannot duplicate it");
@@ -2142,7 +2149,10 @@ int main(int argc, char **argv)
             check(txt.contains(QStringLiteral("Q=1234")), "qnum: the rules use the queue from argv");
             check(txt.contains(QStringLiteral("portable mode (queue 1234)")),
                   "qnum: and say so in the script that was run");
-            check(!txt.contains(QStringLiteral("Q=200")), "qnum: and not the default one");
+            // Exact, with the line end: "Q=200" is a prefix of "Q=2000", so a bare needle would pass
+            // the very regression this check exists to catch.
+            check(!txt.contains(QStringLiteral("Q=%1\n").arg(kPortableNfQueueNum)),
+                  "qnum: and not the default one");
             check(probe->sawLog(QStringLiteral("into NFQUEUE 1234")),
                   "qnum: the text the user authorises names the same number");
             check(probe->sawLog(QStringLiteral("portable mode: payload")),
@@ -2187,6 +2197,9 @@ int main(int argc, char **argv)
                 const QString keeper = makeScript(tmp.filePath(QStringLiteral("echo-user.sh")),
                                                   QStringLiteral("printf '%s\\n' \"$@\" >> '%1'\n").arg(keptLog));
                 Strategy owns = portableStrategy(QStringLiteral("portable-owns-user"), keeper, true);
+                // A stale --qnum=200 from an argv written before the default moved to 2000 is kept
+                // verbatim too: the backend never edits what the user typed, only appends what is
+                // missing (and only the privilege flag, only for a child that really is root).
                 owns.argv = {QStringLiteral("--user=nobody"), QStringLiteral("--qnum=200")};
                 lb.start(owns, nullptr);
                 pumpUntil([&] { return QFile::exists(keptLog); }, 8000);

@@ -101,7 +101,11 @@ Four properties are load-bearing, and `coretest` asserts each one on the generat
   the phase, no `-w` fails spuriously. Five seconds then a loud, reported failure.
 
 Queue number, mark and ports live in `PortableMode.h` (header-only, no process spawning, so the core
-stays testable). The parser writes `--qnum=`/`--dpi-desync-fwmark=` into `Strategy::argv`; the backend
+stays testable). The default queue is `2000`, not upstream's `QNUM=200`: 200 is the number every other
+zapret wrapper and fork grabs first, and a collision there is the worst kind — nfqws dies with
+`cannot open nfqueue group 200: Operation not permitted` *after* the GUI has already inserted its
+rules. The mark stays at upstream's `0x40000000`, because nothing else competes for it. The parser
+writes `--qnum=`/`--dpi-desync-fwmark=` into `Strategy::argv`; the backend
 reads the queue back out of that same argv with `portableQueueNum()` — last occurrence wins, exactly
 like `getopt_long`, and anything non-numeric is rejected rather than interpolated into a root shell
 script. A user who edits the flags in the GUI therefore moves the firewall with them, and the two

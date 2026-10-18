@@ -2,7 +2,7 @@
 ; Muffin — Windows installer (Inno Setup 6).
 ;
 ; Compiled by the `installer` job in .github/workflows/ci.yml:
-;   ISCC.exe /DAppVersion=0.1.2 /DStagingDir=C:\...\win\build\Release packaging\windows_installer.iss
+;   ISCC.exe /DAppVersion=0.1.3 /DStagingDir=C:\...\win\build\Release packaging\windows_installer.iss
 ; and by hand from a normal Visual Studio build tree (windeployqt must have run first, see README):
 ;   & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows_installer.iss
 ;
@@ -25,11 +25,11 @@
 
 ; The fallback is for the hand-run case above; CI always passes /DAppVersion from the tag, so this
 ; default never reaches a published artifact. It still has to agree with MUFFIN_VERSION in CMakeLists.txt
-; (both are "the current release line"), or a manual compile of a 0.1.2 build tree stamps the .exe, its
-; Add/Remove Programs entry and VersionInfoVersion as 0.1.1 — the version the user sees and the one the
+; (both are "the current release line"), or a manual compile of a 0.1.3 build tree stamps the .exe, its
+; Add/Remove Programs entry and VersionInfoVersion as 0.1.2 — the version the user sees and the one the
 ; GUI reports at runtime then disagree.
 #ifndef AppVersion
-  #define AppVersion "0.1.2"
+  #define AppVersion "0.1.3"
 #endif
 
 ; VersionInfoVersion wants a dotted version; a bare tag usually carries three parts, so pad here

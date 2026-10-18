@@ -24,10 +24,21 @@ namespace zapret {
 //                   packets cannot loop.
 //   StrategyParser  seeds Strategy::argv with `--qnum=Q --dpi-desync-fwmark=M`.
 //
-// The queue number and the mark are therefore declared once, here. The values are zapret's own
-// upstream defaults (init.d/sysv/functions: `QNUM=200`, `DESYNC_MARK=0x40000000`), so a portable run
-// and an installed zapret daemon agree on the numbers, and a user who later switches from one to the
-// other does not have to reconcile two configurations.
+// The queue number and the mark are therefore declared once, here.
+//
+// The mark IS zapret's own upstream default (`DESYNC_MARK=0x40000000`, init.d/sysv/functions), so a
+// portable run and an installed zapret daemon agree on it and a user who later switches from one to
+// the other does not have to reconcile two configurations.
+//
+// The queue number deliberately is NOT upstream's `QNUM=200`. 200 is the number every other zapret
+// wrapper, fork and preinstalled service reaches for first, so on a machine where one of them is
+// already running nfqws fails with "cannot open nfqueue group 200: Operation not permitted" — and it
+// fails AFTER the GUI has inserted its rules, which is the worst possible moment: the user sees a
+// dead run plus firewall rules they did not ask for. Upstream can afford 200 because its init script
+// owns the machine; a GUI launched next to whatever the desktop already runs cannot. 2000 sits far
+// above that crowd. A user who wants the upstream number back does not need a code change: editing
+// `--qnum=` on the card moves the firewall rules with it, because portableQueueNum() reads the queue
+// out of the same argv the payload gets.
 //
 // A third thing the payload needs and the firewall does not: `--user=` set to kPortableNfUser, so the
 // child keeps the privileges creating the queue requires. See kPortableNfUser for why that is not
@@ -35,8 +46,9 @@ namespace zapret {
 //
 // All of this is header-only: nothing here spawns a process, so the core stays testable headlessly.
 
-// The NFQUEUE number the portable backend binds and the firewall rules enqueue into.
-inline constexpr int kPortableNfQueueNum = 200;
+// The NFQUEUE number the portable backend binds and the firewall rules enqueue into. Not upstream's
+// 200 — see the note at the top of this header for why that number is the one that collides.
+inline constexpr int kPortableNfQueueNum = 2000;
 
 // The firewall mark written on desync packets, formatted exactly the way both iptables (`--mark`)
 // and nfqws (`--dpi-desync-fwmark`) accept it. zapret's upstream default.

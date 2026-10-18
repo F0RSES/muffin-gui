@@ -18,7 +18,7 @@ int main(int argc, char **argv)
     // is what the display name, the .desktop entry and the installer all use.
     QApplication::setOrganizationName(QStringLiteral("F0RSES"));
     QApplication::setApplicationDisplayName(QStringLiteral("Muffin"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.2"));
+    QApplication::setApplicationVersion(QStringLiteral("0.1.3"));
     // Linux desktop environments match a running app to its .desktop entry through this id.
     QApplication::setDesktopFileName(QStringLiteral("Muffin"));
     // Closing the window must not kill a running zapret unless the user chose "Выход" in the tray;
