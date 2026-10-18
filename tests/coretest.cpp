@@ -2301,6 +2301,133 @@ int main(int argc, char **argv)
             qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
             pumpFor(100);
         }
+
+        // (8j) A payload that will not die — the shape that used to freeze the GUI.
+        //
+        // The production bug: the child QProcess owns is pkexec, pkexec does not forward SIGTERM to
+        // the nfqws it spawned, and that surviving grandchild keeps the write end of the stdout/stderr
+        // pipes QProcess reads open, so the exit notification stop() was sequenced on never arrives —
+        // state() sits in Stopping with the stop button greyed out and no way out.
+        //
+        // What this fixture reproduces is the observable half of that: a child that answers SIGTERM
+        // with nothing. Measured on this host, `terminate()` leaves QProcess still Running with
+        // `waitForFinished(3000)` returning false, which is exactly the moment the old code used to
+        // hand the stop over to a notification that may never come. The TERM trap is installed before
+        // the background job forks, so the job inherits the ignored disposition too (a signal nobody
+        // can catch cannot be forwarded), and it keeps running — holding the pipes — after the process
+        // QProcess owns has been SIGKILLed. Both loops end by themselves in about a dozen seconds so
+        // no orphan outlives the test run.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-stubborn.log"));
+            QFile::remove(fwLog);
+            const QString dbl = makeFirewallDouble(QStringLiteral("fake-firewall-stubborn.sh"),
+                                                   fwLog, 0, 0);
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", dbl.toLocal8Bit());
+
+            const QString stubborn = makeScript(
+                tmp.filePath(QStringLiteral("fake-stubborn.sh")), QStringLiteral(
+                    "trap '' TERM INT\n"
+                    "echo \"stubborn-fake up: $*\"\n"
+                    "( i=0; while [ $i -lt 12 ]; do sleep 1; i=$((i+1)); done ) &\n"
+                    "i=0\n"
+                    "while [ $i -lt 12 ]; do sleep 1; i=$((i+1)); done\n"));
+            check(!stubborn.isEmpty(), "stubborn: payload fixture written");
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            QString err;
+            check(lb.start(portableStrategy(QStringLiteral("portable-stubborn"), stubborn, false), &err),
+                  QStringLiteral("stubborn: start accepted (%1)").arg(err));
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 8000),
+                  "stubborn: the payload comes up");
+            // Wait for the banner: the fixture installs its TERM trap before printing it, so a stop
+            // issued any earlier would SIGTERM a shell whose trap is not in place yet — and the test
+            // would be measuring a payload that died politely instead of the one that does not.
+            check(pumpUntil([&] { return probe->sawLog(QStringLiteral("stubborn-fake up")); }, 3000),
+                  "stubborn: the payload is up and ignoring SIGTERM");
+
+            lb.stop();
+            // Three seconds of terminate grace, then a rescue the stand-in answers at once. Anything
+            // much longer than that means the stop is waiting on a notification again — the bug.
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 9000),
+                  "stubborn: the run is released even though the payload ignored SIGTERM");
+            check(lb.state() == S::Stopped, "stubborn: and it ends Stopped, not Stopping");
+            check(probe->sawLog(QStringLiteral("did not report an exit within")),
+                  "stubborn: the log says the graceful exit never arrived");
+            check(probe->sawLog(QStringLiteral("sending SIGKILL to the stalled payload wrapper")),
+                  "stubborn: the wrapper this backend owns is killed outright");
+            check(probe->sawLog(QStringLiteral("sweeping 'fake-stubborn.sh' by name")),
+                  "stubborn: the grandchild it hides is swept by name, which terminate() cannot reach");
+            check(probe->errors().isEmpty(), "stubborn: a forced stop is not reported as a failure");
+            check(!lb.isRunning(), "stubborn: nothing is managed afterwards");
+
+            // One command does both jobs, in the order that cannot be undone, and the pattern is
+            // bracketed so the sweep cannot match the command line carrying it and kill its own shell.
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("pkill -9 -f '[f]ake-stubborn.sh'")),
+                  "stubborn: the sweep brackets its own pattern instead of matching itself");
+            check(txt.contains(QStringLiteral("remove nfqueue rules")),
+                  "stubborn: the same command takes the NFQUEUE rules back out");
+            check(txt.indexOf(QStringLiteral("force-stop the payload")) <
+                      txt.indexOf(QStringLiteral("remove nfqueue rules")),
+                  "stubborn: the payload dies before the rules are touched");
+            check(txt.contains(QStringLiteral(") || FW_RC=$?")),
+                  "stubborn: the rule cleanup is a subshell whose failure cannot undo the sweep");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+            pumpFor(200);
+        }
+
+        // (8k) A privileged cleanup step that never answers at all.
+        //
+        // The other way a stop hangs: the payload is gone, but the firewall teardown is a pkexec
+        // sitting on an authorisation prompt nobody is there to approve. Aborting that command is not
+        // an option — a shell stopped halfway can leave a rule set nobody can describe — so the
+        // deadline abandons it, runs the rescue, and releases the GUI either way.
+        {
+            using S = IZapretBackend::State;
+            const QString fwLog = tmp.filePath(QStringLiteral("firewall-hanged.log"));
+            QFile::remove(fwLog);
+            // Slow for the ordinary phases, immediate for the rescue, which it recognises by the
+            // sweep every rescue script opens with.
+            const QString hanger = makeScript(
+                tmp.filePath(QStringLiteral("fake-firewall-hanged.sh")), QStringLiteral(
+                    "printf '%s\\n' \"$3\" >> '%1'\n"
+                    "case \"$3\" in *'force-stop the payload'*) exit 0;; esac\n"
+                    "sleep 6\n"
+                    "exit 0\n").arg(fwLog));
+            check(!hanger.isEmpty(), "hanged: firewall stand-in written");
+            qputenv("ZAPRET_GUI_FIREWALL_PROG", hanger.toLocal8Bit());
+
+            LinuxBackend lb;
+            BackendProbe *probe = new BackendProbe(&lb);
+            QString err;
+            check(lb.start(portableStrategy(QStringLiteral("portable-hanged"), live, false), &err),
+                  QStringLiteral("hanged: start accepted (%1)").arg(err));
+            check(pumpUntil([&] { return lb.state() == S::Running; }, 12000),
+                  "hanged: the run comes up through the slow insert");
+
+            lb.stop();
+            // The payload dies at once, the teardown then goes quiet: five seconds later the deadline
+            // releases the run and the rescue answers immediately.
+            check(pumpUntil([&] { return lb.state() == S::Stopped; }, 12000),
+                  "hanged: the stop is released by its deadline instead of waiting for the command");
+            check(probe->sawLog(QStringLiteral("did not answer within 5 s")),
+                  "hanged: the log names the deadline that released the run");
+            check(probe->sawLog(QStringLiteral("sweeping 'fake-nfqws.sh' by name")),
+                  "hanged: and the rescue does the job the abandoned command would have done");
+            check(probe->logCountWith(QStringLiteral("sweeping '")) == 1,
+                  "hanged: exactly one rescue, however long the abandoned teardown keeps running");
+            check(probe->errors().isEmpty(), "hanged: an abandoned cleanup is a warning, not an error");
+            check(!lb.isRunning(), "hanged: nothing is managed afterwards");
+
+            const QString txt = readFileText(fwLog);
+            check(txt.contains(QStringLiteral("remove nfqueue rules")) &&
+                      txt.contains(QStringLiteral("force-stop the payload")),
+                  "hanged: the teardown was tried, then attempted again inside the rescue command");
+            qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+            pumpFor(300);
+        }
     }
 #else
     out << "  SKIP  real-execution tests need a POSIX host to run the /bin/sh fixtures\n";

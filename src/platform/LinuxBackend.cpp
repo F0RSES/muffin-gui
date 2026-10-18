@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QStringList>
+#include <QTimer>
 
 namespace zapret {
 
@@ -141,6 +142,163 @@ QString portableFirewallBlurb(int qnum, bool apply)
         .arg(QLatin1String(kPortableNfDesyncMark));
 }
 
+// ---------------------------------------------------------------------------
+// How long each half of a stop is allowed to take
+// ---------------------------------------------------------------------------
+//
+// Both numbers exist because one thing is true of every launch shape in this backend: the process
+// QProcess controls is often pkexec, and pkexec does NOT forward SIGTERM to the nfqws it spawns. So
+// terminate() is a request the payload never hears; kill() removes only the wrapper and leaves the
+// payload running as an orphan that still holds the write end of the stdout/stderr pipes QProcess
+// reads. Qt deliberately withholds finished() until those pipes reach EOF (otherwise it could not
+// promise the child's output had all been delivered), so the exit notification a stop is sequenced on
+// may never arrive at all — and state() stays Stopping while MainWindow greys the stop button out,
+// leaving the user with no way out. Hence: no wait without a deadline.
+//
+//   kTerminateGraceMs        — SIGTERM alone, before SIGKILL plus a name-based sweep.
+//   kPrivilegedStepTimeoutMs — how long a privileged cleanup command may take before the GUI is
+//                             released anyway. It is a deadline for WAITING, not for the command: an
+//                             in-flight iptables script is left running (see goDeaf) rather than
+//                             aborted halfway, because a half-run rule set is the one state the GUI
+//                             genuinely cannot describe.
+constexpr int kTerminateGraceMs = 3000;
+constexpr int kPrivilegedStepTimeoutMs = 5000;
+
+// A payload name reduced to characters that are safe to interpolate into a privileged shell script.
+//
+// The name comes from a path on disk the user chose, and it ends up inside `sh -c`. Everything outside
+// a plain file name is discarded, and an empty result falls back to the payload portable mode names
+// itself: the same rule that keeps --qnum= provably numeric (see portableQueueNum).
+QString portableProcessName(const QString &raw)
+{
+    QString clean;
+    for (const QChar c : raw)
+    {
+        if (c.isLetterOrNumber() || c == QLatin1Char('.') || c == QLatin1Char('_')
+            || c == QLatin1Char('-') || c == QLatin1Char('+'))
+            clean.append(c);
+    }
+    if (clean.isEmpty())
+        clean = QStringLiteral("nfqws");
+    return clean;
+}
+
+// The `pkill -f` pattern for a payload name: the first character in brackets.
+//
+// The bracket is the whole trick. The pattern still matches the payload's own argv, but it can no
+// longer match the command line that CARRIES it — `pkexec /bin/sh -c pkill -9 -f '[n]fqws'` contains
+// no literal "nfqws" — so the sweep cannot kill the very shell that is running it, and cannot match
+// itself either.
+QString portableProcessPattern(const QString &name)
+{
+    return QStringLiteral("[%1]%2").arg(name.left(1), name.mid(1));
+}
+
+// The whole force-stop command: sweep the payload by name, then take its nfqueue rules back out.
+//
+// Two properties decide the layout.
+//
+//   * The payload dies FIRST and unconditionally, because nothing else here can reach it.
+//     terminate()/kill() only ever acts on the process QProcess owns, which is the pkexec wrapper;
+//     the payload is that wrapper's child, orphaned the moment the wrapper dies. `-9` because a
+//     process stuck in an nfqueue read loop is not going to honour a polite request. Best-effort by
+//     design: nothing matched is the NORMAL case (the payload did exit, the pipes were just slow),
+//     and a host without pkill is reported rather than guessed at.
+//   * The rule cleanup runs in a SUBSHELL whose exit code is collected rather than inherited.
+//     portableFirewallScript() opens with `set -e` and can legitimately fail (the rule is already
+//     gone, xtables locked past -w5, no root); that must not abort the sweep that already happened —
+//     and it must not be papered over with a blanket `exit 0` either. So the status this command ends
+//     with means exactly one thing: "were the rules removable". Whether the payload died is said in
+//     the script's own output, which the GUI logs.
+QString forceStopScript(const QString &rawName, bool removeRules, int qnum)
+{
+    const QString name = portableProcessName(rawName);
+    const QString pat = portableProcessPattern(name);
+
+    QString s;
+    s += QStringLiteral("# zapret GUI: force-stop the payload '%1' by name\n").arg(name);
+    s += QStringLiteral("if command -v pkill >/dev/null 2>&1; then\n");
+    s += QStringLiteral("  if pkill -9 -f '%1'; then echo \"LinuxBackend: killed '%2'\"\n"
+                        "  else echo \"LinuxBackend: no surviving '%2' process found\"; fi\n")
+               .arg(pat, name);
+    s += QStringLiteral("else\n");
+    s += QStringLiteral("  echo \"LinuxBackend: pkill is unavailable on this host; '%1' may still be "
+                        "running\"\n").arg(name);
+    s += QStringLiteral("fi\n");
+
+    s += QStringLiteral("FW_RC=0\n");
+    if (removeRules)
+    {
+        s += QStringLiteral("# Then the NFQUEUE rules, in a subshell: their failure cannot undo the "
+                            "sweep above.\n");
+        s += QStringLiteral("(\n");
+        s += portableFirewallScript(qnum, false);
+        s += QStringLiteral("\n) || FW_RC=$?\n");
+    }
+    s += QStringLiteral("if [ \"$FW_RC\" -ne 0 ]; then echo \"LinuxBackend: the NFQUEUE rules may "
+                        "still be installed (cleanup exit $FW_RC); check 'iptables -t mangle "
+                        "-L OUTPUT' and 'ip6tables -t mangle -L OUTPUT'\"; fi\n");
+    s += QStringLiteral("exit $FW_RC\n");
+    return s;
+}
+
+// Wrap a shell script in whatever this host needs to run it as root.
+//
+// Precedence, shared by the firewall command and the rescue command so the two can never disagree
+// about how to get root — a stop that suddenly needs a different helper than the start did is a stop
+// that fails in front of the user:
+//
+//   $ZAPRET_GUI_FIREWALL_PROG  — an explicit wrapper handed the full command ("/bin/sh" "-c"
+//          <script>): `sudo`, `doas`, a site wrapper that already holds the polkit rule, or a test
+//          double. Nothing is spawned as root unless this or pkexec says to, and the variable is the
+//          only way to change that without editing the tree.
+//   already root               — /bin/sh directly: no helper needed.
+//   otherwise                  — pkexec /bin/sh -c <script>, one prompt for the whole script.
+bool wrapPrivilegedScript(const QString &script, bool needsRoot, QString *program, QStringList *args,
+                          QString *error)
+{
+    const QString sh = QStringLiteral("/bin/sh");
+
+    const QString wrapper = qEnvironmentVariable("ZAPRET_GUI_FIREWALL_PROG").trimmed();
+    if (!wrapper.isEmpty())
+    {
+        *program = wrapper;
+        *args = {sh, QStringLiteral("-c"), script};
+        return true;
+    }
+
+    if (PrivilegeHelper::isElevated())
+    {
+        *program = sh;
+        *args = {QStringLiteral("-c"), script};
+        return true;
+    }
+
+    // Nothing here needs root: a plain user command then, because raising an authorisation prompt to
+    // signal a process the user already owns is a prompt nobody can explain — and one that can hang
+    // the very stop it is being asked to perform.
+    if (!needsRoot)
+    {
+        *program = sh;
+        *args = {QStringLiteral("-c"), script};
+        return true;
+    }
+
+    if (!QFileInfo::exists(pkexecPath()))
+    {
+        if (error)
+            *error = QStringLiteral("LinuxBackend: pkexec is not installed (%1) and root is needed to "
+                                    "edit the firewall; run the GUI as root or set "
+                                    "ZAPRET_GUI_FIREWALL_PROG to a wrapper such as sudo")
+                         .arg(pkexecPath());
+        return false;
+    }
+
+    *program = QStringLiteral("pkexec");
+    *args = {sh, QStringLiteral("-c"), script};
+    return true;
+}
+
 } // namespace
 
 LinuxBackend::LinuxBackend(QObject *parent)
@@ -156,9 +314,28 @@ LinuxBackend::LinuxBackend(QObject *parent)
     connect(m_process, &QProcess::errorOccurred, this, &LinuxBackend::onProcessError);
     connect(m_process, &QProcess::readyReadStandardOutput, this, &LinuxBackend::onReadyReadStdout);
     connect(m_process, &QProcess::readyReadStandardError, this, &LinuxBackend::onReadyReadStderr);
+
+    // The deadline that makes a stop unconditional. Single-shot and parented: it is armed by whichever
+    // privileged cleanup step is in flight and disarmed by its completion, so at most one stop step is
+    // ever being waited on — exactly the invariant the rest of this class is built on.
+    m_stopWatchdog = new QTimer(this);
+    m_stopWatchdog->setSingleShot(true);
+    m_stopWatchdog->setInterval(kPrivilegedStepTimeoutMs);
+    connect(m_stopWatchdog, &QTimer::timeout, this, &LinuxBackend::onStopWatchdogFired);
 }
 
-LinuxBackend::~LinuxBackend() = default;
+LinuxBackend::~LinuxBackend()
+{
+    // Nothing here waits, but an in-flight privileged cleanup command is not ours to interrupt:
+    // ~QProcess kills a running child, and killing iptables halfway through a rule delete leaves
+    // precisely the undescribable rule set this class goes out of its way to avoid. Hand any command
+    // that is doing cleanup its own lifetime and let it finish unobserved.
+    disarmStopWatchdog();
+    if (m_process && m_process->state() != QProcess::NotRunning &&
+        (m_forcedStop || m_cmdIsStop || m_phase == PortablePhase::FirewallDown ||
+         m_phase == PortablePhase::Rescue))
+        goDeaf(m_process);
+}
 
 void LinuxBackend::setState(State s)
 {
@@ -234,6 +411,9 @@ bool LinuxBackend::composeCommand(const Strategy &s, const QString &action, QStr
         else
             *args = {action};               // <script> start|stop  (we are root)
         *program = prog;
+        // Recorded for the rescue path: anything reached through pkexec runs as root, and a sweep
+        // issued by this unprivileged GUI could not signal it.
+        m_payloadElevated = (prog == QLatin1String("pkexec"));
         return true;
     }
 
@@ -285,6 +465,9 @@ bool LinuxBackend::composeCommand(const Strategy &s, const QString &action, QStr
         *program = binary;
     }
     *args = a;
+    // Recorded for the rescue path: a payload this backend handed to pkexec runs as root, and an
+    // unprivileged sweep could not signal it. One launched as the user's own child needs no prompt.
+    m_payloadElevated = (*program == QLatin1String("pkexec"));
     return true;
 }
 
@@ -303,6 +486,15 @@ bool LinuxBackend::start(const Strategy &s, QString *error)
     if (m_state == State::Starting || m_state == State::Running ||
         (m_process && m_process->state() != QProcess::NotRunning))
         return fail(QStringLiteral("LinuxBackend: an operation is already in progress (stop first)"));
+
+    // A rescue from the previous run is still editing the firewall. It cannot be detected through
+    // m_process — the whole point of releasing a hung stop was to stop depending on that command —
+    // so the claim is kept explicitly. The rescue is bounded by the watchdog, which is what makes
+    // "wait a moment" an honest answer rather than a door that never opens: starting now would race
+    // this run's insert against a delete that is still in flight.
+    if (m_forcedStop)
+        return fail(QStringLiteral("LinuxBackend: the previous run is still being cleaned up "
+                                   "(wait for the cleanup command to finish, then start again)"));
 
     if (!s.isValid())
         return fail(QStringLiteral("LinuxBackend: strategy is not valid"));
@@ -368,6 +560,13 @@ bool LinuxBackend::start(const Strategy &s, QString *error)
     m_stopRequested = false;
     m_cmdIsStop = false;
     m_directStop = false;   // a new run starts clean: its exits are never "on request"
+    m_forcedStop = false;   // ditto its rescue: a released run's abandoned command is not this one's
+    disarmStopWatchdog();
+
+    // The name a forced stop sweeps by, recorded while the strategy is still in hand. A controller
+    // records nothing: its daemon belongs to the init script, and a stop that goes silent there is
+    // released with a message rather than a name-based kill the script was asked to perform.
+    m_payloadName = m_controller ? QString() : QFileInfo(launchProgram(s)).fileName();
 
     resetProcess();
     m_process->setProgram(program);
@@ -417,6 +616,9 @@ void LinuxBackend::launchControllerStop()
     setState(State::Stopping);
     emit logMessage(QStringLiteral("LinuxBackend: stopping via %1 %2").arg(program, args.join(QLatin1Char(' '))), 0);
     m_process->start(program, args);
+    // Bounded like every other privileged stop step: pkexec reached the init script is the optimistic
+    // case, and an unattended authorisation prompt is the one that leaves a GUI stuck in Stopping.
+    armStopWatchdog();
 }
 
 // ---------------------------------------------------------------------------
@@ -441,39 +643,10 @@ bool LinuxBackend::composeFirewallCommand(bool apply, QString *program, QStringL
         return false;
     }
 
-    const QString script = portableFirewallScript(m_queueNum, apply);
-    const QString sh = QStringLiteral("/bin/sh");
-
-    // An explicit wrapper is handed the full command line, exactly as pkexec would be, so `sudo`,
-    // `doas`, a site wrapper that already owns the polkit rule and a test double all behave the same.
-    const QString wrapper = qEnvironmentVariable("ZAPRET_GUI_FIREWALL_PROG").trimmed();
-    if (!wrapper.isEmpty())
-    {
-        *program = wrapper;
-        *args = {sh, QStringLiteral("-c"), script};
-        return true;
-    }
-
-    if (PrivilegeHelper::isElevated())
-    {
-        *program = sh;
-        *args = {QStringLiteral("-c"), script};
-        return true;
-    }
-
-    if (!QFileInfo::exists(pkexecPath()))
-    {
-        if (error)
-            *error = QStringLiteral("LinuxBackend: pkexec is not installed (%1) and root is needed to "
-                                    "edit the firewall; run the GUI as root or set "
-                                    "ZAPRET_GUI_FIREWALL_PROG to a wrapper such as sudo")
-                         .arg(pkexecPath());
-        return false;
-    }
-
-    *program = QStringLiteral("pkexec");
-    *args = {sh, QStringLiteral("-c"), script};
-    return true;
+    // One `sh -c` for the whole phase, wrapped by the same helper the rescue command uses: a single
+    // authorisation prompt, and no way for the two privileged paths to drift apart. Editing the
+    // firewall is always a root operation, so needsRoot is unconditional here.
+    return wrapPrivilegedScript(portableFirewallScript(m_queueNum, apply), true, program, args, error);
 }
 
 void LinuxBackend::launchPortableFirewall(bool apply)
@@ -512,6 +685,12 @@ void LinuxBackend::launchPortableFirewall(bool apply)
     // already names every number in it.
     emit logMessage(QStringLiteral("LinuxBackend: %1").arg(portableFirewallBlurb(m_queueNum, apply)), 0);
     m_process->start(program, args);
+
+    // A teardown is a step the stop waits on, so it gets a deadline: an insert during a start does
+    // not, because a prompt the user is still typing into is normal there — but a stop that never
+    // comes back is not a stop. See onStopWatchdogFired().
+    if (!apply)
+        armStopWatchdog();
 }
 
 void LinuxBackend::launchPortablePayload()
@@ -559,9 +738,22 @@ void LinuxBackend::launchPortablePayload()
 void LinuxBackend::startPortable(const Strategy &s)
 {
     m_active = s;
+    // Recorded now, not when the payload launches: a stop that arrives during the firewall insert
+    // still has to know what a later sweep should look for, and by then the payload has no name yet.
+    m_payloadName = QFileInfo(launchProgram(s)).fileName();
     // One read of argv decides the number both halves use: the rules enqueue into it and nfqws binds
     // it, because portableQueueNum() recovers exactly what the parser wrote into --qnum=.
     m_queueNum = portableQueueNum(s.argv);
+    // Rules a previous run could not confirm away are reported, not silently overwritten: m_fwApplied
+    // is the only thing that survives a forced stop, and it means "these may still be in the kernel".
+    if (m_fwApplied)
+    {
+        emit logMessage(QStringLiteral("LinuxBackend: a previous run could not confirm removing its "
+                                       "rules from NFQUEUE %1; check 'iptables -t mangle -L OUTPUT' "
+                                       "before assuming this queue is clean only")
+                            .arg(m_queueNum),
+                        1);
+    }
     m_fwApplied = false;
     m_portableStopQueued = false;
     m_portablePendingError.clear();
@@ -614,8 +806,13 @@ void LinuxBackend::stopPortable()
         // The insert command is short-lived, and killing a shell mid-script is the one way to leave
         // the rule set in a state the GUI cannot describe. Let it finish: the finished handler sees
         // this flag and tears the rules down instead of starting nfqws.
+        //
+        // "Let it finish" cannot mean "for as long as it likes", though: this command was reached by
+        // way of a pkexec prompt, and a prompt nobody answers is the hang the whole stop path exists
+        // to avoid. The deadline abandons it rather than killing it.
         setState(State::Stopping);
         m_portableStopQueued = true;
+        armStopWatchdog();
         emit logMessage(QStringLiteral("LinuxBackend: stop queued until the firewall command returns"), 1);
         return;
     }
@@ -623,7 +820,16 @@ void LinuxBackend::stopPortable()
     if (m_phase == PortablePhase::FirewallDown)
     {
         setState(State::Stopping);
+        // The teardown the user is asking for is already in flight and already watched; say so
+        // instead of re-arming a deadline that is already running against the same command.
         emit logMessage(QStringLiteral("LinuxBackend: the firewall teardown is already running"), 1);
+        return;
+    }
+
+    if (m_phase == PortablePhase::Rescue)
+    {
+        setState(State::Stopping);
+        emit logMessage(QStringLiteral("LinuxBackend: the forced cleanup is already running"), 1);
         return;
     }
 
@@ -644,9 +850,18 @@ void LinuxBackend::stopPortable()
         m_directStop = true;
         emit logMessage(QStringLiteral("LinuxBackend: terminating nfqws (portable mode)"), 0);
         child->terminate();
-        if (child->waitForFinished(3000))
+        // The handler moves the phase off Payload — to FirewallDown, or to None if there was nothing
+        // left to remove. Staying on Payload means the child may be dead and Qt still cannot say so,
+        // which is the notification this path used to wait on forever.
+        if (child->waitForFinished(kTerminateGraceMs) && m_phase != PortablePhase::Payload)
             return;      // finished() already ran, and the teardown with it
-        child->kill();   // its finished() lands in the event loop and tears down from there
+
+        // Still silent after its grace period. terminate() reached the pkexec wrapper and nobody
+        // passed the word on; the surviving payload is also what keeps the pipes open, so the exit
+        // notification a normal stop is sequenced on may never arrive at all. Do not wait for it.
+        forceStop(QStringLiteral("LinuxBackend: nfqws did not report an exit within %1 ms of SIGTERM; "
+                                 "forcing it down and cleaning up behind it")
+                      .arg(kTerminateGraceMs));
         return;
     }
 
@@ -777,6 +992,15 @@ void LinuxBackend::onPortableFinished(int exitCode, bool crashed)
         return;
     }
 
+    case PortablePhase::Rescue:
+        // Unreachable by construction: onProcessFinished() intercepts every notification while a
+        // rescue is in flight, and a rescued child is disconnected before it can report at all. The
+        // branch is here so the phase machine says what it would do if that ever stopped being true —
+        // release the run, because a stop must never depend on being heard.
+        finishForcedStop(QStringLiteral("LinuxBackend: a rescue command reported an exit through the "
+                                        "phase machine; the run is released anyway"));
+        return;
+
     case PortablePhase::None:
         // A notification no phase owns — a late exit from a child the teardown already disconnected.
         // Settle quietly instead of inventing a state the GUI would show as a phantom failure.
@@ -789,6 +1013,14 @@ void LinuxBackend::onPortableFinished(int exitCode, bool crashed)
 
 void LinuxBackend::stop()
 {
+    // A rescue is already running: it is bounded by the watchdog, and pressing Stop again would only
+    // abandon the command that is cleaning up after the payload.
+    if (m_forcedStop)
+    {
+        emit logMessage(QStringLiteral("LinuxBackend: the forced cleanup is already running"), 1);
+        return;
+    }
+
     // Portable teardown is its own phase machine: the payload kill must be followed by the rule
     // removal, which no other shape of run has to do.
     if (m_portable)
@@ -811,9 +1043,20 @@ void LinuxBackend::stop()
         m_directStop = true;
         setState(State::Stopping);
         emit logMessage(QStringLiteral("LinuxBackend: terminating managed process"), 0);
-        m_process->terminate();
-        if (!m_process->waitForFinished(3000))
-            m_process->kill();
+        QProcess *child = m_process;
+        child->terminate();
+        // m_directStop is cleared by the finished handler, so asking it whether the handler ran is how
+        // this path tells "the child exited" from "the child exited AND Qt could say so". Qt withholds
+        // finished() until the pipes reach EOF, and a payload that outlives its wrapper is precisely
+        // what keeps them open — hence the second condition, not the exit status alone.
+        if (child->waitForFinished(kTerminateGraceMs) && !m_directStop)
+            return;
+        // The wrapper is still alive — or it is dead and its payload inherited the pipes, so no
+        // notification will ever come. Either way this is the shape pkexec produces, and waiting
+        // longer buys nothing: take the rescue path instead of the kill() that used to be the end.
+        forceStop(QStringLiteral("LinuxBackend: the payload wrapper did not report an exit within "
+                                 "%1 ms of SIGTERM; forcing the run down")
+                      .arg(kTerminateGraceMs));
         return;
     }
 
@@ -830,8 +1073,227 @@ void LinuxBackend::stop()
 }
 
 
+// ---------------------------------------------------------------------------
+// The forced stop: the path that does not depend on being heard
+// ---------------------------------------------------------------------------
+
+QString LinuxBackend::payloadProcessName() const
+{
+    return m_payloadName;
+}
+
+void LinuxBackend::goDeaf(QProcess *p)
+{
+    if (!p)
+        return;
+
+    if (m_process == p)
+        m_process = nullptr;   // resetProcess() must not destroy — and so must not kill — this one
+
+    p->disconnect(this);
+
+    // Ownership leaves the backend deliberately: ~QProcess kills a running child, and an iptables
+    // script stopped halfway through a delete is the one outcome this backend refuses to produce —
+    // it leaves a rule set no later run can describe. The object reaps itself once the child really
+    // reports; a child that never reports costs one orphaned QProcess, which is bounded, per
+    // abandonment, and cheaper than a damaged firewall.
+    p->setParent(nullptr);
+    QObject::connect(p, &QProcess::finished, p, &QObject::deleteLater);
+    QObject::connect(p, &QProcess::errorOccurred, p, [p](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            p->deleteLater();
+    });
+}
+
+bool LinuxBackend::composeRescueCommand(QString *program, QStringList *args, QString *error) const
+{
+    if (!program || !args)
+    {
+        if (error)
+            *error = QStringLiteral("LinuxBackend: internal error: nowhere to put the rescue command");
+        return false;
+    }
+
+    // The sweep inherits the payload's own privileges and the rule delete needs root, so root is
+    // asked for when either is on the list — and never otherwise. The wrapper precedence is the
+    // firewall phase's own (see wrapPrivilegedScript), because a rescue that reaches root a different
+    // way than the rules were installed with is a rescue that prompts twice or not at all.
+    return wrapPrivilegedScript(forceStopScript(payloadProcessName(), m_fwApplied, m_queueNum),
+                                m_fwApplied || m_payloadElevated, program, args, error);
+}
+
+void LinuxBackend::armStopWatchdog()
+{
+    if (m_stopWatchdog)
+        m_stopWatchdog->start();
+}
+
+void LinuxBackend::disarmStopWatchdog()
+{
+    if (m_stopWatchdog)
+        m_stopWatchdog->stop();
+}
+
+void LinuxBackend::forceStop(const QString &reason)
+{
+    // One rescue per run. A second call would abandon the rescue command itself, leaving the GUI with
+    // nothing waiting on it and a sweep it cannot describe.
+    if (m_forcedStop)
+        return;
+
+    // Is the child that has gone quiet the payload wrapper, or one of this backend's own short
+    // cleanup commands? Decided HERE, before the bookkeeping below rewrites m_phase, because m_phase
+    // is what says: a payload is abandoned with SIGKILL, an iptables script is abandoned untouched —
+    // interrupting a delete halfway is how a rule set gets damaged into a state no later run can
+    // describe.
+    QProcess *stalled = m_process;
+    const bool stalledIsPayload =
+        stalled && stalled->state() != QProcess::NotRunning &&
+        ((m_portable && m_phase == PortablePhase::Payload) ||
+         (!m_portable && !m_controller && !m_cmdIsStop));
+
+    m_forcedStop = true;
+    // The abandoned child's exit is not a report of a stop on request: it is disconnected below so
+    // that a death this backend cannot confirm is never shown as one it caused.
+    m_directStop = false;
+    m_portableStopQueued = false;
+    m_stopRequested = false;
+    m_cmdIsStop = false;
+    if (m_portable)
+        m_phase = PortablePhase::Rescue;
+
+    setState(State::Stopping);
+    emit logMessage(reason, 1);
+
+    if (stalledIsPayload)
+    {
+        emit logMessage(QStringLiteral("LinuxBackend: sending SIGKILL to the stalled payload "
+                                       "wrapper (pid %1)").arg(stalled->processId()), 1);
+        stalled->kill();
+    }
+    goDeaf(stalled);
+
+    QString program;
+    QStringList args;
+    QString err;
+    if (!composeRescueCommand(&program, &args, &err))
+    {
+        // No way to reach root at all. The GUI still moves on — that is the whole point — but it says
+        // plainly that the payload was left alone.
+        finishForcedStop(err.isEmpty()
+                             ? QStringLiteral("LinuxBackend: could not compose the cleanup command; "
+                                              "the payload may still be running")
+                             : err);
+        return;
+    }
+
+    resetProcess();
+    m_process->setProgram(program);
+    m_process->setArguments(args);
+    if (!m_active.workingDirectory.isEmpty())
+        m_process->setWorkingDirectory(m_active.workingDirectory);
+
+    emit logMessage(QStringLiteral("LinuxBackend: sweeping '%1' by name%2")
+                        .arg(payloadProcessName().isEmpty() ? QStringLiteral("nfqws")
+                                                            : payloadProcessName(),
+                             m_fwApplied ? QStringLiteral(", then removing the NFQUEUE rules")
+                                         : QString()),
+                    0);
+    armStopWatchdog();
+    m_process->start(program, args);
+}
+
+void LinuxBackend::finishForcedStop(const QString &warning)
+{
+    disarmStopWatchdog();
+
+    if (!warning.isEmpty())
+        emit logMessage(warning, 1);
+
+    // A command still in flight keeps its own lifetime: it is deaf now, and whatever it eventually
+    // reports cannot change anything about a run the GUI has already let go of.
+    if (m_process && m_process->state() != QProcess::NotRunning)
+        goDeaf(m_process);
+
+    m_forcedStop = false;
+    m_directStop = false;
+    m_portableStopQueued = false;
+    m_stopRequested = false;
+    m_cmdIsStop = false;
+    m_payloadName.clear();
+    m_portable = false;
+    m_phase = PortablePhase::None;
+
+    if (!m_portablePendingError.isEmpty())
+    {
+        // The run already failed for a worse reason than a teardown that would not answer; say that
+        // rather than pretend it ended the way the user asked.
+        const QString msg = m_portablePendingError;
+        m_portablePendingError.clear();
+        m_lastError = msg;
+        setState(State::Error);
+        emit errorOccurred(msg);
+        return;
+    }
+    setState(State::Stopped);
+}
+
+void LinuxBackend::onStopWatchdogFired()
+{
+    // Silence is not failure: an iptables script may still be running, and interrupting one is how a
+    // rule set gets damaged. Nothing is killed on the deadline — the run is released, and the user is
+    // told exactly where to look.
+    const QString waited = QStringLiteral("did not answer within %1 s; the run is released without "
+                                          "waiting for it")
+                               .arg(kPrivilegedStepTimeoutMs / 1000);
+
+    if (m_forcedStop)
+    {
+        finishForcedStop(QStringLiteral("LinuxBackend: the cleanup command %1. If a payload is still "
+                                        "running, stop it by hand and check 'iptables -t mangle "
+                                        "-L OUTPUT' for NFQUEUE rules on queue %2; give the abandoned "
+                                        "command a moment before starting again")
+                             .arg(waited)
+                             .arg(m_queueNum));
+        return;
+    }
+
+    if (m_controller)
+    {
+        // A controller stop command that will not answer — usually an authorisation prompt nobody is
+        // there to approve — ends the run here. Its daemon belongs to the init script, so this
+        // backend does not sweep by name a process it was told to leave to the service.
+        finishForcedStop(QStringLiteral("LinuxBackend: the stop command %1; check 'service zapret "
+                                        "status' for the daemon it was meant to stop")
+                             .arg(waited));
+        return;
+    }
+
+    // A normal stop stalled on one of its privileged commands. Fall through to the rescue, which the
+    // same deadline then watches: the sweep runs, the rules are attempted again (idempotently — every
+    // delete is guarded by a -C probe), and the GUI comes back either way.
+    //
+    // A queued stop whose INSERT went silent is the one case where walking away leaves the machine in
+    // a state this backend cannot describe: the script may complete a moment later, with nobody left
+    // to take the rules back out. So the rules are claimed installed, and the rescue deletes them —
+    // removing a rule that never landed is a no-op, not an error.
+    const bool stalledInsert = m_phase == PortablePhase::FirewallUp || m_portableStopQueued;
+    if (stalledInsert)
+        m_fwApplied = true;
+
+    forceStop(QStringLiteral("LinuxBackend: the %1 command %2")
+                  .arg(stalledInsert ? QStringLiteral("firewall setup")
+                                     : QStringLiteral("firewall teardown"),
+                       waited));
+}
+
 void LinuxBackend::onProcessStarted()
 {
+    // The rescue command starting is bookkeeping with a process attached, not a service coming up:
+    // reporting Running here would badge a card for a payload that this stop is on its way to kill.
+    if (m_forcedStop)
+        return;
+
     if (m_portable)
     {
         // Only nfqws itself means the service is up. The firewall commands are bookkeeping that
@@ -852,6 +1314,40 @@ void LinuxBackend::onProcessFinished(int exitCode, bool crashed)
 {
     const int code = crashed ? -1 : exitCode;
 
+    // A notification this handler acts on means the privileged step a stop was waiting on has
+    // answered, in whichever direction it answered: the deadline exists for silence, not for a bad
+    // exit code. Re-armed by the next step that needs waiting (see armStopWatchdog).
+    disarmStopWatchdog();
+
+    // The rescue command ends a forced stop; it is not a step in the phase machine, and nothing may
+    // read its sweep as a payload exit or its delete as an ordinary teardown. Its status says one
+    // thing only — whether the rules came out — and then the run is released whatever it says.
+    if (m_forcedStop)
+    {
+        const bool rulesClean = !crashed && code == 0;
+        if (m_fwApplied)
+        {
+            if (rulesClean)
+            {
+                m_fwApplied = false;
+                emit logMessage(QStringLiteral("LinuxBackend: nfqueue rules removed"), 0);
+            }
+            else
+            {
+                // Left installed on purpose: m_fwApplied stays true so the next start reports the
+                // leftovers this one could not confirm away.
+                emit logMessage(QStringLiteral("LinuxBackend: the NFQUEUE rule cleanup reported exit "
+                                               "%1; check 'iptables -t mangle -L OUTPUT' for leftovers "
+                                               "on queue %2")
+                                    .arg(code)
+                                    .arg(m_queueNum),
+                                1);
+            }
+        }
+        finishForcedStop();
+        return;
+    }
+
     if (m_portable)
     {
         onPortableFinished(code, crashed);
@@ -863,7 +1359,7 @@ void LinuxBackend::onProcessFinished(int exitCode, bool crashed)
         if (m_directStop)
         {
             // stop() killed it. A signalled exit arrives here as CrashExit on Unix, which is exactly the
-            // false "crash" an ordinary Остановить click must not turn into.
+            // false "crash" an ordinary Stop click must not turn into.
             m_directStop = false;
             emit logMessage(QStringLiteral("LinuxBackend: payload stopped on request"), 0);
             setState(State::Stopped);
@@ -952,6 +1448,15 @@ void LinuxBackend::onProcessError()
         const QString msg = QStringLiteral("LinuxBackend: failed to start '%1': %2")
                                 .arg(m_process ? m_process->program() : QString(),
                                      m_process ? m_process->errorString() : QString());
+        if (m_forcedStop)
+        {
+            // The sweep could not even be composed into a running command. The payload wrapper was
+            // SIGKILLed before it was tried, so what is unverified here is the firewall, not the
+            // run: release the GUI and leave m_fwApplied set so the next start says the rest.
+            disarmStopWatchdog();
+            finishForcedStop(msg);
+            return;
+        }
         if (m_portable)
         {
             // A firewall command that never ran leaves nothing behind. A payload that never exec'd

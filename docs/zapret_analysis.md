@@ -61,7 +61,7 @@ linux/
 | Windows  | `PowerShell`  | `powershell.exe -File "<.ps1>"` | admin |
 | Linux    | `ShellScript` (`RunMode::InitScript`) | `pkexec "<abs path to init script>" start|stop|restart` (cwd = its dir) | root |
 | Linux    | `SystemdUnit` | installed/enabled via `systemctl` (not self-exec'd) | root |
-| Linux    | `Binary` (`RunMode::PortableNfqws`) | three phases: `pkexec /bin/sh -c "<iptables + ip6tables inserts>"` → `pkexec "<binaries/<arch>/nfqws>" <argv…>` → `pkexec /bin/sh -c "<iptables + ip6tables deletes>"` | root |
+| Linux    | `Binary` (`RunMode::PortableNfqws`) | phases: `pkexec /bin/sh -c "<iptables + ip6tables inserts>"` → `pkexec "<binaries/<arch>/nfqws>" <argv…>` → `pkexec /bin/sh -c "<iptables + ip6tables deletes>"`, with a bounded rescue sweep (`pkill` + the deletes, one command) replacing the last when a stop would otherwise never be answered | root |
 | both     | `Binary` (`RunMode::Default`) | `"<abs path to nfqws/winws.exe>" <GUI-supplied args>` — the GUI owns nothing outside the child | root/admin |
 
 `StrategyParser::applyDefaults` fills `executablePath` + `primaryArg` (the payload path) +
@@ -75,8 +75,9 @@ through their existing `service.bat`/UAC handling, so the launcher just needs ad
 
 ### Portable mode: what the GUI runs, and why it is safe
 
-`LinuxBackend` (see its class comment) drives a `RunMode::PortableNfqws` strategy as three child
-processes in sequence, one at a time, tracked by `m_phase`:
+`LinuxBackend` (see its class comment) drives a `RunMode::PortableNfqws` strategy as child processes in
+sequence, one at a time, tracked by `m_phase` — three on a normal run, a fourth when a stop would
+otherwise wait forever:
 
 1. **FirewallUp** — one `sh -c` batch inserting, at the top of `mangle OUTPUT`, one rule per
    `(tcp|udp) × (80|443)`: `-m mark ! --mark M/M -j NFQUEUE --queue-num Q --queue-bypass`, applied
@@ -85,6 +86,19 @@ processes in sequence, one at a time, tracked by `m_phase`:
 2. **Payload** — `pkexec <binaries/<arch>/nfqws> <argv…>`, the long-lived child.
 3. **FirewallDown** — the same batch, deleting (`stop()`, a payload that exits by itself, a payload
    that fails to exec, and a `stop()` queued during phase 1 all reach it).
+4. **Rescue** — only when a stop is not coming back: `SIGKILL` the child this backend owns, abandon it
+   without destroying it, and run one bounded privileged command that sweeps the payload by name
+   (`pkill -9 -f '[n]fqws'`, bracketed so the sweep cannot match the command line carrying it) and,
+   when the rules are installed, deletes them in a subshell whose failure cannot undo the sweep.
+
+   It exists because the process `QProcess` controls is `pkexec`, and `pkexec` does not forward SIGTERM
+   to the `nfqws` it spawned; the surviving grandchild also holds the write end of the stdout/stderr
+   pipes `QProcess` reads, and Qt withholds `finished()` until those reach EOF. A stop sequenced on
+   that notification can therefore wait forever with the GUI stuck in `Stopping` and its stop button
+   disabled. So every wait on the stop path has a deadline — 3 s of terminate grace, then 5 s for
+   whichever privileged cleanup step is in flight — and when a deadline expires the run is released
+   anyway, with the log naming the commands to check by hand. A released GUI plus a warning beats a
+   frozen one.
 
 Four properties are load-bearing, and `coretest` asserts each one on the generated text:
 
