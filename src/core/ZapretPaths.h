@@ -97,6 +97,30 @@ public:
     // one this build resolves to) survives untouched.
     static bool migrateManagedInstallDir();
 
+    // ---- the system-wide tree a download is promoted into (POSIX only) ----
+    // "/opt/muffin/zapret", or empty on Windows, where there is no polkit and no root-owned tree to
+    // promote into. Empty means "there is no such place", exactly like managedInstallDir() empty means
+    // "this host offers no app-data directory" — callers must not read it as "the root directory".
+    //
+    // Why a directory of its own instead of /opt/zapret: upstream's own scripts default to that
+    // (init.d/sysv/defaults.sh: ZAPRET_BASE=${ZAPRET_BASE:-/opt/zapret}), so a user who set zapret up
+    // by hand already has a tree there that Muffin must never overwrite. /opt/muffin is this
+    // application's namespace: nothing else claims it, and the packaging scripts may clean it up.
+    //
+    // Why it has to be root-owned: packaging/postinst installs a polkit rule that lets a payload under
+    // this tree be exec'd through pkexec WITHOUT a password. That is only sound while an unprivileged
+    // user cannot replace the bytes there. A directory in the user's own home fails that test — he owns
+    // it, so whoever wrote the file owns the root shell that follows — which is why a download is
+    // staged in managedInstallDir() and then promoted here by the root helper (MuffinInstallHelper)
+    // instead of being exec'd in place.
+    //
+    // Fixed at compile time on purpose: no environment variable, no Settings key and no argument
+    // reaches this value, because the helper reads it while running as root and a redirectable
+    // destination would let an unprivileged user aim that root write at any directory on the machine.
+    // packaging/check-polkit-rule.js reads this one literal back out of the source and requires the
+    // polkit rule to carry the same prefix, so the two cannot drift apart silently.
+    static QString systemInstallDir();
+
     // ---- Layout detection (no assumptions about which root you pass) ----
     // True if `root` looks like a usable windows distribution (bin/winws.exe + *.bat).
     static bool isWindowsRoot(const QString &root);

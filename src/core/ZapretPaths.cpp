@@ -244,6 +244,29 @@ bool ZapretPaths::migrateManagedInstallDir()
     return moved;
 }
 
+QString ZapretPaths::systemInstallDir()
+{
+#if defined(Q_OS_WIN)
+    // No polkit and no root-owned tree to promote into. The empty string means "there is no such
+    // place" — exactly like managedInstallDir() empty — and every caller has to read it that way
+    // rather than as a path it may write under.
+    return QString();
+#else
+    // Fixed at compile time on purpose: no environment variable, no Settings key and no argument
+    // reaches this value, because the root helper reads it while running as root, and a redirectable
+    // destination would let an unprivileged user aim that root write at any directory on the machine.
+    //
+    // /opt/muffin rather than /opt/zapret because upstream's own scripts default to the latter
+    // (init.d/sysv/defaults.sh: ZAPRET_BASE=${ZAPRET_BASE:-/opt/zapret}); a user who set zapret up by
+    // hand already has a tree there that Muffin must never overwrite.
+    //
+    // packaging/check-polkit-rule.js reads this literal back out of this file and fails CI unless the
+    // polkit rule exempts exactly this prefix with its trailing separator, so code and rule cannot
+    // drift apart into "passwordless root over a directory nothing here owns".
+    return QStringLiteral("/opt/muffin/zapret");
+#endif
+}
+
 QString ZapretPaths::nfqwsPath(const QString &root)
 {
     // Preference order: native arch, then the common x86_64 / x86 packaged binaries, then a
