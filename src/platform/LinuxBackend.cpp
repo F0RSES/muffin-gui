@@ -27,11 +27,14 @@ QString pkexecPath()
 // portable mode exists precisely because the init script cannot run. So the backend writes the rules
 // itself, mirroring what upstream writes:
 //
-//   iptables  -t mangle -I OUTPUT 1 -p <tcp|udp> --dport <80|443> \
+//   iptables  -t mangle -I OUTPUT 1 -p tcp --dport <80|443> \
 //             -m mark ! --mark <MARK>/<MARK> \
 //             -j NFQUEUE --queue-num <QNUM> --queue-bypass
-//   ip6tables -t mangle -I OUTPUT 1 -p <tcp|udp> --dport <80|443> \
-//             -j NFQUEUE --queue-num <QNUM> --queue-bypass        (the same four rules, v6 twin)
+//   iptables  -t mangle -I OUTPUT 1 -p udp --dport 443 \
+//             -m mark ! --mark <MARK>/<MARK> \
+//             -j NFQUEUE --queue-num <QNUM> --queue-bypass
+//   ip6tables -t mangle -I OUTPUT 1 -p <tcp|udp> --dport <...> \
+//             -j NFQUEUE --queue-num <QNUM> --queue-bypass        (the same three rules, v6 twin)
 //
 // Both families share one queue because one `nfqws` serves both (upstream's _fw_nfqws_pre /
 // _fw_nfqws_pre6 use the identical QNUM). The rule body is byte-for-byte identical across the two —

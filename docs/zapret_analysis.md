@@ -139,7 +139,7 @@ holds the id of the last live run (`m_lastRunId`, dropped when a run comes down 
 asserted where each is actually observable.
 
 **What portable mode deliberately leaves out.** `common/ipt.sh` — the file upstream's `config.default`
-drives — builds a much wider rule set than the four above. The GUI's version is the smallest one that
+drives — builds a much wider rule set than the three above. The GUI's version is the smallest one that
 makes `nfqws` work without an installer. It *does* cover both address families — mirroring upstream's
 `_fw_nfqws_pre` (`iptables`) and `_fw_nfqws_pre6` (`ip6tables`) with the one shared queue number, since
 a single `nfqws` serves both — and each remaining omission is a decision, not an oversight:

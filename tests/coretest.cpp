@@ -843,9 +843,64 @@ int main(int argc, char **argv)
               "default argv stamps the shared desync mark");
         check(defs.contains(QStringLiteral("--filter-tcp=80,443")),
               "default argv filters tcp 80,443 (from portablePorts)");
-        check(defs.contains(QStringLiteral("--filter-udp=80,443")),
-              "default argv filters udp 80,443 (from portablePorts)");
-        check(portablePorts().size() == 4, "portablePorts holds tcp+udp on 80 and 443");
+        check(defs.contains(QStringLiteral("--filter-udp=443")),
+              "default argv filters udp 443 only (from portablePorts)");
+        check(!defs.contains(QStringLiteral("--filter-udp=80,443")),
+              "and udp/80 is out of the queue: it carries no hello for fake,split2 to imitate");
+        check(portablePorts().size() == 3, "portablePorts holds tcp 80, tcp 443 and udp 443");
+
+        // ---- the desync policy itself ----
+        //
+        // Pinned as a contract, not as an implementation detail: fake,split2 with md5sig is the
+        // profile that did not penetrate a real ISP's DPI, so a silent regression back to it would
+        // ship a build that looks like it works and does nothing. Each flag is asserted with its
+        // value, because the value is the whole point: ts, not md5sig; none, not a mutated hello.
+        check(defs.contains(QStringLiteral("--dpi-desync=fake,split2")),
+              "default argv desyncs with a fake packet plus split2");
+        check(defs.contains(QStringLiteral("--dpi-desync-fooling=%1")
+                                 .arg(QLatin1String(kPortableDesyncFooling))),
+              "default argv fools the DPI with the IP timestamp");
+        check(!defs.contains(QStringLiteral("--dpi-desync-fooling=md5sig")),
+              "and not with a corrupt checksum a stack can drop before the DPI reads it");
+        check(defs.contains(QStringLiteral("--dpi-desync-repeats=%1").arg(kPortableDesyncRepeats)),
+              "default argv repeats the desynced packet");
+        check(defs.contains(QStringLiteral("--dpi-desync-fake-tls-mod=%1")
+                                 .arg(QLatin1String(kPortableFakeTlsMod))),
+              "default argv sends the fake ClientHello exactly as the template holds it");
+
+        // ---- where the fake templates are read from ----
+        //
+        // Absolute, and under the promoted system tree — never relative to the cwd the payload happens
+        // to start in, and never inside a directory the unprivileged user can rewrite. Both shapes are
+        // asserted: the host this runs on decides which one the argv is supposed to have.
+        const QString fakeTls = portableFakeFilePath(kPortableFakeTlsFile);
+        const QString fakeQuic = portableFakeFilePath(kPortableFakeQuicFile);
+        if (fakeTls.isEmpty())
+        {
+            check(!defs.contains(QStringLiteral("--dpi-desync-fake-tls")),
+                  "a host with no system tree is handed no fake-tls flag to fail on");
+            check(!defs.contains(QStringLiteral("--dpi-desync-fake-quic")),
+                  "and no fake-quic flag either");
+        }
+        else
+        {
+            const QString tree = ZapretPaths::systemInstallDir();
+            check(fakeTls.startsWith(QLatin1Char('/')) && fakeQuic.startsWith(QLatin1Char('/')),
+                  "both fake template paths are absolute");
+            check(fakeTls.startsWith(tree + QLatin1Char('/')) &&
+                      fakeQuic.startsWith(tree + QLatin1Char('/')),
+                  "and both live under the tree the polkit rule exempts, not beside the payload");
+            check(fakeTls == tree + QLatin1String("/files/fake/") +
+                                 QLatin1String(kPortableFakeTlsFile),
+                  "the TLS template is the one upstream ships in files/fake");
+            check(fakeQuic == tree + QLatin1String("/files/fake/") +
+                                  QLatin1String(kPortableFakeQuicFile),
+                  "and so is the QUIC one");
+            check(defs.contains(QStringLiteral("--dpi-desync-fake-tls=%1").arg(fakeTls)),
+                  "default argv points nfqws at that exact fake ClientHello");
+            check(defs.contains(QStringLiteral("--dpi-desync-fake-quic=%1").arg(fakeQuic)),
+                  "and at that exact fake QUIC Initial");
+        }
         // The backend re-reads the queue from argv instead of assuming it, so a user who edits
         // --qnum= in the GUI gets the firewall moved with it. Last occurrence wins, as with getopt.
         check(portableQueueNum(defs) == kPortableNfQueueNum, "default argv round-trips its queue");
@@ -2422,9 +2477,12 @@ int main(int argc, char **argv)
             check(up.contains(QStringLiteral("-w5")), "the xtables lock wait is bounded, not infinite");
             for (const QString &needle : {QStringLiteral("-p tcp --dport 80"),
                                           QStringLiteral("-p tcp --dport 443"),
-                                          QStringLiteral("-p udp --dport 80"),
                                           QStringLiteral("-p udp --dport 443")})
                 check(up.contains(needle), QStringLiteral("the rule set steers %1").arg(needle));
+            // The mirror of the --filter-udp change: a rule left steering udp/80 would queue traffic
+            // the payload was told to ignore, which is the exact drift portablePorts() exists to stop.
+            check(!up.contains(QStringLiteral("-p udp --dport 80")),
+                  "and the rule set steers no udp/80, so nothing reaches a payload that ignores it");
 
             // IPv6 must mirror IPv4 exactly: same ports, same queue, same mark, same --queue-bypass.
             // The rules are driven through ip6tables, and the binary is resolved the same guarded way
@@ -2433,13 +2491,12 @@ int main(int argc, char **argv)
                   "the script probes for ip6tables alongside iptables");
             check(up.contains(QStringLiteral("if [ -n \"$IP6T\" ]; then")),
                   "the v6 rules are guarded, so an absent ip6tables is skipped, not fatal");
-            check(up.count(QStringLiteral("op \"$IPT\"")) == 4,
-                  "exactly four IPv4 rules are issued");
-            check(up.count(QStringLiteral("op \"$IP6T\"")) == 4,
-                  "exactly four IPv6 rules, mirroring the IPv4 set");
+            check(up.count(QStringLiteral("op \"$IPT\"")) == 3,
+                  "exactly three IPv4 rules are issued");
+            check(up.count(QStringLiteral("op \"$IP6T\"")) == 3,
+                  "exactly three IPv6 rules, mirroring the IPv4 set");
             for (const QString &needle : {QStringLiteral("op \"$IP6T\" -p tcp --dport 80"),
                                           QStringLiteral("op \"$IP6T\" -p tcp --dport 443"),
-                                          QStringLiteral("op \"$IP6T\" -p udp --dport 80"),
                                           QStringLiteral("op \"$IP6T\" -p udp --dport 443")})
                 check(up.contains(needle),
                       QStringLiteral("the v6 rule set steers %1").arg(needle));

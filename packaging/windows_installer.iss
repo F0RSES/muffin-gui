@@ -2,7 +2,7 @@
 ; Muffin — Windows installer (Inno Setup 6).
 ;
 ; Compiled by the `installer` job in .github/workflows/ci.yml:
-;   ISCC.exe /DAppVersion=0.2.0 /DStagingDir=C:\...\win\build\Release packaging\windows_installer.iss
+;   ISCC.exe /DAppVersion=0.2.1 /DStagingDir=C:\...\win\build\Release packaging\windows_installer.iss
 ; and by hand from a normal Visual Studio build tree (windeployqt must have run first, see README):
 ;   & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows_installer.iss
 ;
@@ -29,7 +29,7 @@
 ; entry and VersionInfoVersion from the value read here, so if the two drift apart the version the
 ; user sees in Windows and the version the GUI reports at runtime disagree. Bump them together.
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.2.1"
 #endif
 
 ; VersionInfoVersion wants a dotted version; a bare tag usually carries three parts, so pad here

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ZapretPaths.h"
+
 #include <QList>
 #include <QPair>
 #include <QString>
@@ -22,9 +24,11 @@ namespace zapret {
 //   LinuxBackend    inserts `-t mangle OUTPUT ... -j NFQUEUE --queue-num Q --queue-bypass` into both
 //                   iptables and ip6tables, and excludes packets carrying mark M so our injected
 //                   packets cannot loop.
-//   StrategyParser  seeds Strategy::argv with `--qnum=Q --dpi-desync-fwmark=M`.
+//   StrategyParser  seeds Strategy::argv with `--qnum=Q --dpi-desync-fwmark=M` plus the desync policy
+//                   the payload should start with (see portableNfqwsDefaultArgs).
 //
-// The queue number and the mark are therefore declared once, here.
+// The queue number and the mark are therefore declared once, here. The policy flags are declared once
+// too, in the same place, because they travel in the very same argv the two halves reconcile over.
 //
 // The mark IS zapret's own upstream default (`DESYNC_MARK=0x40000000`, init.d/sysv/functions), so a
 // portable run and an installed zapret daemon agree on it and a user who later switches from one to
@@ -113,15 +117,68 @@ inline QStringList portableArgvWithUser(const QStringList &argv)
 
 // The transport/destination-port pairs portable mode steers into the queue. One source of truth for
 // both the iptables rules and the nfqws filters, so the two can never drift apart.
+//
+// udp/80 is deliberately NOT here. Everything this profile desyncs speaks TLS or QUIC, and both land
+// on 443; UDP/80 carries no client hello for `fake,split2` to imitate, so steering it only moved
+// packets that could not benefit into a root-owned queue — and every extra pair is one more iptables
+// rule that can collide with something else on the machine. Dropping it costs no flow the policy
+// desyncs, and the firewall narrows along with --filter-udp because both read this one list.
 inline const QList<QPair<QString, QString>> &portablePorts()
 {
     static const QList<QPair<QString, QString>> ports = {
         {QStringLiteral("tcp"), QStringLiteral("80")},
         {QStringLiteral("tcp"), QStringLiteral("443")},
-        {QStringLiteral("udp"), QStringLiteral("80")},
         {QStringLiteral("udp"), QStringLiteral("443")},
     };
     return ports;
+}
+
+// ---------------------------------------------------------------------------
+// The desync policy the default argv carries
+// ---------------------------------------------------------------------------
+//
+// `fake,split2` with md5sig was not enough against the DPI Russian ISPs run: the injected fake
+// ClientHello was still matched, so a fresh install did nothing a user could feel. These are the
+// knobs that make the same fake,split2 pair penetrate it, taken from zapret's own hard-DPI recipe and
+// from the profile users had already verified by hand in a shell script.
+//
+//   fooling=ts            sets an impossible IPv4 timestamp rather than corrupting the TCP checksum.
+//                         md5sig — the previous default — asks the receiving stack to drop the packet
+//                         on a bad checksum, and a stack that drops it before the DPI has read the
+//                         payload turns the desync into a stall. The timestamp id is ignored far more
+//                         often than a bad checksum is.
+//   repeats=6             resend the desynced packet, so one loss on the path is not the end of the
+//                         handshake the DPI is supposed to be confused during.
+//   fake-tls-mod=none     send the fake ClientHello byte-for-byte as the template holds it. nfqws' own
+//                         default mutates random bytes, and a mutated hello is exactly what a DPI that
+//                         learned to compare against a real handshake has started rejecting.
+//   fake-tls / fake-quic  explicit templates, so what goes out looks like a genuine Chrome hello to
+//                         www.google.com instead of whatever nfqws was built with.
+inline constexpr const char *kPortableDesyncFooling = "ts";
+inline constexpr int kPortableDesyncRepeats = 6;
+inline constexpr const char *kPortableFakeTlsMod = "none";
+
+// The two templates, and where they live. Upstream ships them in the release tree itself, so this is
+// not a guess about someone else's layout: the archive that ZapretDownloader verifies and unpacks
+// carries files/fake/, and the root helper copies the whole tree with `cp -a` when it promotes it.
+inline constexpr const char *kPortableFakeFilesSubdir = "files/fake";
+inline constexpr const char *kPortableFakeTlsFile = "tls_clienthello_www_google_com.bin";
+inline constexpr const char *kPortableFakeQuicFile = "quic_initial_www_google_com.bin";
+
+// The absolute path to one fake template, or empty when this host has no system tree at all.
+//
+// Why absolute: nfqws resolves a relative path against its cwd, and the backend starts the payload
+// from the tree root — a directory the run happened to be located in, not something this header
+// controls. Anchoring to ZapretPaths::systemInstallDir() instead means the payload, the polkit rule
+// and the packager all read the one literal, and a template can never be sought inside a directory
+// the unprivileged user can rewrite. Empty on Windows: no such tree, and no portable mode there.
+inline QString portableFakeFilePath(const char *fileName)
+{
+    const QString tree = ZapretPaths::systemInstallDir();
+    if (tree.isEmpty())
+        return QString();
+    return tree + QLatin1Char('/') + QLatin1String(kPortableFakeFilesSubdir) +
+           QLatin1Char('/') + QLatin1String(fileName);
 }
 
 // The default nfqws argument vector for a portable run, seeded into Strategy::argv by the parser.
@@ -130,6 +187,11 @@ inline const QList<QPair<QString, QString>> &portablePorts()
 // own default for a quick run, so this desyncs every packet on the ports above. It is a starting
 // point a user can edit, not a policy — which is why it is a plain QStringList on the Strategy rather
 // than a hidden field the backend would invent at launch time.
+//
+// The two fake-template flags are the only entries that depend on the host: they are appended when
+// there is a system tree to read them from, and left out when there is none. That is not decoration —
+// nfqws fails the whole start on a --dpi-desync-fake-tls= it cannot open, while a flag that is simply
+// absent makes it fall back to its built-in template and still run.
 inline QStringList portableNfqwsDefaultArgs()
 {
     QString tcp, udp;
@@ -141,14 +203,25 @@ inline QStringList portableNfqwsDefaultArgs()
         into += p.second;
     }
 
-    return {
-        QStringLiteral("--qnum=%1").arg(kPortableNfQueueNum),
-        QStringLiteral("--dpi-desync-fwmark=%1").arg(QLatin1String(kPortableNfDesyncMark)),
-        QStringLiteral("--filter-tcp=%1").arg(tcp),
-        QStringLiteral("--filter-udp=%1").arg(udp),
-        QStringLiteral("--dpi-desync=fake,split2"),
-        QStringLiteral("--dpi-desync-fooling=md5sig"),
-    };
+    QStringList argv;
+    argv << QStringLiteral("--qnum=%1").arg(kPortableNfQueueNum)
+         << QStringLiteral("--dpi-desync-fwmark=%1").arg(QLatin1String(kPortableNfDesyncMark))
+         << QStringLiteral("--dpi-desync=fake,split2")
+         << QStringLiteral("--dpi-desync-repeats=%1").arg(kPortableDesyncRepeats)
+         << QStringLiteral("--dpi-desync-fooling=%1").arg(QLatin1String(kPortableDesyncFooling))
+         << QStringLiteral("--dpi-desync-fake-tls-mod=%1").arg(QLatin1String(kPortableFakeTlsMod));
+
+    const QString fakeTls = portableFakeFilePath(kPortableFakeTlsFile);
+    if (!fakeTls.isEmpty())
+        argv << QStringLiteral("--dpi-desync-fake-tls=%1").arg(fakeTls);
+    const QString fakeQuic = portableFakeFilePath(kPortableFakeQuicFile);
+    if (!fakeQuic.isEmpty())
+        argv << QStringLiteral("--dpi-desync-fake-quic=%1").arg(fakeQuic);
+
+    argv << QStringLiteral("--filter-tcp=%1").arg(tcp)
+         << QStringLiteral("--filter-udp=%1").arg(udp);
+
+    return argv;
 }
 
 // The queue number a strategy's argv actually binds to: the last `--qnum=<digits>` wins (matching
