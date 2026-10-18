@@ -186,7 +186,7 @@ endif()
 # file: the release job passes -DMUFFIN_VERSION="${tag without the leading v}", which is what keeps
 # muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in agreement. The default is
 # the current release line, so local `cpack` runs still produce a sensibly named file.
-set(MUFFIN_VERSION "0.1.1" CACHE STRING "Version stamped into the generated packages")
+set(MUFFIN_VERSION "0.1.2" CACHE STRING "Version stamped into the generated packages")
 
 set(CPACK_PACKAGE_NAME "muffin")
 set(CPACK_PACKAGE_VENDOR "F0RSES")
