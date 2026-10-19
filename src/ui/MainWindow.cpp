@@ -111,6 +111,12 @@ constexpr int kStatusDotPx = 6;
 // MainWindow inside this band is on bare header space and safe to drag from.
 constexpr int kHeaderDragHeight = 64;
 
+// How long a manual ping round may hold the button. The service's own budgets bound a cycle at three
+// hosts × (3 s TCP + 5 s HTTP) = 24 s, and it leaves a stopped cycle without a final verdict — so the
+// round needs a ceiling of its own, or one unlucky press leaves the button saying "Проверка…" for the
+// rest of the session. One full budget plus room for the queued call to reach the worker.
+constexpr int kPingTestWatchdogMs = 26000;
+
 // The footer's standing line when nothing is being announced. The mock's "Updated every 5s".
 QString pingCadenceText(int seconds)
 {
@@ -575,6 +581,24 @@ QWidget *MainWindow::buildProfilesPage()
     title->setObjectName(QStringLiteral("pageTitle"));
     i18nText(title, QStringLiteral("nav.profiles"));
 
+    // The manual measurement, beside the name of the page it acts on. The rows below it carry numbers
+    // that only move while their own profile is running, so the page has to offer the one press that
+    // asks for all of them at once — and say, in its own label, that a round is already in flight.
+    m_pingTestWatchdog = new QTimer(this);
+    m_pingTestWatchdog->setSingleShot(true);
+    connect(m_pingTestWatchdog, &QTimer::timeout, this, &MainWindow::endPingTest);
+
+    m_pingTestButton = new QPushButton(QString(), page);
+    m_pingTestButton->setObjectName(QStringLiteral("ghostButton"));
+    m_pingTestButton->setProperty("glyph", QStringLiteral("ping-test"));
+    m_pingTestButton->setProperty("glyphPx", 16);
+    m_pingTestButton->setIcon(Theme::themedIcon(QStringLiteral("ping-test"), 16));
+    i18nText(m_pingTestButton, QStringLiteral("action.ping_test"));
+    i18nTip(m_pingTestButton, QStringLiteral("action.ping_test_tip"));
+    m_pingTestButton->setCursor(Qt::PointingHandCursor);
+    m_pingTestButton->setAutoDefault(false);
+    connect(m_pingTestButton, &QPushButton::clicked, this, &MainWindow::onPingTestRequested);
+
     auto *refresh = new QPushButton(QString(), page);
     refresh->setObjectName(QStringLiteral("ghostButton"));
     refresh->setProperty("glyph", QStringLiteral("refresh"));
@@ -596,6 +620,8 @@ QWidget *MainWindow::buildProfilesPage()
     head->addWidget(back);
     head->addSpacing(6);
     head->addWidget(title);
+    head->addSpacing(12);
+    head->addWidget(m_pingTestButton);
     head->addStretch(1);
     head->addWidget(refresh);
     head->addWidget(download);
@@ -1004,14 +1030,15 @@ void MainWindow::populateCards()
     m_cards.clear();
     m_errorCardId.clear();   // the new set of rows has not failed at anything yet
 
-    const QStringList hosts = PingService::defaultHosts();
+    const QStringList hosts = profilePingHosts();
     const QList<Strategy> list = m_manager->strategies();
     for (const Strategy &s : list) {
         auto *card = new ProfileCard(s, m_cardHost);
         const QString id = s.id.isEmpty() ? s.filePath : s.id;
-        // The chips are the same three services the dashboard rings, so a row says in one glance what the
-        // profile unblocks and how each of those is answering. Seeded from the last verdict we have, so a
-        // row built mid-cycle does not start every chip on grey and wait for the next tick to be useful.
+        // The chips are the services this row exists to unblock — the same hosts the dashboard's rings
+        // name, minus the baseline it probes and a profile has nothing to do with. Seeded from the last
+        // verdict we hold, so a row built mid-cycle does not start every chip on grey and wait for the
+        // next tick to be useful.
         card->setHosts(hosts);
         for (const QString &host : hosts) {
             auto it = m_lastPing.constFind(host);
@@ -1148,6 +1175,29 @@ QString MainWindow::blockedReason(IZapretBackend::State state)
         break;
     }
     return QString();
+}
+
+// The services a profile row carries a chip for. The dashboard probes one more — a baseline that
+// answers whether or not zapret is running, which is exactly what makes its badge a statement about the
+// path rather than about a strategy. On a row that number would be a claim the profile never made, so
+// the rows keep the services an entry exists to unblock. Filtering the probed list rather than naming a
+// pair is the point: a chip for a host nobody measures is the one dishonest number the page could show.
+QStringList MainWindow::profilePingHosts()
+{
+    QStringList hosts = PingService::defaultHosts();
+    hosts.removeAll(QStringLiteral("google.com"));
+    return hosts;
+}
+
+bool MainWindow::rowFollowsCycle(bool manualRound, bool rowIsActive)
+{
+    // The running profile's row is being measured by this very cycle. An idle row is not: the path it
+    // would have opened is closed, so any number arriving for it belongs to somebody else's run — and a
+    // row whose figures move while it does nothing is how a list of profiles starts lying. The manual
+    // round is the exception the page's own button asks for: every row is then being measured at once.
+    if (manualRound)
+        return true;
+    return rowIsActive;
 }
 
 void MainWindow::updateStatusUi()
@@ -1579,8 +1629,7 @@ void MainWindow::onPingUpdated(const QString &host, int status, int latencyMs)
     const PingIndicator::PingStatus ps = PingIndicator::statusFromServiceInt(status);
 
     // Remember the verdict so a profile row built later in this cycle can be seeded with the live number
-    // instead of grey (populateCards reads m_lastPing), then push it to the dashboard ring and to every
-    // row that carries a chip for this host. One probe, three places told, all from the same value.
+    // instead of grey (populateCards reads m_lastPing), then push it to the dashboard ring.
     PingMemo memo;
     memo.status = ps;
     memo.latencyMs = latencyMs;
@@ -1588,8 +1637,72 @@ void MainWindow::onPingUpdated(const QString &host, int status, int latencyMs)
 
     if (auto it = m_indicators.constFind(host); it != m_indicators.constEnd())
         it.value()->setStatus(ps, latencyMs);
+
+    // The rows are the part that has to be chosen rather than broadcast. This cycle measures the path
+    // the running profile opened, so only that row may take the number; every other row keeps the last
+    // verdict it was given, which is what its chips are for when nothing is running at all. During a
+    // manual round the window has asked for everybody, so everybody is served.
+    const QString runningId = m_manager->activeStrategyId();
+    for (auto it = m_cards.constBegin(); it != m_cards.constEnd(); ++it)
+        if (rowFollowsCycle(m_pingTestActive, it.key() == runningId))
+            it.value()->setPing(host, ps, latencyMs);
+
+    // The round is over when every probed host has answered once. Only a verdict counts: the service
+    // announces "measuring" before each probe, and treating that as an answer would end the round the
+    // moment the first host started rather than after the last one finished.
+    if (!m_pingTestActive || ps == PingIndicator::PingStatus::Waiting)
+        return;
+    m_pingTestPending.remove(host);
+    if (m_pingTestPending.isEmpty())
+        endPingTest();
+}
+
+// One cycle, asked for by hand, handed to every row. The periodic cycle is untouched — the service runs
+// this one on the same worker between beats — so pressing the button measures now without changing how
+// often the dashboard moves.
+void MainWindow::onPingTestRequested()
+{
+    if (m_pingTestActive)
+        return;   // already measuring; the button says so
+    beginPingTest();
+    m_ping->pingNow();
+}
+
+void MainWindow::beginPingTest()
+{
+    m_pingTestActive = true;
+    const QStringList probed = m_ping->hosts();
+    m_pingTestPending = QSet<QString>(probed.cbegin(), probed.cend());
+    m_pingTestWatchdog->start(kPingTestWatchdogMs);
+
+    // Say "measuring" on every row immediately, not only on the one that is running: the press has to
+    // answer in the same frame, and a chip that keeps an old figure until its probe completes is
+    // indistinguishable from a button that did nothing.
+    const QStringList hosts = profilePingHosts();
     for (ProfileCard *card : std::as_const(m_cards))
-        card->setPing(host, ps, latencyMs);
+        for (const QString &host : hosts)
+            card->setPing(host, PingIndicator::PingStatus::Waiting, -1);
+
+    // The button carries the round's own wording, and it is the wording that says the press worked — so
+    // it is swapped through the i18n key rather than through a literal, and a language change mid-round
+    // re-says the same state instead of falling back to the idle label. It also stops answering presses:
+    // a second one would be refused outright, and a control that refuses silently looks broken.
+    if (m_pingTestButton) {
+        m_pingTestButton->setEnabled(false);
+        i18nText(m_pingTestButton, QStringLiteral("action.ping_checking"));
+    }
+}
+
+void MainWindow::endPingTest()
+{
+    m_pingTestActive = false;
+    m_pingTestPending.clear();
+    if (m_pingTestWatchdog)
+        m_pingTestWatchdog->stop();
+    if (m_pingTestButton) {
+        m_pingTestButton->setEnabled(true);
+        i18nText(m_pingTestButton, QStringLiteral("action.ping_test"));
+    }
 }
 
 void MainWindow::onStrategiesLoaded(int count)

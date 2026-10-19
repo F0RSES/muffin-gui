@@ -784,6 +784,29 @@ static void testWindowPolicy()
           "and a failure that belongs to no run badges nothing rather than something stale");
     check(MainWindow::errorTargetId(pend, QString(), QString()) == pend,
           "an empty fallback chain never outranks the pending start");
+
+    // ---- which rows a ping verdict may reach ----
+    // The rows are not a second copy of the dashboard: a cycle measures the path the running profile
+    // opened, so an idle row must keep its last verdict rather than borrow somebody else's. The manual
+    // round is the one press that measures every row at once, and the predicate is the whole rule.
+    check(MainWindow::profilePingHosts().size() == 2,
+          "a row carries a chip for the services it exists to unblock");
+    check(MainWindow::profilePingHosts().contains(QLatin1String("youtube.com"))
+              && MainWindow::profilePingHosts().contains(QLatin1String("discord.com")),
+          "and those chips are the two the profile is used for");
+    check(!MainWindow::profilePingHosts().contains(QLatin1String("google.com")),
+          "the dashboard's baseline host is not a claim about a profile");
+    check(MainWindow::profilePingHosts().size() < PingService::defaultHosts().size(),
+          "the rows probe a subset of what the badges do, never more");
+
+    check(!MainWindow::rowFollowsCycle(false, false),
+          "an idle row does not follow the cycle of a run that is not its own");
+    check(MainWindow::rowFollowsCycle(false, true),
+          "the running profile's row follows every cycle");
+    check(MainWindow::rowFollowsCycle(true, false),
+          "a manual round reaches the rows that are not running");
+    check(MainWindow::rowFollowsCycle(true, true),
+          "and the one that is");
 }
 
 // ------------------------------------------------------------ LanguageManager ----

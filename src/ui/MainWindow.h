@@ -7,7 +7,9 @@
 #include <QHash>
 #include <QMainWindow>
 #include <QPoint>
+#include <QSet>
 #include <QString>
+#include <QStringList>
 
 class QAction;
 class QCloseEvent;
@@ -104,6 +106,25 @@ public:
     static QString errorTargetId(const QString &pendingStartId, const QString &activeId,
                                  const QString &lastRunId);
 
+    // ---- the ping cadence each row is allowed to follow ----------------------------------------
+    //
+    // The dashboard's badges and the rows' chips answer to different claims, so they are driven
+    // differently. The badges say "this is how the path answers right now" — that is true on every
+    // cycle, so they follow all of them. A row says "this is how the services this profile exists to
+    // unblock are answering", which is only true while that profile is the one running: an idle entry
+    // has nothing in the path to measure. An idle row therefore keeps the last verdict it was given
+    // instead of quietly re-using the running profile's numbers, and the one moment every row may move
+    // at once is the manual round the profiles page asks for.
+    //
+    // Both halves are pure so the whole rule is checkable without a backend, a network or a window.
+    //
+    // The hosts a row carries a chip for: the services zapret is used to unblock. The dashboard probes
+    // one more — a baseline that answers with or without any strategy — and that number belongs to the
+    // baseline reading, not to a claim about this profile.
+    static QStringList profilePingHosts();
+    // Whether a verdict from the service may repaint this row.
+    static bool rowFollowsCycle(bool manualRound, bool rowIsActive);
+
     // Accessors used by tests and by nothing else in the app.
     ZapretManager *manager() const { return m_manager; }
     LogPanel *logPanel() const { return m_log; }
@@ -170,6 +191,10 @@ private slots:
     void onLogMessage(const QString &line, int level);
     void onErrorOccurred(const QString &message);
     void onPingUpdated(const QString &host, int status, int latencyMs);
+    // The profiles page's "Тест пинга". One round of the service's own cycle, handed to every row
+    // rather than only to the running one — the answer to "the numbers on the rows I am not running are
+    // the last thing they said, and I want to know what they say now".
+    void onPingTestRequested();
     void onSettingsChanged();
     void onStrategiesLoaded(int count);
     // A download finished and validated: persist the path and rescan.
@@ -220,6 +245,13 @@ private:
     void wire();
 
     void populateCards();
+    // Open and close the manual ping round: the button's own wording is the only place the state is
+    // visible, so both halves go through here and the round cannot be left running by an early return.
+    // The watchdog is not pessimism: the service bails out of a cycle without a word when it is
+    // stopped, and a button stuck on "Проверка…" would be the window lying about a measurement that
+    // already ended.
+    void beginPingTest();
+    void endPingTest();
     void updateStatusUi();
     void updateTrayIcon();
     void applyTheme();
@@ -290,6 +322,15 @@ private:
     // number instead of grey. Doubles as the source for the dashboard rings on a re-theme.
     struct PingMemo { PingIndicator::PingStatus status = PingIndicator::PingStatus::Unknown; int latencyMs = -1; };
     QHash<QString, PingMemo> m_lastPing;
+    // ---- the manual ping round ---------------------------------------------------------------
+    // A press of the profiles page's "Тест пинга" asks the service for one cycle and lets every row
+    // take it, active or not. The round is over when every host the service probes has answered —
+    // seeded from that list rather than from the two a row shows, because the dashboard's baseline
+    // badge is measured by the same cycle and finishing early would leave it mid-probe.
+    bool m_pingTestActive = false;
+    QSet<QString> m_pingTestPending;
+    QTimer *m_pingTestWatchdog = nullptr;   // ends the round if the service never answers at all
+    QPushButton *m_pingTestButton = nullptr;
     // The profile the power button will run — read at start, written on every row press, and persisted
     // through Settings under lastStrategyId so it survives a restart. Empty means "nothing chosen yet",
     // which the power button answers by opening the profiles page.

@@ -119,6 +119,10 @@ const QVector<Row> &catalog()
             "GitHub से नवीनतम zapret संस्करण लाएँ"),
         ROW("action.ping_test", "Тест пинга", "Ping test", "Prueba de ping", "Ping-Test",
             "Ping 测试", "Test de ping", "पिंग परीक्षण"),
+        // The same button while its round is in flight. Wording it as a state rather than as a disabled
+        // control is what lets the row of cards answer the press visibly.
+        ROW("action.ping_checking", "Проверка…", "Checking…", "Comprobando…", "Prüfung läuft…",
+            "检测中…", "Vérification…", "जाँच हो रही है…"),
         ROW("action.ping_test_tip",
             "Измерить доступность сервисов прямо сейчас",
             "Measure the services' reachability right now",
