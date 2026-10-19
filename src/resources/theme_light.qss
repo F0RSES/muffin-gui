@@ -3,8 +3,8 @@
 
    Tokens (mirrored by Theme.cpp::tokensFor(false) — change both, they are one palette):
      bg #F3F4F6   rail #E5E7EB   surface #FFFFFF   recessed #F9FAFB
-     hairline #D1D5DB   control border #9CA3AF   text #1F2937   muted #6B7280
-     accent #7C3AED (hover #8B5CF6, pressed #6D28D9, soft fill #EDE9FE, soft edge #DDD6FE)
+     hairline #D1D5DB   control border #9CA3AF   text #1F2937   muted #6B7280   quiet text #4B5563
+     accent #7C3AED (hover #8B5CF6, pressed #6D28D9, soft fill #EDE9FE, selected fill #F3E8FF, soft edge #DDD6FE)
      accent2 #0891B2   ok #059669   err #DC2626   warn #D97706
      the live green #10B981 and the badge grey #9CA3AF are painted tokens shared with the dark sheet
 
@@ -68,7 +68,7 @@ QToolButton#langButton:focus { outline: none; border-color: #DDD6FE; }
 
 QLabel#railVersion {
     background-color: transparent;
-    color: #9CA3AF; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
+    color: #4B5563; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
 }
 
 /* ---------- window chrome (frameless) ----------------------------------------
@@ -105,20 +105,20 @@ QLabel#statusText {
     background-color: transparent;
     color: #10B981; font-size: 12px; font-weight: 600; letter-spacing: 1px;
 }
-QLabel#statusText[statusKind="stopped"]  { color: #9CA3AF; }
+QLabel#statusText[statusKind="stopped"]  { color: #6B7280; }
 QLabel#statusText[statusKind="starting"] { color: #D97706; }
 QLabel#statusText[statusKind="running"]  { color: #059669; }
 QLabel#statusText[statusKind="error"]    { color: #DC2626; }
 
 QPushButton#ghostButton {
-    background-color: transparent; color: #6B7280;
-    border: 1px solid #D1D5DB; border-radius: 10px;
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #9CA3AF; border-radius: 10px;
     padding: 6px 12px; font-size: 10pt; font-weight: 500;
 }
-QPushButton#ghostButton:hover { background-color: #E5E7EB; border-color: #9CA3AF; color: #1F2937; }
+QPushButton#ghostButton:hover { background-color: #F9FAFB; border-color: #7C3AED; color: #1F2937; }
 QPushButton#ghostButton:pressed { background-color: #E5E7EB; }
-QPushButton#ghostButton:focus { outline: none; }
-QPushButton#ghostButton:disabled { color: #9CA3AF; border-color: #E5E7EB; }
+QPushButton#ghostButton:focus { outline: none; border-color: #7C3AED; }
+QPushButton#ghostButton:disabled { color: #9CA3AF; background-color: #E5E7EB; border-color: #E5E7EB; }
 
 /* ---------- pages ---------- */
 QStackedWidget#pageStack { background-color: #F3F4F6; }
@@ -144,8 +144,9 @@ QFrame#profileCard {
 QFrame#profileCard:hover { background-color: #F9FAFB; border-color: #9CA3AF; }
 QFrame#profileCard[selected="true"] {
     border: 2px solid #7C3AED;
-    background-color: #EDE9FE;
+    background-color: #F3E8FF;
 }
+QFrame#profileCard[selected="true"]:hover { background-color: #EDE9FE; border-color: #7C3AED; }
 QFrame#profileCard[error="true"] {
     border: 2px solid #DC2626;
     background-color: #FDF2F2;
@@ -167,10 +168,10 @@ QWidget#miniPing[pingStatus="waiting"] { border-color: #D97706; }
 QWidget#miniPing[pingStatus="fail"]    { border-color: #DC2626; }
 QLabel#miniPingIcon { background-color: transparent; }
 QLabel#miniPingValue {
-    background-color: transparent; color: #6B7280; font-size: 11px; font-weight: 600;
+    background-color: transparent; color: #4B5563; font-size: 11px; font-weight: 600;
 }
-QLabel#muted     { color: #6B7280; }
-QLabel#placeholder { color: #9CA3AF; font-size: 11pt; }
+QLabel#muted     { color: #4B5563; }
+QLabel#placeholder { color: #6B7280; font-size: 11pt; }
 
 /* The row's menu button: a 30x30 plate holding the three-dot glyph, quiet until the pointer arrives. */
 QToolButton#cardMenu {
@@ -246,7 +247,7 @@ QCheckBox::indicator:checked { background-color: #7C3AED; border-color: #7C3AED;
 
 QPlainTextEdit#logView {
     background-color: #FFFFFF; color: #1F2937;
-    border: 1px solid #D1D5DB; border-radius: 10px;
+    border: 1px solid #9CA3AF; border-radius: 10px;
     font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
     font-size: 9pt; padding: 6px;
 }
@@ -265,10 +266,10 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 /* ---------- footer + ping badges ---------- */
 QFrame#footerBar { background-color: #F3F4F6; border-top: 1px solid #D1D5DB; }
-QLabel#footerHint { background-color: transparent; color: #9CA3AF; font-size: 11px; }
+QLabel#footerHint { background-color: transparent; color: #4B5563; font-size: 11px; }
 QLabel#pingNumber { background-color: transparent; color: #1F2937; font-size: 12px; font-weight: 700; }
 QLabel#pingClock  { background-color: transparent; }
-QLabel#pingLabel  { background-color: transparent; color: #9CA3AF; font-size: 10px; }
+QLabel#pingLabel  { background-color: transparent; color: #4B5563; font-size: 10px; }
 
 QMenu {
     background-color: #FFFFFF; color: #1F2937;
