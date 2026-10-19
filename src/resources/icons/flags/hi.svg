@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- India: saffron / white / green with the navy chakra ring in the middle band. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 16" width="22" height="16">
+  <defs><clipPath id="c"><rect width="22" height="16" rx="2.5"/></clipPath></defs>
+  <g clip-path="url(#c)">
+    <rect width="22" height="5.34" fill="#F0883B"/>
+    <rect y="5.33" width="22" height="5.34" fill="#F8F9FB"/>
+    <rect y="10.66" width="22" height="5.34" fill="#13853A"/>
+    <circle cx="11" cy="8" r="2.1" fill="none" stroke="#1A3E8C" stroke-width="0.8"/>
+  </g>
+  <rect x="0.5" y="0.5" width="21" height="15" rx="2.2" fill="none" stroke="#2A2E39" stroke-opacity="0.55"/>
+</svg>

@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "LanguageManager.h"
 #include "Settings.h"
 #include "Theme.h"
 
@@ -40,8 +41,16 @@ int main(int argc, char **argv)
     // place before the first widget is polished.
     zapret::Settings settings;
     zapret::Theme::apply(app, zapret::Theme::modeFromName(settings.theme()));
-    QApplication::setWindowIcon(
-        zapret::Theme::icon(QStringLiteral("app"), zapret::Theme::accent(), 32));
+    // Language next: MainWindow builds its whole chrome from LanguageManager::tr(), so the stored
+    // locale has to be installed before the first widget exists — a later setCode() would only be a
+    // retranslate of text that was already written in the wrong language.
+    zapret::LanguageManager::instance().setCode(settings.language());
+
+    // No QApplication::setWindowIcon() on purpose. QWidget::windowIcon() falls back to the application
+    // icon whenever the widget's own icon is null, and the main window's title bar is deliberately
+    // empty — setting an app-wide icon here would bring the muffin back through that fallback. The
+    // brand still lives where the design puts it (the rail logo, the tray, and the packaged
+    // share/icons/hicolor/…/muffin.svg that the desktop entry names).
 
     zapret::MainWindow window;
     window.show();

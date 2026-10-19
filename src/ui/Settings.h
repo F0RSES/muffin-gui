@@ -64,6 +64,12 @@ public:
     QString theme() const;               // "dark" | "light" | "system"
     void setTheme(const QString &name);
 
+    // The UI language: a LanguageManager code ("ru", "en", "es", "de", "zh", "fr", "hi"). Unset
+    // resolves to "ru", the language every screen was drawn and tested in, so a first run and a
+    // headless test agree on what the chrome says.
+    QString language() const;
+    void setLanguage(const QString &code);
+
     QString filePath() const;
     void sync();
 

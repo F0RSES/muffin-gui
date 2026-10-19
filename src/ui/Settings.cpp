@@ -18,6 +18,7 @@ const QString kStartLastOnLaunch = QStringLiteral("startup/startLast");
 const QString kMinimizeToTray    = QStringLiteral("ui/minimizeToTray");
 const QString kPingIntervalSec   = QStringLiteral("ping/intervalSec");
 const QString kTheme             = QStringLiteral("ui/theme");
+const QString kLanguage          = QStringLiteral("ui/language");
 
 constexpr int kPingIntervalDefault = 5;
 constexpr int kPingIntervalMin     = 3;
@@ -168,6 +169,9 @@ void Settings::setPingIntervalSec(int seconds)
 
 QString Settings::theme() const { return read<QString>(kTheme, QStringLiteral("dark")); }
 void Settings::setTheme(const QString &name) { write(kTheme, name); }
+
+QString Settings::language() const { return read<QString>(kLanguage, QStringLiteral("ru")); }
+void Settings::setLanguage(const QString &code) { write(kLanguage, code); }
 
 QString Settings::filePath() const { return m_settings->fileName(); }
 void Settings::sync() { m_settings->sync(); }

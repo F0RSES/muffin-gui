@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rail "Стратегии": two stacked cards, each with its own title rule. The catalog is the one page the
+     rail used to reach through the dashboard's route pill; when the pill went away the entry point had
+     to become a glyph like the other two. Monochrome currentColor + declared 24 px box — see app.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3.7" y="4.4" width="16.6" height="6.2" rx="1.6"/>
+    <path d="M6.9 7.5h4.6"/>
+    <rect x="3.7" y="13.4" width="16.6" height="6.2" rx="1.6"/>
+    <path d="M6.9 16.5h4.6"/>
+</svg>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- China: red field with the single large gold star of the five. A 22 px glyph cannot carry the four
+     small stars and their orientation, and a scattered approximation reads as noise, so only the
+     dominant star is drawn. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 16" width="22" height="16">
+  <defs><clipPath id="c"><rect width="22" height="16" rx="2.5"/></clipPath></defs>
+  <g clip-path="url(#c)">
+    <rect width="22" height="16" fill="#D52B1E"/>
+    <polygon points="5.5,1.8 6.32,4.07 8.73,4.15 6.83,5.63 7.5,7.95 5.5,6.6 3.5,7.95 4.17,5.63 2.27,4.15 4.68,4.07" fill="#FFDE00"/>
+  </g>
+  <rect x="0.5" y="0.5" width="21" height="15" rx="2.2" fill="none" stroke="#2A2E39" stroke-opacity="0.55"/>
+</svg>

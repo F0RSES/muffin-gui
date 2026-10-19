@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- English: stars-and-stripes, simplified to bands a 22 px glyph can still show. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 16" width="22" height="16">
+  <defs><clipPath id="c"><rect width="22" height="16" rx="2.5"/></clipPath></defs>
+  <g clip-path="url(#c)">
+    <rect width="22" height="16" fill="#F4F5F7"/>
+    <rect y="1" width="22" height="1.8" fill="#D52B1E"/>
+    <rect y="5" width="22" height="1.8" fill="#D52B1E"/>
+    <rect y="9" width="22" height="1.8" fill="#D52B1E"/>
+    <rect y="13" width="22" height="1.8" fill="#D52B1E"/>
+    <rect width="10" height="8.2" fill="#1A3E8C"/>
+    <g fill="#F4F5F7"><circle cx="2" cy="2" r="0.7"/><circle cx="5" cy="2" r="0.7"/><circle cx="8" cy="2" r="0.7"/><circle cx="3.5" cy="4.1" r="0.7"/><circle cx="6.5" cy="4.1" r="0.7"/><circle cx="2" cy="6.2" r="0.7"/><circle cx="5" cy="6.2" r="0.7"/><circle cx="8" cy="6.2" r="0.7"/></g>
+  </g>
+  <rect x="0.5" y="0.5" width="21" height="15" rx="2.2" fill="none" stroke="#2A2E39" stroke-opacity="0.55"/>
+</svg>

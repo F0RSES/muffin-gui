@@ -24,6 +24,14 @@
         <file>icons/globe.svg</file>
         <file>icons/youtube.svg</file>
         <file>icons/discord.svg</file>
+        <file>icons/cards.svg</file>
+        <file>icons/flags/ru.svg</file>
+        <file>icons/flags/en.svg</file>
+        <file>icons/flags/es.svg</file>
+        <file>icons/flags/de.svg</file>
+        <file>icons/flags/zh.svg</file>
+        <file>icons/flags/fr.svg</file>
+        <file>icons/flags/hi.svg</file>
 
     </qresource>
 </RCC>

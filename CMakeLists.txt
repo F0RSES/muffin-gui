@@ -101,6 +101,7 @@ endif()
 # ---- the GUI ----------------------------------------------------------------
 set(ZAPRET_UI_SOURCES
     src/ui/Theme.cpp
+    src/ui/LanguageManager.cpp
     src/ui/Settings.cpp
     src/ui/PingIndicator.cpp
     src/ui/PowerButton.cpp
@@ -115,6 +116,7 @@ set(ZAPRET_UI_SOURCES
 # only translation units that include them.
 set(ZAPRET_UI_HEADERS
     src/ui/Theme.h
+    src/ui/LanguageManager.h
     src/ui/Settings.h
     src/ui/PingIndicator.h
     src/ui/PowerButton.h
@@ -191,8 +193,12 @@ install(TARGETS Muffin RUNTIME DESTINATION bin)
 # Windows would put a stray share/ next to Muffin.exe for Inno Setup to trip over.
 #
 # packaging/muffin.svg rather than src/resources/icons/app.svg: the in-app copy is a currentColor
-# glyph that Theme::icon() recolours, which only works because Qt parses it — the desktop environment
-# would get an unpainted shape. It is installed as muffin.svg to match the Icon= key of the entry.
+# glyph that Theme::icon() recolours, which only works because Qt parses it — a hicolor icon is read by
+# the desktop environment's own SVG loader, which has no recolouring step, so installing app.svg under
+# the name "muffin" would put an unpainted (or theme-tinted) outline in the launcher. The packaged copy
+# carries the same artwork with explicit paints, and it is installed under the name the .desktop entry's
+# Icon=muffin key resolves to. Verified with `DESTDIR=/tmp/stage cmake --install build`: the two files
+# land as share/icons/hicolor/scalable/apps/muffin.svg and share/applications/muffin.desktop.
 if (UNIX AND NOT APPLE)
     install(FILES packaging/muffin.svg
             DESTINATION share/icons/hicolor/scalable/apps RENAME muffin.svg)
