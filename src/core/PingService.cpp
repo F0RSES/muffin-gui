@@ -9,6 +9,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QTcpSocket>
 #include <QThread>
 #include <QTimer>
@@ -225,7 +226,9 @@ bool PingService::probeHttp(const QString &host, int *latencyMs)
 
     QElapsedTimer clock;
     clock.start();
-    QNetworkReply *reply = m_nam->head(req);
+    // QPointer, not a raw one: the nested loop below can destroy this reply out from under us —
+    // see the check after exec().
+    QPointer<QNetworkReply> reply{m_nam->head(req)};
     if (!reply)
         return false;
 
@@ -243,6 +246,12 @@ bool PingService::probeHttp(const QString &host, int *latencyMs)
     loop.exec();
     poller.stop();
 
+    // loop.exec() drains posted events, and one of them may be shutdownWorker(): it deletes m_nam,
+    // which owns this reply, so by the time the nested loop returns the reply can already be gone.
+    // Nothing below may touch it unchecked.
+    if (!reply)
+        return false;
+
     // Any HTTP status line at all means TCP+TLS succeeded, which is what the indicator claims; a
     // 403/404 is as good a sign of reachability as 200.
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -254,7 +263,7 @@ bool PingService::probeHttp(const QString &host, int *latencyMs)
     // The finished emission has fully unwound by the time exec() returns, so the reply can go now
     // (the worker thread may be about to stop, and deleteLater would then never run).
     reply->abort();
-    delete reply;
+    delete reply.data();
     return reachable;
 }
 
