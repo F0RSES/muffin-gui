@@ -12,7 +12,7 @@ namespace zapret {
 // Typed view over QSettings for everything the GUI persists.
 //
 // The wrapper exists so no widget ever spells a key name or a default twice: readers get sane
-// defaults, writers emit changed() so open windows (MainWindow, SettingsDialog, tray) can react in
+// defaults, writers emit changed() so open views (MainWindow, SettingsPage, tray) can react in
 // one place.
 //
 // The application-wide store uses Qt's NATIVE format for the platform — QSettings::setDefaultFormat()

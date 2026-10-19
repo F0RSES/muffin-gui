@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The reachability pulse: a flatline that breaks into one beat. Reads as "measure the path" next to
+     the plain circular-arrow refresh glyph beside it. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.6 12.6h3.1l2.2-6.4 3.6 12.0 2.2-5.6h1.6"/>
+    <path d="M18.4 12.6h3.0"/>
+</svg>

@@ -89,8 +89,8 @@ bool pathUnder(const QString &path, const QString &prefix)
 // identity resolves to, keeping any child segment the path had.
 //
 // Anything that is not under the legacy directory comes back byte-for-byte unchanged: the stored root
-// is also whatever the user picked in SettingsDialog (~/Documents/zapret, /opt/zapret, a linux/ child
-// of some other unpack), and those folders were never moved by this migration. Rewriting one of them
+// is also whatever the user picked on the settings page (~/Documents/zapret, /opt/zapret, a linux/
+// child of some other unpack), and those folders were never moved by this migration. Rewriting one of them
 // would send the GUI looking for a tree that is not there, which is worse than the stale path it
 // replaced.
 QString rebaseManagedPath(const QString &stored, const QString &legacyDir, const QString &managedDir)

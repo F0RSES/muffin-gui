@@ -1,10 +1,12 @@
 #pragma once
 
 #include "IZapretBackend.h"
+#include "PingIndicator.h"   // PingStatus is stored per host for seeding new rows mid-cycle
 
 #include <QElapsedTimer>
 #include <QHash>
 #include <QMainWindow>
+#include <QPoint>
 #include <QString>
 
 class QAction;
@@ -13,6 +15,7 @@ class QFrame;
 class QHBoxLayout;
 class QLabel;
 class QMenu;
+class QMouseEvent;
 class QPushButton;
 class QScrollArea;
 class QStackedWidget;
@@ -28,23 +31,26 @@ class LogPanel;
 class PingIndicator;
 class PingService;
 class PowerButton;
+class ProfileCard;
 class Settings;
-class StrategyCard;
+class SettingsPage;
 class ZapretManager;
 
 // The application window: a narrow icon rail down the left, one full-width page at a time to its right,
 // everything driven through ZapretManager + Settings.
 //
-// The rail is 70 px of glyphs only — brand at the top, the journal in the middle, settings and the
-// version at the foot. The page beside it is the dashboard: a header naming the app and its connection
-// state, one enormous power button that starts and stops the strategy, and a row of neon ping badges.
-// Strategy cards are not a page you navigate to so much as a choice you make from the dashboard's
-// "route" pill, because picking the route and running it are one decision, not two screens.
+// The rail is 70 px of glyphs only — brand at the top, the profiles and the journal in the middle, the
+// settings glyph and the version at the foot. The page beside it is the dashboard: a header naming the
+// app and its connection state, one enormous power button that starts and stops the chosen profile, and a
+// row of neon ping badges. Profile rows are the list you pick from — one row per strategy, each carrying
+// the services it exists to unblock and a menu for the two things that act on the entry itself — and
+// starting is the dashboard's job alone, so a row never carries a second power button.
 //
-// It owns no domain logic. Cards come from the manager's catalog (which is the parser's output), the
+// It owns no domain logic. Rows come from the manager's catalog (which is the parser's output), the
 // start/stop path is the manager's, and persisted values are Settings'. What lives here is only
-// presentation state: which card is flagged active, what the title says, whether closing hides to the
-// tray, and which page the rail is showing.
+// presentation state: which row is selected, what the title says, whether closing hides to the tray, and
+// which page the rail is showing. The window is frameless, so the header's two chrome buttons and the
+// drag that starts on the header are drawn and driven here too.
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -112,14 +118,17 @@ public:
     // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
     // one without walking the widget tree.
     //
-    // PageStrategies is not reachable from the rail: the rail is three glyphs and the mock has no room
-    // for a fourth. It opens from the dashboard's route pill, which is where the choice belongs — you
-    // pick a strategy in order to run it.
+    // PageProfiles is not reachable from the rail as its own glyph: the rail is three glyphs and the
+    // mock has no room for a fourth. It opens from the dashboard's route pill, which is where the choice
+    // belongs — you pick a profile in order to run it. PageSettings, by contrast, IS a rail glyph: the
+    // settings sheet became a page in this same stack so that the rail's settings icon navigates rather
+    // than popping a modal, which is the whole argument of the rail.
     enum Page : int
     {
         PageDashboard  = 0,
-        PageStrategies = 1,
-        PageLogs       = 2
+        PageProfiles   = 1,
+        PageLogs       = 2,
+        PageSettings   = 3
     };
     int currentPage() const;
     void setCurrentPage(int page);
@@ -131,18 +140,26 @@ public:
     bool logAlertActive() const;
 
     void refreshStrategies();
+    // The rail's settings glyph and Ctrl+S both route here. Since SettingsDialog became SettingsPage the
+    // method only switches the stack to the settings page; it no longer pops a modal. Kept as a named
+    // slot (rather than a bare setCurrentPage call at each site) so the language-neutral entry point stays
+    // one place and the startup "no strategies yet" prompt has something to defer to.
     void openSettings();
     // Fetch the newest release for this platform, install it into the managed directory, and point the
-    // application at it. Reached from the toolbar, from SettingsDialog and from the "no strategies"
+    // application at it. Reached from the toolbar, from SettingsPage and from the "no strategies"
     // placeholder — three entrances, one implementation, because a download that behaves differently
     // depending on which button opened it is the kind of bug nobody notices until an install fails.
     void downloadZapret();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    // The window is frameless (see the constructor), so its own header is the only thing to grab: a press
+    // there drags the whole window. A press anywhere else falls through to the usual widget behaviour.
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 private slots:
-    void onStartRequested(const QString &id);
     void onStopRequested();
     // The power button: stop what is running, otherwise start what the route pill names. One slot for
     // both because the button is one control whose meaning the state decides.
@@ -157,6 +174,15 @@ private slots:
     void onStrategiesLoaded(int count);
     // A download finished and validated: persist the path and rescan.
     void zapretInstalled(const QString &path);
+    // A profile row was pressed. The window owns what selection means: it becomes the profile the power
+    // button will run, exactly as choosing it from the old per-card start button used to.
+    void onProfileSelected(const QString &id);
+    // The row's menu said "Скопировать". ProfileCard already put the command on the clipboard; this is
+    // the window's cue to say so in the footer, naming the profile that was copied.
+    void onProfileCopied(const QString &id);
+    // The row's menu said "Удалить": confirm, remove the file on disk, and rescan. A profile is a real
+    // file in the zapret folder, so this is destructive and asks first.
+    void onProfileDeleteRequested(const QString &id);
 
 private:
     void buildCentral();
@@ -167,16 +193,23 @@ private:
     QWidget *buildHeader();
     QWidget *buildFooter();
     QWidget *buildDashboardPage();
-    QWidget *buildStrategiesPage();
+    QWidget *buildProfilesPage();
     QWidget *buildLogsPage();
+    // The settings page, added to the same stack as the others. It owns its own widgets and reads/writes
+    // Settings directly, so this only constructs it once and remembers the pointer for retranslate/theme.
+    QWidget *buildSettingsPage();
     // One rail glyph. The name goes in a property so applyTheme() can re-tint it: Theme::icon() bakes the
     // colour into a pixmap, so a theme switch cannot repaint an already-loaded glyph.
     QPushButton *addRailButton(QVBoxLayout *box, const QString &glyph, const QString &textKey);
+    // A frameless-window control: 30x30, icon-only, tinted like a rail glyph so applyTheme() can re-bake
+    // it. `role` is "true" for the close button, which the sheet colours as the destructive one.
+    QToolButton *addWindowButton(QHBoxLayout *row, const QString &glyph, const QString &textKey,
+                                 const char *role);
     // The language picker's menu: one checkable action per catalog language, each tagged with its code.
     QMenu *buildLanguageMenu();
     // Turns the journal's tab red while it holds a warning or error the user has not opened. The
     // property is what the QSS [alert="true"] rule keys off, so it needs the same unpolish/polish
-    // dance StrategyCard uses for [active] and [error].
+    // dance ProfileCard uses for [selected] and [error].
     void setLogAlert(bool on);
     // The one line the header's chip is allowed to be built from: text plus colour from the state.
     void setConnectionChip(const QString &text, const QString &statusKind);
@@ -210,8 +243,8 @@ private:
     // re-reads the properties and re-applies the text in the language LanguageManager now holds, so
     // switching language is one call and one repaint — no restart, and no per-widget retranslate list
     // that a new button could silently be missing from. Because the walk starts here, it also reaches
-    // the dialogs built with this window as parent (SettingsDialog, DownloadDialog) and the cards,
-    // which are descendants too.
+    // the dialogs built with this window as parent (DownloadDialog) and the profile rows, which are
+    // descendants too.
     void retranslateUi();
     // The rail's language glyph is the current language's flag, and the menu ticks it: both follow the
     // code LanguageManager holds, whether it changed from the menu or from a settings write.
@@ -224,9 +257,12 @@ private:
 
     QWidget *m_sidebar = nullptr;          // the rail: brand, the journal glyph, settings and version
     QFrame *m_mainArea = nullptr;          // header, page stack, footer
-    QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageStrategies <-> PageLogs
+    QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageProfiles <-> PageLogs <-> PageSettings
     QPushButton *m_navLogs = nullptr;      // carries the [alert="true"] property
     QPushButton *m_navStrategies = nullptr;
+    QPushButton *m_navSettings = nullptr;  // the settings glyph; checked while PageSettings is up
+    QToolButton *m_minButton = nullptr;    // frameless-window chrome
+    QToolButton *m_closeButton = nullptr;
     QToolButton *m_langButton = nullptr;   // the current language's flag, opening the language menu
     PowerButton *m_power = nullptr;        // the dashboard's one control
     QWidget *m_statusDot = nullptr;        // the 6 px chip beside the connection text
@@ -235,10 +271,11 @@ private:
     QTimer *m_footerTimer = nullptr;       // for how long a transient message holds the footer
     QString m_footerIdleText;              // what the footer says when nothing is being announced
     QWidget *m_dashboardPage = nullptr;
-    QWidget *m_strategiesPage = nullptr;
+    QWidget *m_profilesPage = nullptr;
     QWidget *m_logsPage = nullptr;
+    SettingsPage *m_settingsPage = nullptr;
     QScrollArea *m_scroll = nullptr;
-    QStackedWidget *m_stack = nullptr;      // cards list <-> "no strategies found" placeholder
+    QStackedWidget *m_stack = nullptr;      // profiles list <-> "no strategies found" placeholder
     QWidget *m_cardHost = nullptr;
     QVBoxLayout *m_cardLayout = nullptr;
     QWidget *m_placeholder = nullptr;      // "no strategies found" page: the text plus its two ways out
@@ -247,8 +284,22 @@ private:
     QTimer *m_trayRetry = nullptr;           // the tray host can appear after we start
     int m_trayAttempts = 0;
 
-    QHash<QString, StrategyCard *> m_cards;                 // strategy id -> card
-    QHash<QString, PingIndicator *> m_indicators;           // host -> chip
+    QHash<QString, ProfileCard *> m_cards;                 // strategy id -> row
+    QHash<QString, PingIndicator *> m_indicators;          // host -> the dashboard's ring
+    // The last verdict per host, kept so a profile row built after the cycle started can show a real
+    // number instead of grey. Doubles as the source for the dashboard rings on a re-theme.
+    struct PingMemo { PingIndicator::PingStatus status = PingIndicator::PingStatus::Unknown; int latencyMs = -1; };
+    QHash<QString, PingMemo> m_lastPing;
+    // The profile the power button will run — read at start, written on every row press, and persisted
+    // through Settings under lastStrategyId so it survives a restart. Empty means "nothing chosen yet",
+    // which the power button answers by opening the profiles page.
+    QString m_selectedId;
+
+    // Frameless-window drag: while the pointer is down on the header this holds the offset from the
+    // window's top-left to the press point, so moving the pointer moves the window without a jump. A
+    // null offset means "not dragging"; the window is fixed-size, so nothing else moves it.
+    QPoint m_dragOffset;
+    bool m_dragging = false;
 
     bool m_quitting = false;          // explicit quit (tray menu / Ctrl+Q), bypasses hide-to-tray
     bool m_applyingSettings = false;  // re-entrancy guard for onSettingsChanged

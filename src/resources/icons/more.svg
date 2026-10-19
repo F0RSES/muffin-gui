@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The row menu's three dots. Filled rather than stroked: at 16 px a stroked circle loses its hole
+     and reads as a smudge. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor"
+     stroke="none">
+    <circle cx="5.5" cy="12" r="1.9"/>
+    <circle cx="12" cy="12" r="1.9"/>
+    <circle cx="18.5" cy="12" r="1.9"/>
+</svg>

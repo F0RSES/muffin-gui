@@ -25,6 +25,10 @@
         <file>icons/youtube.svg</file>
         <file>icons/discord.svg</file>
         <file>icons/cards.svg</file>
+        <file>icons/more.svg</file>
+        <file>icons/ping-test.svg</file>
+        <file>icons/window-close.svg</file>
+        <file>icons/window-minimize.svg</file>
         <file>icons/flags/ru.svg</file>
         <file>icons/flags/en.svg</file>
         <file>icons/flags/es.svg</file>

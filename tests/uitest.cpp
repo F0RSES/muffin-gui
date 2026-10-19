@@ -18,15 +18,16 @@
 #include "PingIndicator.h"
 #include "PingService.h"
 #include "PowerButton.h"
+#include "ProfileCard.h"
 #include "Settings.h"
-#include "SettingsDialog.h"
+#include "SettingsPage.h"
 #include "Strategy.h"
-#include "StrategyCard.h"
 #include "Theme.h"
 #include "ZapretDownloader.h"
 #include "ZapretPaths.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QColor>
 #include <QComboBox>
 #include <QDir>
@@ -34,6 +35,7 @@
 #include <QIcon>
 #include <QImage>
 #include <QLabel>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -46,6 +48,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QToolButton>
 #include <QVariant>
 
 #include <QtTest/QTest>
@@ -496,10 +499,15 @@ static void testPowerButton()
     check(button.diameter() == 48, "a zero diameter is clamped, not obeyed");
 }
 
-// ------------------------------------------------------------ StrategyCard ----
-static void testStrategyCard()
+// --------------------------------------------------------------- ProfileCard ----
+//
+// A profile row is a selection item, not a control: no start button, only the name, the mini ping chips
+// for the services it unblocks, and a menu (copy / delete). These checks pin that shape - the properties
+// the sheet styles off, the signals the window wires, and the tooltip that carries a failure's reason
+// now that a 52 px row has no room for a badge row of its own.
+static void testProfileCard()
 {
-    std::printf("\n[StrategyCard]\n");
+    std::printf("\n[ProfileCard]\n");
 
     Strategy s;
     s.id = QStringLiteral("gen-1");
@@ -513,119 +521,102 @@ static void testStrategyCard()
     s.argv = {QStringLiteral("--wf-tcp=80,443"), QStringLiteral("--new"), QStringLiteral("--dpi-desync=fake")};
     s.requiresRoot = true;
 
-    StrategyCard card(s);
-    check(card.objectName() == QLatin1String("strategyCard"), "objectName is strategyCard");
+    ProfileCard card(s);
+    check(card.objectName() == QLatin1String("profileCard"), "objectName is profileCard");
     check(card.id() == QLatin1String("gen-1"), "id comes from the strategy");
-    check(card.property("active").toBool() == false, "not active initially");
-    check(card.strategy().name == QLatin1String("general"), "card keeps its strategy");
+    check(card.property("selected").toBool() == false, "not selected initially");
+    check(card.property("error").toBool() == false, "not failed initially");
+    check(card.strategy().name == QLatin1String("general"), "row keeps its strategy");
+    check(card.nameLabel() && card.nameLabel()->text() == QLatin1String("general"),
+          "the name label shows the strategy's name");
 
     const QString cmd = card.commandLine();
     check(cmd.contains(QStringLiteral("winws.exe")), "command line names the program");
     check(cmd.contains(QStringLiteral("--wf-tcp=80,443")), "command line carries argv");
 
-    auto *button = card.findChild<QPushButton *>();
-    check(button != nullptr, "card has its action button");
-    if (!button)
-        return;
+    // ---- the row menu ----
+    // Two entries about the file on disk, and deliberately no start/stop: the power button owns running.
+    QToolButton *menuButton = card.menuButton();
+    check(menuButton != nullptr, "the row has a menu button");
+    check(menuButton && menuButton->menu() && menuButton->menu()->actions().size() == 2,
+          "the menu holds exactly copy and delete");
 
-    check(button->text() == QStringLiteral("Запустить"), "idle button says Запустить");
-    check(button->objectName() == QLatin1String("primaryButton"), "idle button is primary");
+    // ---- selection ----
+    QSignalSpy clickedSpy(&card, &ProfileCard::clicked);
+    QTest::mousePress(&card, Qt::LeftButton);
+    check(clickedSpy.count() == 1 && clickedSpy.at(0).at(0).toString() == QLatin1String("gen-1"),
+          "a left press emits clicked(id)");
+    card.setSelected(true);
+    check(card.isSelected(), "setSelected marks it selected");
+    check(card.property("selected").toBool() == true, "and the QSS property follows");
+    card.setSelected(true);   // idempotent
+    check(card.isSelected(), "re-selecting an already-selected row is a no-op");
+    card.setSelected(false);
+    check(!card.isSelected() && card.property("selected").toBool() == false,
+          "deselecting clears both");
 
-    QSignalSpy startSpy(&card, &StrategyCard::startRequested);
-    QSignalSpy stopSpy(&card, &StrategyCard::stopRequested);
+    // ---- the menu's own signals ----
+    QSignalSpy copySpy(&card, &ProfileCard::copyRequested);
+    QSignalSpy deleteSpy(&card, &ProfileCard::deleteRequested);
+    if (menuButton && menuButton->menu() && menuButton->menu()->actions().size() == 2) {
+        menuButton->menu()->actions().at(0)->trigger();   // copy
+        menuButton->menu()->actions().at(1)->trigger();   // delete
+        check(copySpy.count() == 1 && deleteSpy.count() == 1, "both menu entries fire once");
+        check(copySpy.at(0).at(0).toString() == QLatin1String("gen-1"), "copy carries the id");
+        check(QApplication::clipboard()->text() == cmd,
+              "copying already put the command on the clipboard");
+    } else {
+        check(false, "menu actions were reachable to trigger");
+    }
 
-    button->click();
-    check(startSpy.count() == 1 && stopSpy.count() == 0, "idle click requests a start");
-    check(startSpy.at(0).at(0).toString() == QLatin1String("gen-1"), "start carries the strategy id");
+    // ---- the mini ping chips ----
+    // One chip per probed host, in order. A chip for a service nobody measures would be the only dishonest
+    // number on the row, so the count must track setHosts exactly.
+    const QStringList hosts = {QStringLiteral("youtube.com"), QStringLiteral("discord.com")};
+    card.setHosts(hosts);
+    check(card.pingChipCount() == 2, "two hosts, two chips");
+    card.setHosts({QStringLiteral("youtube.com")});
+    check(card.pingChipCount() == 1, "a shorter host list rebuilds, not reconciles");
+    card.setHosts(hosts);
+    // An unknown host is ignored rather than guessed at; a known one updates without disturbing the other.
+    card.setPing(QStringLiteral("youtube.com"), PingIndicator::PingStatus::Ok, 42);
+    card.setPing(QStringLiteral("nobody.test"), PingIndicator::PingStatus::Ok, 1);
+    check(card.pingChipCount() == 2, "an unlisted host added no phantom chip");
 
-    card.setRunning(true);
-    check(card.property("active").toBool() == true, "running sets the active property");
-    check(button->text() == QStringLiteral("Остановить"), "running button says Остановить");
-    check(button->objectName() != QLatin1String("primaryButton"), "running button is not primary");
-    button->click();
-    check(stopSpy.count() == 1 && startSpy.count() == 1, "running click requests a stop");
-
-    card.setRunning(false);
-    check(card.property("active").toBool() == false, "stopping clears the active property");
-
-    // ---- the inline failure surface ----
-    // A backend error used to live only in the log and a modal; the card now carries it too. The row
-    // widget is what gets hidden, so visibility is asserted on it (a child of a hidden parent is not
-    // itself "hidden" in Qt's sense).
-    QWidget *badgeRow = card.findChild<QWidget *>(QStringLiteral("cardErrorRow"));
-    QLabel *badge = card.findChild<QLabel *>(QStringLiteral("cardError"));
-    check(badgeRow != nullptr && badge != nullptr, "the card owns an error badge row and label");
-    check(!card.hasError(), "a fresh card carries no failure");
-    check(card.property("error").toBool() == false, "the error property starts false");
-    check(badgeRow->isHidden(), "the badge row is hidden while nothing failed");
-
+    // ---- the failure surface ----
+    // No badge row any more: the edge turns red and the reason moves to the tooltip, so the tooltip is the
+    // assertion here - the whole reason, in order, after the path.
     const QString reason = QStringLiteral("LinuxBackend: start command failed (exit 1)");
     card.setError(reason);
-    check(card.hasError(), "setError marks the card as failed");
+    check(card.hasError(), "setError marks the row as failed");
     check(card.errorMessage() == reason, "the full reason is stored verbatim");
     check(card.property("error").toBool() == true, "the error property drives the QSS border");
-    check(!badgeRow->isHidden(), "the badge row becomes visible");
-    check(!badge->text().isEmpty(), "and shows the reason");
-    check(badge->toolTip() == reason, "the tooltip holds the un-elided reason");
-    check(badge->text().length() <= reason.length(), "the shown text is the reason or an elision of it");
-    check(button->text() == QStringLiteral("Повторить"), "the action after a failure is a retry");
-    check(button->objectName() == QLatin1String("primaryButton"), "a retry is still a primary action");
-    check(card.property("active").toBool() == false, "a failure is not marked active");
+    check(card.toolTip().contains(reason), "the tooltip carries the whole reason");
+    check(card.toolTip().contains(QStringLiteral("/general.bat")),
+          "and still names the file the row stands for");
 
+    // Empty (and whitespace-only) clear it, and re-reporting is idempotent.
     card.setError(QStringLiteral("   "));
     check(!card.hasError(), "a whitespace-only message means no failure");
-    check(button->text() == QStringLiteral("Запустить"), "and the button goes back to a plain start");
-
+    check(card.property("error").toBool() == false, "and clears the error property");
     card.setError(reason);
     card.setError(reason);
     check(card.errorMessage() == reason, "re-reporting the same failure is idempotent");
 
-    card.setRunning(true);
-    check(!card.hasError(), "a confirmed start clears the badge");
-    check(card.property("error").toBool() == false, "and the error property with it");
-    check(button->text() == QStringLiteral("Остановить"), "running still offers the stop action");
-    card.setRunning(false);
-    check(button->text() == QStringLiteral("Запустить"), "stopped again offers a start, not a stale retry");
-
-    // The elision is display-only: a long backend message must never be truncated in the model.
+    // A long backend message is never truncated in the model, and the tooltip can show all of it.
     const QString longReason = QStringLiteral(
-        "WindowsBackend: not elevated — relaunch the application as administrator to load the "
+        "WindowsBackend: not elevated - relaunch the application as administrator to load the "
         "WinDivert driver and then start this strategy again");
     card.setError(longReason);
     check(card.errorMessage() == longReason, "the model keeps the whole message");
-    check(badge->toolTip() == longReason, "the tooltip can show all of it");
-    card.clearError();
-    check(!card.hasError() && badgeRow->isHidden(), "clearError hides the badge row again");
+    check(card.toolTip().contains(longReason), "the tooltip can show all of it");
+    card.setError(QString());
+    check(!card.hasError(), "an empty message clears the failure");
 
-    // ---- action gating ----
-    // The window greys a card out while another operation is in flight. Three things have to hold: only
-    // availability changes (the card still offers the action it was offering), the reason rides on the
-    // control the user just reached for, and neither a relabel nor a failure badge can quietly bring the
-    // button back — a card that re-enables itself mid-teardown is the ten-second bug this exists to stop.
-    check(card.isActionEnabled(), "a card is not gated by default");
-    check(button->isEnabled(), "and its button starts live");
-
-    const QString busy = QStringLiteral("Идёт остановка — дождитесь её завершения.");
-    card.setActionEnabled(false, busy);
-    check(!button->isEnabled(), "the window can take the card's action away");
-    check(!card.isActionEnabled(), "and the card reports that it has");
-    check(button->toolTip() == busy, "a greyed button carries the reason");
-
-    card.setRunning(true);
-    check(button->text() == QStringLiteral("Остановить"), "gating leaves the label alone");
-    check(!button->isEnabled(), "becoming the active card does not un-gate it");
-
-    card.setRunning(false);
-    card.setError(reason);
-    check(button->text() == QStringLiteral("Повторить"), "and a failure badge still only relabels");
-    check(!button->isEnabled(), "without unlocking the retry");
-    check(button->toolTip() == busy, "and without dropping the reason");
-
-    card.clearError();
-    card.setActionEnabled(true);
-    check(button->isEnabled(), "the action returns when the operation resolves");
-    check(card.isActionEnabled(), "and the card knows it has");
-    check(button->toolTip().isEmpty(), "with the reason taken back off a live button");
+    // Retranslating and re-theming must not crash or drop state - both walk the chips and the menu.
+    card.retranslateText();
+    card.retheme();
+    check(card.nameLabel()->text() == QLatin1String("general"), "retranslate kept the name");
 }
 
 // ------------------------------------------------------ tray + policy glue ----
@@ -644,23 +635,55 @@ static void testTrayPolicy()
     check(MainWindow::traySupported() == QSystemTrayIcon::isSystemTrayAvailable(),
           "traySupported mirrors QSystemTrayIcon::isSystemTrayAvailable");
 
-    // The settings sheet explains a tray this desktop cannot provide instead of leaving a ticked box
-    // that silently does nothing.
+    // The settings page explains a tray this desktop cannot provide instead of leaving a ticked box that
+    // silently does nothing — and, unlike the old modal, it commits from its own Save button and says so.
     QTemporaryDir dir;
     check(dir.isValid(), "temporary settings store created");
     Settings settings(dir.filePath(QStringLiteral("muffin-test.ini")));
     settings.setMinimizeToTray(true);
 
-    SettingsDialog dialog(settings);
-    QLabel *note = dialog.trayNote();
-    check(note != nullptr, "the dialog carries a tray note");
+    SettingsPage page(settings);
+    QLabel *note = page.trayNote();
+    check(note != nullptr, "the page carries a tray note");
     check(note && note->objectName() == QLatin1String("trayNote"), "the note is styled by objectName");
     // Hidden exactly when there is a tray to speak of — isHidden() is the widget's own flag, and the
-    // dialog is not shown here, so it is the right thing to compare against.
+    // page is not shown here, so it is the right thing to compare against.
     check(note && note->isHidden() == MainWindow::traySupported(),
           "the note is hidden exactly when this desktop has a tray host");
     check(note && !note->text().isEmpty(), "and the note says something when it is shown");
-    check(!dialog.trayNote()->text().contains(QStringLiteral("%1")), "the note has no unsubstituted placeholder");
+    check(!page.trayNote()->text().contains(QStringLiteral("%1")),
+          "the note has no unsubstituted placeholder");
+
+    // ---- the page is a commit, not a modal ----
+    // A page has no frame to dismiss and no OK/Cancel pair, so the two ways it could quietly regress are
+    // "Save does nothing" and "Save never says it saved". Both are pinned here, against the model the
+    // page is meant to write through.
+    QPushButton *save = page.saveButton();
+    check(save != nullptr, "the page carries its own save button");
+    check(save && save->objectName() == QLatin1String("primaryButton"), "and it is the primary action");
+
+    const QString path = dir.filePath(QStringLiteral("zapret/linux"));
+    page.setZapretPath(path);
+    QSignalSpy savedSpy(&page, &SettingsPage::saved);
+    save->click();
+    check(savedSpy.count() == 1, "Save fires saved() once");
+    check(settings.zapretPath() == path, "Save wrote the path through the model");
+    // The tray box was loaded checked (the model said minimize-to-tray) and the commit wrote every field
+    // back, so a round-trip through the page must leave the flag set — not silently drop it.
+    check(settings.minimizeToTray(), "the page's commit preserved the tray setting it was loaded with");
+
+    // The acknowledgement appears and is worded; the reload guard means committing did not drop it by
+    // re-reading the form underneath the write.
+    QLabel *ack = page.savedNote();
+    check(ack != nullptr && !ack->text().isEmpty(), "Save put an acknowledgement beside the button");
+    check(ack && ack->text() == LanguageManager::tr(QStringLiteral("settings.saved")),
+          "and it is the catalog's 'saved' wording, not the key");
+
+    // A write that came from somewhere else (a download, the startup auto-location) re-reads the page
+    // rather than leaving it showing a stale path.
+    const QString other = dir.filePath(QStringLiteral("zapret/windows"));
+    settings.setZapretPath(other);   // fires changed(); the page is not mid-commit, so it reloads
+    check(page.zapretPath() == other, "an external change re-reads into the field");
 }
 
 // ---------------------------------------------------------- window policy ----
@@ -909,7 +932,9 @@ static void testTheme(QApplication &app)
     check(!app.styleSheet().isEmpty(), "dark stylesheet loaded from resources");
     check(app.styleSheet().contains(QStringLiteral("#C084FC")), "accent colour present in the sheet");
     check(app.styleSheet().contains(QStringLiteral("#0B0C10")), "dashboard background present in the sheet");
-    check(app.styleSheet().contains(QStringLiteral("strategyCard")), "card rules present");
+    check(app.styleSheet().contains(QStringLiteral("profileCard")), "profile row rules present");
+    check(app.styleSheet().contains(QStringLiteral("settingsPage")), "settings page rules present");
+    check(app.styleSheet().contains(QStringLiteral("windowButton")), "window chrome rules present");
     // The rail and the page stack are the window's skeleton: if their rules go missing, the nav buttons
     // render as default raised buttons and the pages composite onto black.
     check(app.styleSheet().contains(QStringLiteral("navButton")), "rail button rules present");
@@ -940,11 +965,17 @@ static void testTheme(QApplication &app)
         Theme::apply(app, dark);
         const QString sheet = app.styleSheet();
         check(sheet.contains(QStringLiteral("[error=\"true\"]")),
-              QStringLiteral("%1 sheet styles a failed card").arg(dark ? QStringLiteral("dark")
-                                                                      : QStringLiteral("light")));
-        check(sheet.contains(QStringLiteral("cardError")),
-              QStringLiteral("%1 sheet colours the badge text").arg(dark ? QStringLiteral("dark")
-                                                                        : QStringLiteral("light")));
+              QStringLiteral("%1 sheet styles a failed profile row").arg(dark ? QStringLiteral("dark")
+                                                                              : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("selected=\"true\"")),
+              QStringLiteral("%1 sheet styles the selected row").arg(dark ? QStringLiteral("dark")
+                                                                         : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("miniPing")),
+              QStringLiteral("%1 sheet styles the row's ping chips").arg(dark ? QStringLiteral("dark")
+                                                                              : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("savedNote")),
+              QStringLiteral("%1 sheet colours the save acknowledgement").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
         check(sheet.contains(QStringLiteral("trayNote")),
               QStringLiteral("%1 sheet colours the tray notice").arg(dark ? QStringLiteral("dark")
                                                                          : QStringLiteral("light")));
@@ -1012,10 +1043,33 @@ static void testTheme(QApplication &app)
                                 QStringLiteral("power"),
                                 // The dashboard's set: a ping badge's clock and the marks inside its ring.
                                 QStringLiteral("clock"), QStringLiteral("globe"),
-                                QStringLiteral("youtube"), QStringLiteral("discord")};
+                                QStringLiteral("youtube"), QStringLiteral("discord"),
+                                // The profile row's set: its menu handle, and the row menu's two glyphs.
+                                QStringLiteral("more"), QStringLiteral("cards"),
+                                // The frameless window's own chrome.
+                                QStringLiteral("window-close"), QStringLiteral("window-minimize"),
+                                QStringLiteral("ping-test")};
     for (const QString &g : glyphs)
         check(QFile::exists(QStringLiteral(":/icons/%1.svg").arg(g)),
               QStringLiteral("icon file exists: %1").arg(g));
+
+    // The chrome and menu glyphs are thin strokes drawn for 16 px; a glyph that only "exists" but fails to
+    // rasterise (a malformed path, a size that never got its currentColor) shows up as a hole in the header
+    // or the row, so they are loaded through Theme::icon() exactly as the window draws them.
+    Theme::apply(app, true);
+    for (const QString &g : {QStringLiteral("more"), QStringLiteral("window-close"),
+                             QStringLiteral("window-minimize")}) {
+        const QPixmap pm = Theme::icon(g, Theme::iconColor(), 16).pixmap(16, 16);
+        check(!pm.isNull(), QStringLiteral("chrome glyph rasterises: %1").arg(g));
+        bool inked = false;
+        if (!pm.isNull()) {
+            const QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+            for (int y = 0; y < img.height() && !inked; ++y)
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) > 40) { inked = true; break; }
+        }
+        check(inked, QStringLiteral("chrome glyph has ink: %1").arg(g));
+    }
 
     // The rail draws each glyph at 20 px through Theme::icon(), which rewrites the SVG's declared
     // width/height and its currentColor. A glyph that breaks that contract — a hardcoded fill, a
@@ -1187,7 +1241,7 @@ int main(int argc, char **argv)
     testLogPanel();
     testPingIndicator();
     testPowerButton();
-    testStrategyCard();
+    testProfileCard();
     testTrayPolicy();
     testWindowPolicy();
     testLanguage();

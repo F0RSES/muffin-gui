@@ -105,10 +105,10 @@ set(ZAPRET_UI_SOURCES
     src/ui/Settings.cpp
     src/ui/PingIndicator.cpp
     src/ui/PowerButton.cpp
-    src/ui/StrategyCard.cpp
+    src/ui/ProfileCard.cpp
     src/ui/LogPanel.cpp
     src/ui/DownloadDialog.cpp
-    src/ui/SettingsDialog.cpp
+    src/ui/SettingsPage.cpp
     src/ui/MainWindow.cpp
 )
 
@@ -120,10 +120,10 @@ set(ZAPRET_UI_HEADERS
     src/ui/Settings.h
     src/ui/PingIndicator.h
     src/ui/PowerButton.h
-    src/ui/StrategyCard.h
+    src/ui/ProfileCard.h
     src/ui/LogPanel.h
     src/ui/DownloadDialog.h
-    src/ui/SettingsDialog.h
+    src/ui/SettingsPage.h
     src/ui/MainWindow.h
 )
 
@@ -161,7 +161,7 @@ target_link_libraries(uitest PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Netwo
 
 # ---- source encoding --------------------------------------------------------
 # The UI strings are Cyrillic and are written as narrow literals inside QStringLiteral("...") (see
-# src/ui/DownloadDialog.cpp, MainWindow.cpp, SettingsDialog.cpp, core/ZapretManager.cpp). Qt 6 reads such
+# src/ui/DownloadDialog.cpp, MainWindow.cpp, SettingsPage.cpp, core/ZapretManager.cpp). Qt 6 reads such
 # literals as UTF-8, so the bytes that reach the binary have to be UTF-8.
 #
 # MSVC does not assume that: without an explicit charset it decodes the source in the system ANSI

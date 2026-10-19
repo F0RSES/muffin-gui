@@ -1,4 +1,5 @@
-#include "SettingsDialog.h"
+#include "SettingsPage.h"
+
 #include "DownloadDialog.h"
 #include "LanguageManager.h"
 #include "Settings.h"
@@ -9,7 +10,6 @@
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -17,32 +17,42 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QStyle>
 #include <QSpinBox>
+#include <QStyle>
 #include <QSystemTrayIcon>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
 namespace zapret {
 
-SettingsDialog::SettingsDialog(Settings &settings, QWidget *parent)
-    : QDialog(parent)
+namespace {
+// How long the acknowledgement next to the Save button holds. Long enough to read, short enough that it
+// cannot be mistaken for the page's opinion of the values currently in the fields.
+constexpr int kSavedNoteMs = 2000;
+} // namespace
+
+SettingsPage::SettingsPage(Settings &settings, QWidget *parent)
+    : QWidget(parent)
     , m_settings(settings)
 {
     build();
     loadFromSettings();
+
+    // The application can move the path without anyone touching this form — a download finishing, the
+    // startup auto-location, the placeholder's button. Re-read on every write that was not ours.
+    connect(&m_settings, &Settings::changed, this, [this] {
+        if (!m_writing)
+            loadFromSettings();
+    });
 }
 
-SettingsDialog::~SettingsDialog() = default;
+SettingsPage::~SettingsPage() = default;
 
-void SettingsDialog::build()
+void SettingsPage::build()
 {
-    // Same rule as the main window: a configuration sheet is a form with a known size, and stretching it
-    // to the screen only spreads six rows over a thousand pixels of background.
-    setFixedSize(620, 400);
-    setWindowFlag(Qt::WindowMaximizeButtonHint, false);
-    setModal(true);
-    setWindowTitle(LanguageManager::tr(QStringLiteral("settings.title")));
+    setObjectName(QStringLiteral("settingsPage"));
+    setAttribute(Qt::WA_StyledBackground, true);
 
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setPlaceholderText(QStringLiteral("/home/…/zapret/linux ")
@@ -50,11 +60,13 @@ void SettingsDialog::build()
                                    + QStringLiteral(" C:\\...\\zapret\\windows"));
     m_pathEdit->setClearButtonEnabled(true);
 
+    // Three ways to fill one field, because three situations call for them: the tree is on this disk and
+    // the user knows where, the tree is on this disk and nobody knows where, or there is no tree yet.
     i18nText(m_browseButton = new QPushButton(this), QStringLiteral("settings.browse"));
     i18nText(m_detectButton = new QPushButton(this), QStringLiteral("settings.autodetect"));
     i18nTip(m_detectButton, QStringLiteral("settings.autodetect_tip"));
-    i18nText(m_downloadButton = new QPushButton(this), QStringLiteral("settings.download"));
-    i18nTip(m_downloadButton, QStringLiteral("settings.download_tip"));
+    i18nText(m_downloadButton = new QPushButton(this), QStringLiteral("action.download_zapret"));
+    i18nTip(m_downloadButton, QStringLiteral("action.download_zapret_tip"));
 
     auto *pathRow = new QHBoxLayout;
     pathRow->setContentsMargins(0, 0, 0, 0);
@@ -108,35 +120,53 @@ void SettingsDialog::build()
     form->addRow(themeRowLabel, m_themeBox);
     form->addRow(pingRowLabel, m_pingSpin);
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    i18nText(buttons->button(QDialogButtonBox::Ok), QStringLiteral("common.ok"));
-    i18nText(buttons->button(QDialogButtonBox::Cancel), QStringLiteral("common.cancel"));
+    // The commit row. The dialog's OK/Cancel pair is gone: a page has no frame to dismiss, so leaving it
+    // is the cancel, and the only thing that has to be explicit is the write. The acknowledgement sits to
+    // the left of the button it belongs to rather than in a footer, because a note the button did not
+    // cause would be indistinguishable from a note about the values.
+    m_savedNote = new QLabel(this);
+    m_savedNote->setObjectName(QStringLiteral("savedNote"));
+    m_savedNote->setTextFormat(Qt::PlainText);
+
+    m_save = new QPushButton(this);
+    m_save->setObjectName(QStringLiteral("primaryButton"));
+    m_save->setCursor(Qt::PointingHandCursor);
+    m_save->setAutoDefault(false);
+    i18nText(m_save, QStringLiteral("settings.save"));
+
+    auto *commit = new QHBoxLayout;
+    commit->setContentsMargins(0, 0, 0, 0);
+    commit->setSpacing(12);
+    commit->addWidget(m_savedNote);
+    commit->addStretch(1);
+    commit->addWidget(m_save);
+
+    m_savedTimer = new QTimer(this);
+    m_savedTimer->setSingleShot(true);
+    connect(m_savedTimer, &QTimer::timeout, this, [this] { m_savedNote->clear(); });
 
     auto *column = new QVBoxLayout(this);
-    column->setContentsMargins(18, 18, 18, 16);
-    column->setSpacing(14);
+    column->setContentsMargins(28, 22, 28, 22);
+    column->setSpacing(16);
     column->addLayout(form);
     column->addStretch(1);
-    column->addWidget(buttons);
+    column->addLayout(commit);
 
-    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        apply();
-        accept();
-    });
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    connect(m_browseButton, &QPushButton::clicked, this, &SettingsDialog::browse);
-    connect(m_detectButton, &QPushButton::clicked, this, &SettingsDialog::autoDetect);
-    connect(m_downloadButton, &QPushButton::clicked, this, &SettingsDialog::downloadZapret);
-    connect(m_pathEdit, &QLineEdit::textChanged, this, &SettingsDialog::revalidatePath);
+    connect(m_save, &QPushButton::clicked, this, &SettingsPage::apply);
+    connect(m_browseButton, &QPushButton::clicked, this, &SettingsPage::browse);
+    connect(m_detectButton, &QPushButton::clicked, this, &SettingsPage::autoDetect);
+    connect(m_downloadButton, &QPushButton::clicked, this, &SettingsPage::downloadZapret);
+    connect(m_pathEdit, &QLineEdit::textChanged, this, &SettingsPage::revalidatePath);
 }
 
-void SettingsDialog::loadFromSettings()
+void SettingsPage::loadFromSettings()
 {
     const QString path = m_settings.zapretPath();
     m_pathEdit->setText(path);
     m_startLastCheck->setChecked(m_settings.startLastOnLaunch());
     m_trayCheck->setChecked(m_settings.minimizeToTray());
     m_pingSpin->setValue(m_settings.pingIntervalSec());
+    m_trayNote->setVisible(!QSystemTrayIcon::isSystemTrayAvailable());
 
     const QString theme = m_settings.theme();
     const int index = m_themeBox->findData(theme);
@@ -145,27 +175,36 @@ void SettingsDialog::loadFromSettings()
     revalidatePath();
 }
 
-void SettingsDialog::apply()
+void SettingsPage::apply()
 {
+    // One guard around five writes: Settings answers every write with changed(), and the reload slot
+    // connected in the constructor would otherwise re-read the form underneath the commit — harmless
+    // for these five values, but it would drop the note this call is about to put up.
+    m_writing = true;
     m_settings.setZapretPath(m_pathEdit->text().trimmed());
     m_settings.setStartLastOnLaunch(m_startLastCheck->isChecked());
     m_settings.setMinimizeToTray(m_trayCheck->isChecked());
     m_settings.setPingIntervalSec(m_pingSpin->value());
     m_settings.setTheme(m_themeBox->currentData().toString());
-    emit applied();
+    m_writing = false;
+
+    m_savedNote->setText(LanguageManager::tr(QStringLiteral("settings.saved")));
+    m_savedTimer->start(kSavedNoteMs);
+    emit saved();
 }
 
-QString SettingsDialog::zapretPath() const
+QString SettingsPage::zapretPath() const
 {
     return m_pathEdit->text().trimmed();
 }
 
-void SettingsDialog::setZapretPath(const QString &path)
+void SettingsPage::setZapretPath(const QString &path)
 {
     m_pathEdit->setText(path);
 }
 
-bool SettingsDialog::pathLooksValid(const QString &dir)
+
+bool SettingsPage::pathLooksValid(const QString &dir)
 {
     if (dir.trimmed().isEmpty())
         return false;
@@ -174,7 +213,7 @@ bool SettingsDialog::pathLooksValid(const QString &dir)
     return !ZapretLocator::locate({dir}).isEmpty();
 }
 
-QString SettingsDialog::describePath(const QString &dir)
+QString SettingsPage::describePath(const QString &dir)
 {
     if (dir.trimmed().isEmpty())
         return LanguageManager::tr(QStringLiteral("path.none"));
@@ -193,21 +232,21 @@ QString SettingsDialog::describePath(const QString &dir)
         QStringList names;
         for (const ZapretLocator::Found &f : roots)
             names << (f.platform == Strategy::Platform::Windows ? QStringLiteral("windows")
-                                                                 : QStringLiteral("linux"));
+                                                                : QStringLiteral("linux"));
         return LanguageManager::tr(QStringLiteral("path.base")).arg(names.join(QStringLiteral(", ")));
     }
 
     return LanguageManager::tr(QStringLiteral("path.not_zapret"));
 }
 
-void SettingsDialog::revalidatePath()
+void SettingsPage::revalidatePath()
 {
     const QString dir = m_pathEdit->text().trimmed();
     const bool ok = pathLooksValid(dir);
     setPathState(ok, describePath(dir));
 }
 
-void SettingsDialog::setPathState(bool ok, const QString &message)
+void SettingsPage::setPathState(bool ok, const QString &message)
 {
     m_pathState->setText(ok ? QStringLiteral("✓ %1").arg(message)
                             : QStringLiteral("✕ %1").arg(message));
@@ -222,7 +261,7 @@ void SettingsDialog::setPathState(bool ok, const QString &message)
     m_pathEdit->update();
 }
 
-void SettingsDialog::browse()
+void SettingsPage::browse()
 {
     const QString start = m_pathEdit->text().trimmed();
     const QString dir = QFileDialog::getExistingDirectory(
@@ -233,7 +272,7 @@ void SettingsDialog::browse()
         m_pathEdit->setText(QDir::toNativeSeparators(dir));
 }
 
-void SettingsDialog::autoDetect()
+void SettingsPage::autoDetect()
 {
     const QList<ZapretLocator::Found> found = ZapretLocator::locate();
     if (found.isEmpty()) {
@@ -243,7 +282,7 @@ void SettingsDialog::autoDetect()
     m_pathEdit->setText(QDir::toNativeSeparators(found.first().path));
 }
 
-void SettingsDialog::downloadZapret()
+void SettingsPage::downloadZapret()
 {
     DownloadDialog dialog(this);
     connect(&dialog, &DownloadDialog::installed, this, [this](const QString &path) {
@@ -254,8 +293,9 @@ void SettingsDialog::downloadZapret()
     });
     dialog.startFetch();
     dialog.exec();
-    // Nothing is written to Settings until the user presses OK: a download that lands in the field and
-    // a path the application will use are two decisions, and this dialog has always owned the second.
+    // Nothing reaches Settings until Save is pressed: a download that lands in the field and a path the
+    // application will actually use are two decisions, and this page owns the second.
 }
 
 } // namespace zapret
+

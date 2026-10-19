@@ -1,31 +1,38 @@
 #pragma once
 
-#include <QDialog>
+#include <QWidget>
 
 class QCheckBox;
 class QComboBox;
-class QLineEdit;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QTimer;
 
 namespace zapret {
 
 class Settings;
 
-// Configuration sheet: where zapret lives, what happens at startup, how the window behaves, how the
-// theme is chosen and how often the reachability probes run.
+// Where zapret lives, what happens at startup, how the window behaves, which theme and how often the
+// reachability probes run — as a page of the main window's own stack rather than a modal sheet.
 //
-// Path validation is live (on every keystroke) and cheap: ZapretPaths only stats marker files
+// The move from dialog to page is the whole point: the rail already carries a settings glyph, and a
+// glyph that opens a modal is two ways of navigating where the design wants one. It also changes what
+// "commit" means. A dialog has a frame and an OK button; a page has neither, so the commit is a button
+// of its own at the foot of the form, and leaving the page without pressing it is the equivalent of
+// Cancel — except that it says so, with the note beside the button staying blank.
+//
+// Path validation stays live (on every keystroke) and cheap: ZapretPaths only stats marker files
 // (bin/winws.exe, init.d/sysv/zapret, binaries/<arch>/nfqws). describePath()/pathLooksValid() are
 // static so the verdict can be reasoned about without a widget hierarchy.
-class SettingsDialog : public QDialog
+class SettingsPage : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit SettingsDialog(Settings &settings, QWidget *parent = nullptr);
-    ~SettingsDialog() override;
+    explicit SettingsPage(Settings &settings, QWidget *parent = nullptr);
+    ~SettingsPage() override;
 
     // Read the stored values into the widgets / write the widgets back into Settings.
     void loadFromSettings();
@@ -35,8 +42,12 @@ public:
     void setZapretPath(const QString &path);
 
     // The warning shown when QSystemTrayIcon reports no tray host, or null. Exposed so a test can check
-    // the dialog actually explains the degraded behaviour instead of leaving the box ticked in vain.
+    // the page actually explains the degraded behaviour instead of leaving the box ticked in vain.
     QLabel *trayNote() const { return m_trayNote; }
+    // The commit control and the acknowledgement it writes. Both exposed for the same reason: "Save
+    // does nothing" and "Save never says it saved" are the two ways this page could quietly regress.
+    QPushButton *saveButton() const { return m_save; }
+    QLabel *savedNote() const { return m_savedNote; }
 
     // True when `dir` is a zapret root, or a base that contains a windows/ or linux/ root.
     static bool pathLooksValid(const QString &dir);
@@ -44,7 +55,7 @@ public:
     static QString describePath(const QString &dir);
 
 signals:
-    void applied();
+    void saved();
 
 private slots:
     void browse();
@@ -59,6 +70,9 @@ private:
     void setPathState(bool ok, const QString &message);
 
     Settings &m_settings;
+    // Guards the Settings::changed() reload: apply() writes through the model, and the model answers by
+    // telling every view to re-read itself — including this one, mid-commit.
+    bool m_writing = false;
 
     QLineEdit *m_pathEdit = nullptr;
     QLabel *m_pathState = nullptr;
@@ -71,6 +85,10 @@ private:
     QLabel *m_trayNote = nullptr;    // shown only when this desktop has no tray host at all
     QComboBox *m_themeBox = nullptr;
     QSpinBox *m_pingSpin = nullptr;
+
+    QPushButton *m_save = nullptr;
+    QLabel *m_savedNote = nullptr;
+    QTimer *m_savedTimer = nullptr;  // for how long "Сохранено ✓" stays up
 };
 
 } // namespace zapret

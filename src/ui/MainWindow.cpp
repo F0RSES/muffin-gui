@@ -6,9 +6,9 @@
 #include "PingIndicator.h"
 #include "PingService.h"
 #include "PowerButton.h"
+#include "ProfileCard.h"
 #include "Settings.h"
-#include "SettingsDialog.h"
-#include "StrategyCard.h"
+#include "SettingsPage.h"
 #include "Theme.h"
 #include "ZapretManager.h"
 
@@ -18,6 +18,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGuiApplication>
@@ -27,6 +28,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
@@ -102,6 +104,13 @@ constexpr int kPingSpacing = 50;
 // The header's connected dot: 6 px across, so a 3 px radius.
 constexpr int kStatusDotPx = 6;
 
+// How far down from the top the frameless window can be grabbed by (see mousePressEvent). The header band
+// is 18 px top margin + the tallest of its children (the 30 px chrome buttons / the 24 px title) + 16 px
+// bottom margin + the 1 px rule, so ~64 px covers the whole header and nothing below it. The two chrome
+// buttons and the rail glyphs are children that consume their own presses, so a press that reaches
+// MainWindow inside this band is on bare header space and safe to drag from.
+constexpr int kHeaderDragHeight = 64;
+
 // The footer's standing line when nothing is being announced. The mock's "Updated every 5s".
 QString pingCadenceText(int seconds)
 {
@@ -120,13 +129,16 @@ MainWindow::MainWindow(QWidget *parent)
     // back to the GUI thread. It is deleted explicitly in the destructor.
     m_ping = new PingService();
 
-    // A fixed 900x700 canvas, and no maximise button: the dashboard is laid out around a 200 px ring
+    // A fixed 900x700 canvas with no system frame at all. The dashboard is laid out around a 200 px ring
     // and a footer that must stay centred, so a maximised or resized window is a different design that
-    // nobody drew. setWindowFlag alone would leave the WM's maximise control present but useless —
-    // removing the hint is what actually takes it off the title bar.
+    // nobody drew — hence setFixedSize. And because the mock draws its own header, the platform title bar
+    // is the one thing that cannot be there: FramelessWindowHint takes the whole frame away, which is why
+    // the header carries the only two window controls (see buildHeader) and why a press on it drags the
+    // window (see mousePressEvent). setWindowFlag alone would leave the WM's maximise control present but
+    // useless; frameless removes every one of them at once.
     setWindowTitle(QStringLiteral("Muffin"));
     setWindowIcon(QIcon());
-    setWindowFlag(Qt::WindowMaximizeButtonHint, false);
+    setWindowFlag(Qt::FramelessWindowHint, true);
     setFixedSize(kWindowWidth, kWindowHeight);
 
     buildCentral();
@@ -140,6 +152,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_ping->setHosts(PingService::defaultHosts());
     m_ping->setIntervalSec(m_settings->pingIntervalSec());
     m_ping->start();
+
+    // Seed the route from the persisted choice before the first scan, so the very first populateCards()
+    // lights the row the last session left running rather than the first one alphabetically. If that id is
+    // stale (the folder changed, the entry was deleted) populateCards falls it back to a real row.
+    m_selectedId = m_settings->lastStrategyId();
 
     m_manager->setZapretDir(m_settings->zapretPath());
     updateStatusUi();
@@ -237,10 +254,10 @@ QWidget *MainWindow::buildSidebar()
     // The bottom group, in the order the design asks for: the catalog, then the journal directly above
     // settings, then settings, then the language. Both page glyphs are checkable so a second press puts
     // the dashboard back — with one icon per page it has to work both ways.
-    m_navStrategies = addRailButton(box, QStringLiteral("cards"), QStringLiteral("nav.strategies"));
+    m_navStrategies = addRailButton(box, QStringLiteral("cards"), QStringLiteral("nav.profiles"));
     m_navStrategies->setCheckable(true);
     connect(m_navStrategies, &QPushButton::clicked, this, [this] {
-        setCurrentPage(currentPage() == PageStrategies ? PageDashboard : PageStrategies);
+        setCurrentPage(currentPage() == PageProfiles ? PageDashboard : PageProfiles);
     });
 
     m_navLogs = addRailButton(box, QStringLiteral("logs"), QStringLiteral("nav.logs"));
@@ -249,12 +266,15 @@ QWidget *MainWindow::buildSidebar()
         setCurrentPage(currentPage() == PageLogs ? PageDashboard : PageLogs);
     });
 
-    // Настройки stays a modal sheet rather than a page — it is a commit, not a view you glance at, and
-    // SettingsDialog::apply() is written as a dialog accept.
-    QPushButton *navSettings = addRailButton(box, QStringLiteral("settings"),
-                                             QStringLiteral("nav.settings"));
-    i18nTip(navSettings, QStringLiteral("nav.settings_tip"));
-    connect(navSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
+    // Settings is a page of this stack, not a modal sheet: a rail glyph that popped a dialog would be two
+    // ways of navigating where the design wants one. Checkable like the other two, so a second press puts
+    // the dashboard back and the three glyphs stay mutually exclusive.
+    m_navSettings = addRailButton(box, QStringLiteral("settings"), QStringLiteral("nav.settings"));
+    m_navSettings->setCheckable(true);
+    i18nTip(m_navSettings, QStringLiteral("nav.settings_tip"));
+    connect(m_navSettings, &QPushButton::clicked, this, [this] {
+        setCurrentPage(currentPage() == PageSettings ? PageDashboard : PageSettings);
+    });
 
     // The language picker: the current language's flag, opening a menu of the seven. It sits under
     // settings so the two "change how the app behaves" controls read as one group.
@@ -341,6 +361,31 @@ QPushButton *MainWindow::addRailButton(QVBoxLayout *box, const QString &glyph, c
     return b;
 }
 
+// A frameless-window control. It is a rail glyph turned sideways: same icon-only QToolButton, same
+// "glyph"/"glyphPx" properties so applyTheme() re-bakes it with the rest of the window, but a square
+// 30x30 plate that reads as chrome rather than navigation. `role` distinguishes the two for the sheet —
+// "close" is tinted as the destructive one on hover, "min" is not — without giving them separate object
+// names that would each need their own block in both themes.
+QToolButton *MainWindow::addWindowButton(QHBoxLayout *row, const QString &glyph, const QString &textKey,
+                                         const char *role)
+{
+    auto *b = new QToolButton(this);
+    b->setObjectName(QStringLiteral("windowButton"));
+    b->setProperty("glyph", glyph);
+    b->setProperty("glyphPx", 16);
+    b->setProperty("role", QString::fromLatin1(role));
+    i18nTip(b, textKey);
+    i18nAcc(b, textKey);
+    b->setCursor(Qt::PointingHandCursor);
+    b->setAutoRaise(true);
+    b->setFocusPolicy(Qt::TabFocus);
+    b->setIconSize(QSize(16, 16));
+    b->setIcon(Theme::themedIcon(glyph, 16));
+    b->setFixedSize(30, 30);
+    row->addWidget(b, 0, Qt::AlignVCenter);
+    return b;
+}
+
 // The column beside the rail: header, page stack, footer. The rail's own 1 px right border is the only
 // line between the two, which is how the mock separates them.
 QWidget *MainWindow::buildMainArea()
@@ -363,8 +408,9 @@ QWidget *MainWindow::buildMainArea()
     m_pages = new QStackedWidget(area);
     m_pages->setObjectName(QStringLiteral("pageStack"));
     m_pages->addWidget(buildDashboardPage());
-    m_pages->addWidget(buildStrategiesPage());
+    m_pages->addWidget(buildProfilesPage());
     m_pages->addWidget(buildLogsPage());
+    m_pages->addWidget(buildSettingsPage());
     m_pages->setCurrentIndex(PageDashboard);
     box->addWidget(m_pages, 1);
 
@@ -381,6 +427,10 @@ QWidget *MainWindow::buildHeader()
     row->setContentsMargins(28, 18, 28, 16);
     row->setSpacing(10);
 
+    // The whole header is the drag handle for a frameless window (see mousePressEvent), so everything
+    // that can eat a press — the buttons — is a child that stops the event, and the bare space between
+    // and around them propagates down to MainWindow where the drag begins. The title says so to a screen
+    // reader; the two controls on the right are the only ways off this window the frame no longer gives.
     auto *title = new QLabel(QStringLiteral("Muffin"), header);
     title->setObjectName(QStringLiteral("appTitle"));
 
@@ -400,6 +450,18 @@ QWidget *MainWindow::buildHeader()
     row->addStretch(1);
     row->addWidget(m_statusDot, 0, Qt::AlignVCenter);
     row->addWidget(m_statusLabel, 0, Qt::AlignVCenter);
+
+    // The two controls a framed window would have given us for free. Minimise is showMinimized(); close
+    // goes through close() and therefore closeEvent(), so the tray policy — hide when there is a tray to
+    // hide into, quit when there is not — is the same one the X on a normal frame and Ctrl+Q follow. A
+    // separate "hard quit" stays on Ctrl+Q / the tray menu; this button is the ordinary close.
+    row->addSpacing(6);
+    m_minButton = addWindowButton(row, QStringLiteral("window-minimize"),
+                                  QStringLiteral("window.minimize"), "min");
+    connect(m_minButton, &QToolButton::clicked, this, [this] { showMinimized(); });
+    m_closeButton = addWindowButton(row, QStringLiteral("window-close"),
+                                    QStringLiteral("window.close"), "close");
+    connect(m_closeButton, &QToolButton::clicked, this, [this] { close(); });
     return header;
 }
 
@@ -483,13 +545,15 @@ QWidget *MainWindow::buildDashboardPage()
     return page;
 }
 
-// The catalog. Reached from the route pill, with its own way back, and carrying the two actions the
-// retired toolbar used to hold — rescan the folder, and fetch zapret when the folder is empty.
-QWidget *MainWindow::buildStrategiesPage()
+// The profiles page — one horizontal row per strategy, each carrying the services it exists to unblock
+// and a menu for what can be done to the entry itself. Reached from the dashboard's route pill, with its
+// own way back, and holding the two actions the retired toolbar used to: rescan the folder, and fetch
+// zapret when the folder is empty.
+QWidget *MainWindow::buildProfilesPage()
 {
     auto *page = new QWidget(m_pages);
-    m_strategiesPage = page;
-    page->setObjectName(QStringLiteral("strategiesPage"));
+    m_profilesPage = page;
+    page->setObjectName(QStringLiteral("profilesPage"));
 
     auto *box = new QVBoxLayout(page);
     box->setContentsMargins(28, 22, 28, 22);
@@ -509,7 +573,7 @@ QWidget *MainWindow::buildStrategiesPage()
 
     auto *title = new QLabel(page);
     title->setObjectName(QStringLiteral("pageTitle"));
-    i18nText(title, QStringLiteral("nav.strategies"));
+    i18nText(title, QStringLiteral("nav.profiles"));
 
     auto *refresh = new QPushButton(QString(), page);
     refresh->setObjectName(QStringLiteral("ghostButton"));
@@ -539,10 +603,10 @@ QWidget *MainWindow::buildStrategiesPage()
 
     auto *subtitle = new QLabel(page);
     subtitle->setObjectName(QStringLiteral("pageSubtitle"));
-    i18nText(subtitle, QStringLiteral("page.strategies_subtitle"));
+    i18nText(subtitle, QStringLiteral("page.profiles_subtitle"));
     box->addWidget(subtitle);
 
-    // m_stack is still what it always was — the cards list or the "nothing found" page.
+    // m_stack is still what it always was — the profile rows or the "nothing found" page.
     m_stack = new QStackedWidget(page);
 
     m_scroll = new QScrollArea(m_stack);
@@ -554,7 +618,10 @@ QWidget *MainWindow::buildStrategiesPage()
     m_cardHost = new QWidget(m_scroll);
     m_cardLayout = new QVBoxLayout(m_cardHost);
     m_cardLayout->setContentsMargins(12, 12, 12, 12);
-    m_cardLayout->setSpacing(10);
+    // Rows are one fixed height each, so the list is read as a column: a small gap keeps them apart
+    // without the airier spacing the old variable-height card grid needed between notes of different
+    // lengths.
+    m_cardLayout->setSpacing(8);
     m_cardLayout->addStretch(1);
     m_scroll->setWidget(m_cardHost);
 
@@ -594,6 +661,49 @@ QWidget *MainWindow::buildStrategiesPage()
     return page;
 }
 
+// The settings page. Unlike the other three this owns its whole form: it reads the stored values on
+// construction and writes them back through Settings on Save, which fires changed() and re-points the
+// manager and the theme from onSettingsChanged(). The page only has to exist in the stack, be re-tinted
+// with everything else, and offer the way back — what buildSettingsPage adds around the widget is the
+// header row the other full-screen pages carry and nothing more.
+QWidget *MainWindow::buildSettingsPage()
+{
+    auto *page = new QWidget(m_pages);
+    page->setObjectName(QStringLiteral("settingsPageHost"));
+
+    auto *box = new QVBoxLayout(page);
+    box->setContentsMargins(0, 14, 0, 0);
+    box->setSpacing(10);
+
+    // The way back lives here rather than inside SettingsPage so the page widget stays purely the form and
+    // a test can build it without the navigation chrome. Esc and the rail's settings glyph dismiss it too;
+    // this is just the visible one, matching the journal and the profiles list.
+    auto *head = new QHBoxLayout;
+    head->setContentsMargins(28, 0, 28, 0);
+    head->setSpacing(10);
+
+    auto *back = new QPushButton(page);
+    back->setObjectName(QStringLiteral("ghostButton"));
+    back->setCursor(Qt::PointingHandCursor);
+    back->setAutoDefault(false);
+    i18nText(back, QStringLiteral("page.back"));
+    i18nTip(back, QStringLiteral("page.back_tip"));
+    connect(back, &QPushButton::clicked, this, &MainWindow::showDashboard);
+
+    auto *title = new QLabel(page);
+    title->setObjectName(QStringLiteral("pageTitle"));
+    i18nText(title, QStringLiteral("nav.settings"));
+    head->addWidget(back);
+    head->addSpacing(6);
+    head->addWidget(title);
+    head->addStretch(1);
+    box->addLayout(head);
+
+    m_settingsPage = new SettingsPage(*m_settings, page);
+    box->addWidget(m_settingsPage, 1);
+    return page;
+}
+
 // The journal gets the whole canvas, which is what a 5000-line ring buffer of aligned timestamps
 // actually wants. Filtering, copying and saving are LogPanel's own; the page adds nothing above them but
 // the way back, because a header naming a box of logs says what the box already shows.
@@ -630,17 +740,22 @@ void MainWindow::setCurrentPage(int page)
 {
     if (!m_pages)
         return;
-    const int target = (page == PageLogs)   ? PageLogs
-                       : (page == PageStrategies) ? PageStrategies
-                                                  : PageDashboard;
+    const int target = (page == PageLogs)     ? PageLogs
+                       : (page == PageProfiles) ? PageProfiles
+                       : (page == PageSettings) ? PageSettings
+                                                : PageDashboard;
     m_pages->setCurrentIndex(target);
 
     // The rail's glyphs are the only page indicator left, so they have to follow the stack even when the
-    // page was chosen from code — a lit journal icon over the dashboard is worse than no icon at all.
+    // page was chosen from code — a lit journal icon over the dashboard is worse than no icon at all. The
+    // three are mutually exclusive by construction: exactly one is checked for the three pages, none for
+    // the dashboard, which is why the settings glyph can now stand in for what used to be a modal.
     if (m_navLogs)
         m_navLogs->setChecked(target == PageLogs);
     if (m_navStrategies)
-        m_navStrategies->setChecked(target == PageStrategies);
+        m_navStrategies->setChecked(target == PageProfiles);
+    if (m_navSettings)
+        m_navSettings->setChecked(target == PageSettings);
     // Opening the journal is what acknowledges whatever made it light up.
     if (target == PageLogs)
         setLogAlert(false);
@@ -710,15 +825,18 @@ void MainWindow::onPowerClicked()
     if (!canStartFrom(state))
         return;   // a teardown is in flight; blockedReason() already says so in the tooltip
 
-    const QString last = m_settings->lastStrategyId();
-    if (last.isEmpty() || !m_manager->findStrategy(last)) {
-        // Nothing to run yet. Saying "no saved strategy" where the user can see the list they have not
+    // The profile the power button runs is the one selected in the list, not a separately-stored "last":
+    // selecting is choosing, and choosing is the whole job of the profiles page. m_selectedId is seeded
+    // from the persisted lastStrategyId at startup, and every start writes it back there, so the two agree
+    // for a restart while one live value — the selection — drives the button.
+    if (m_selectedId.isEmpty() || !m_manager->findStrategy(m_selectedId)) {
+        // Nothing to run yet. Saying "pick a profile" where the user can see the list they have not
         // opened is more useful than a sentence in a footer nobody reads.
-        setCurrentPage(PageStrategies);
-        showTransientMessage(LanguageManager::tr(QStringLiteral("msg.pick_strategy")), 5000);
+        setCurrentPage(PageProfiles);
+        showTransientMessage(LanguageManager::tr(QStringLiteral("msg.pick_profile")), 5000);
         return;
     }
-    startStrategy(last, true);
+    startStrategy(m_selectedId, true);
 }
 
 
@@ -884,20 +1002,45 @@ void MainWindow::populateCards()
         delete item;
     }
     m_cards.clear();
-    m_errorCardId.clear();   // the new set of cards has not failed at anything yet
+    m_errorCardId.clear();   // the new set of rows has not failed at anything yet
 
+    const QStringList hosts = PingService::defaultHosts();
     const QList<Strategy> list = m_manager->strategies();
     for (const Strategy &s : list) {
-        auto *card = new StrategyCard(s, m_cardHost);
+        auto *card = new ProfileCard(s, m_cardHost);
         const QString id = s.id.isEmpty() ? s.filePath : s.id;
-        connect(card, &StrategyCard::startRequested, this, &MainWindow::onStartRequested);
-        connect(card, &StrategyCard::stopRequested, this, &MainWindow::onStopRequested);
+        // The chips are the same three services the dashboard rings, so a row says in one glance what the
+        // profile unblocks and how each of those is answering. Seeded from the last verdict we have, so a
+        // row built mid-cycle does not start every chip on grey and wait for the next tick to be useful.
+        card->setHosts(hosts);
+        for (const QString &host : hosts) {
+            auto it = m_lastPing.constFind(host);
+            card->setPing(host, it == m_lastPing.constEnd() ? PingIndicator::PingStatus::Unknown : it->status,
+                          it == m_lastPing.constEnd() ? -1 : it->latencyMs);
+        }
+        card->setSelected(id == m_selectedId);
+        connect(card, &ProfileCard::clicked, this, &MainWindow::onProfileSelected);
+        connect(card, &ProfileCard::copyRequested, this, &MainWindow::onProfileCopied);
+        connect(card, &ProfileCard::deleteRequested, this, &MainWindow::onProfileDeleteRequested);
         m_cardLayout->addWidget(card);
         m_cards.insert(id, card);
     }
     m_cardLayout->addStretch(1);
 
     m_stack->setCurrentWidget(list.isEmpty() ? m_placeholder : m_scroll);
+    // A reload can drop the profile that was selected — the folder changed, or the last run's entry is
+    // gone. Fall back to the persisted route (still valid if it survived the scan), then to the first
+    // row, so the power button always names something real and the neon edge is never left floating on a
+    // row that no longer exists.
+    if (!m_selectedId.isEmpty() && !m_cards.contains(m_selectedId))
+        m_selectedId.clear();
+    if (m_selectedId.isEmpty()) {
+        const QString persisted = m_settings->lastStrategyId();
+        if (!persisted.isEmpty() && m_cards.contains(persisted))
+            m_selectedId = persisted;
+        else if (!list.isEmpty())
+            m_selectedId = list.first().id.isEmpty() ? list.first().filePath : list.first().id;
+    }
     updateStatusUi();
 }
 
@@ -1018,18 +1161,19 @@ void MainWindow::updateStatusUi()
         setConnectionChip(connectionText(state), statusKind(state));
     }
 
-    // "The run this card belongs to" is shown from the moment it is requested until the teardown
-    // finishes: the manager still names the strategy through both in-flight phases, and a card that
-    // silently fell back to "Запустить" mid-teardown would offer the very action the backend refuses.
-    const bool activeIsUp = m_manager->isRunning() || state == IZapretBackend::State::Starting
-                            || state == IZapretBackend::State::Stopping;
+    // The selected row is the profile the power button will run, so the edge follows the user's choice and
+    // nothing else. It is deliberately NOT snapped to the manager's active strategy here: while a run is up
+    // the button means "stop", and letting the live run hijack the highlight would make it impossible to
+    // pick a different profile to run next. The route is moved to the profile that actually started by
+    // startStrategy (on an accepted launch), so "what's running" and "what I'll run next" stay the same row
+    // through a normal start, and a mid-run re-pick is honoured.
     const bool canStart = canStartFrom(state);
     const bool canStop = canStopFrom(state);
     const QString busy = blockedReason(state);
 
-    // The power button is the window's only start/stop control now, so all the gating the toolbar action
-    // and the rail's power glyph used to share lands here: which look it wears, and what it says it is
-    // waiting for when a press would be refused.
+    // The power button is the window's only start/stop control, so all the gating the toolbar action and
+    // the rail's power glyph used to share lands here: which look it wears, and what it says it is waiting
+    // for when a press would be refused.
     if (m_power) {
         PowerButton::Mode mode = PowerButton::Mode::Idle;
         if (state == IZapretBackend::State::Running)
@@ -1042,15 +1186,8 @@ void MainWindow::updateStatusUi()
                                     : (busy.isEmpty() ? startActionHint() : busy));
     }
 
-    const QString activeId = m_manager->activeStrategyId();
-    for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it) {
-        const bool isActive = activeIsUp && it.key() == activeId;
-        it.value()->setRunning(isActive);
-        // One card offers exactly one action — stop when it owns the run, start otherwise — so the
-        // gating is per card, not per window: the active card is greyed only when a stop would be a
-        // duplicate, the others whenever a start would be refused.
-        it.value()->setActionEnabled(isActive ? canStop : canStart, busy);
-    }
+    for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it)
+        it.value()->setSelected(it.key() == m_selectedId);
 
     updateTrayIcon();
 }
@@ -1075,7 +1212,8 @@ void MainWindow::applyTheme()
 
     // Every baked-pixmap icon in the window is re-tinted here: a theme switch cannot repaint a pixmap the
     // sheet never owned. Each button carries the glyph name and the size it was drawn at, so one pass
-    // covers the rail's 24 px icons and the strategies page's 16 px ones alike.
+    // covers the rail's 24 px icons, the pages' 16 px ones and the header's window controls alike. Both
+    // QPushButtons and QToolButtons carry the property, so the glyph pass runs over each class.
     const auto buttons = findChildren<QPushButton *>();
     for (QPushButton *b : buttons) {
         const QString glyph = b->property("glyph").toString();
@@ -1084,14 +1222,25 @@ void MainWindow::applyTheme()
         const int px = b->property("glyphPx").toInt();
         b->setIcon(Theme::themedIcon(glyph, px > 0 ? px : 16));
     }
+    const auto tools = findChildren<QToolButton *>();
+    for (QToolButton *b : tools) {
+        const QString glyph = b->property("glyph").toString();
+        if (glyph.isEmpty())
+            continue;   // the language button is a flag, not a glyph, and keeps its own tint
+        const int px = b->property("glyphPx").toInt();
+        b->setIcon(Theme::themedIcon(glyph, px > 0 ? px : 16));
+    }
     if (QLabel *logo = findChild<QLabel *>(QStringLiteral("brandLogo")))
         logo->setPixmap(Theme::icon(QStringLiteral("app"), Theme::accent(), kBrandGlyphPx)
                             .pixmap(kBrandGlyphPx, kBrandGlyphPx));
 
     // The power ring is painted from Theme::accent()/pingOk() rather than from the sheet, so it needs
-    // telling that the palette moved.
+    // telling that the palette moved. The profile rows bake their menu glyph and their ping chips the
+    // same way, so each re-bakes on the same signal.
     if (m_power)
         m_power->retheme();
+    for (ProfileCard *card : findChildren<ProfileCard *>())
+        card->retheme();
 
     // No setWindowIcon() here: the title bar is deliberately iconless, and a theme switch that
     // re-attached the muffin would put it back the first time anyone changed the colour scheme.
@@ -1109,9 +1258,9 @@ void MainWindow::retranslateUi()
 {
     retranslateTree(this);
 
-    // Cards compute their summary from the strategy rather than from a key, so they re-derive it; the
-    // action button already carries its own key and needs nothing extra.
-    for (StrategyCard *card : findChildren<StrategyCard *>())
+    // Rows derive their name from the strategy rather than from a key, so they re-derive it; the menu
+    // actions and the chip wording carry their own keys and move with the walk above.
+    for (ProfileCard *card : findChildren<ProfileCard *>())
         card->retranslateText();
 
     // The rail's flag, the menu tick, and any text the status machine writes rather than the builders.
@@ -1136,9 +1285,11 @@ void MainWindow::refreshStrategies()
 
 void MainWindow::openSettings()
 {
-    SettingsDialog dialog(*m_settings, this);
-    dialog.exec();
-    // SettingsDialog::apply() already wrote through Settings, which fired changed() and reloaded.
+    // Settings is a page of the stack now, not a modal. Everything the page can change fires through
+    // Settings::changed() into onSettingsChanged(), which re-points the manager and re-themes on Save —
+    // there is nothing to do here but go there. Kept as a named slot because three places reach it (the
+    // rail glyph, Ctrl+S, and the startup "no strategies yet" prompt) and one of them defers it.
+    setCurrentPage(PageSettings);
 }
 
 void MainWindow::downloadZapret()
@@ -1174,11 +1325,11 @@ void MainWindow::zapretInstalled(const QString &path)
 
 void MainWindow::startStrategy(const QString &id, bool interactive)
 {
-    // Asked before the backend sees the request. Cards and toolbar are greyed in exactly these states,
-    // but the tray menu, Ctrl+Shift+S and the auto-start on launch are not — and unguarded they reached
+    // Asked before the backend sees the request. The power button is greyed in exactly these states, but
+    // the tray menu, Ctrl+Shift+S and the auto-start on launch are not — and unguarded they reached
     // LinuxBackend::start() mid-teardown, which reported "an operation is already in progress (stop
-    // first)" as a failure and badged the card that was merely clicked too early. Waiting is not an
-    // error, so it gets a warning line and a status-bar message instead of a dialog.
+    // first)" as a failure and badged the row that was merely started too early. Waiting is not an
+    // error, so it gets a warning line and a footer message instead of a dialog.
     const QString busy = blockedReason(m_manager->state());
     if (!busy.isEmpty()) {
         m_log->appendLine(busy, LogPanel::Warn);
@@ -1215,24 +1366,103 @@ void MainWindow::startStrategy(const QString &id, bool interactive)
     // Accepted: drop a badge an earlier attempt may have left on this very card.
     attachErrorBadge(id, QString());
 
-    m_applyingSettings = true;
-    m_settings->setLastStrategyId(strategy->id.isEmpty() ? strategy->filePath : strategy->id);
-    m_applyingSettings = false;
-}
+    // The route the power button will run next is now the profile that just started, so "what's running"
+    // and "what I'll run next" agree — and after this run comes down, the highlight is already on the
+    // right row. Written to Settings too (under lastStrategyId) so a restart resumes the same choice.
+    const QString acceptedId = strategy->id.isEmpty() ? strategy->filePath : strategy->id;
+    m_selectedId = acceptedId;
+    for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it)
+        it.value()->setSelected(it.key() == acceptedId);
 
-void MainWindow::onStartRequested(const QString &id)
-{
-    startStrategy(id, true);
+    m_applyingSettings = true;
+    m_settings->setLastStrategyId(acceptedId);
+    m_applyingSettings = false;
 }
 
 void MainWindow::onStopRequested()
 {
-    // Reached from the toolbar action, the card button, the tray menu and Ctrl+Shift+X. The first two
-    // are gated in updateStatusUi(), so this guard is what keeps the two that are not from re-issuing a
-    // stop that is already running — the second "terminating nfqws" ten seconds after the first.
+    // Reached from the toolbar action, the tray menu and Ctrl+Shift+X. The tray and shortcut paths are not
+    // gated in updateStatusUi(), so this guard is what keeps them from re-issuing a stop that is already
+    // running — the second "terminating nfqws" ten seconds after the first.
     if (!canStopFrom(m_manager->state()))
         return;
     m_manager->stop();
+}
+
+// A row was pressed. The window decides what selection means: this is now the profile the power button
+// will run. The row's own clicked() fired for a left-press anywhere on it, and only one row is ever lit,
+// so the edge moves here rather than in the card. Persisted through Settings under lastStrategyId so the
+// choice survives a restart and the auto-start-on-launch path still has a name to start.
+void MainWindow::onProfileSelected(const QString &id)
+{
+    ProfileCard *card = m_cards.value(id, nullptr);
+    if (!card || id == m_selectedId)
+        return;
+    m_selectedId = id;
+    for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it)
+        it.value()->setSelected(it.key() == id);
+
+    m_applyingSettings = true;
+    m_settings->setLastStrategyId(id);
+    m_applyingSettings = false;
+
+    // While a run is up the button means "stop", and pressing it would tear down the live run rather than
+    // switch to this profile — so say what selecting actually did, and let the user stop first if that is
+    // what they meant. The power button's own tooltip already carries the refusal reason.
+    const QString name = card->strategy().name.isEmpty() ? card->nameLabel()->text()
+                                                          : card->strategy().name;
+    showTransientMessage(name, 3000);
+    updateStatusUi();
+}
+
+// The row already put the command on the clipboard before emitting this. The window's only job is to say
+// so in the footer — a clipboard write with no feedback is indistinguishable from a dead button.
+void MainWindow::onProfileCopied(const QString &id)
+{
+    ProfileCard *card = m_cards.value(id, nullptr);
+    if (!card)
+        return;
+    showTransientMessage(LanguageManager::tr(QStringLiteral("profile.copied"))
+                             .arg(card->commandLine()), 4000);
+}
+
+// The row asked to delete itself. A profile is a real file in the zapret folder, so this is the one menu
+// entry that destroys something: it confirms first, then removes, then rescans so the list and the
+// manager agree about what is gone. If the deleted profile is the selected one, selection falls back to
+// the next row (populateCards does that), and the power button will not keep naming a deleted file.
+void MainWindow::onProfileDeleteRequested(const QString &id)
+{
+    ProfileCard *card = m_cards.value(id, nullptr);
+    if (!card)
+        return;
+    const Strategy strategy = card->strategy();
+    const QString path = strategy.filePath;
+    if (path.isEmpty()) {
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("profile.delete_failed")).arg(id),
+                          LogPanel::Error);
+        return;
+    }
+
+    const QString name = strategy.name.isEmpty() ? card->nameLabel()->text() : strategy.name;
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this, LanguageManager::tr(QStringLiteral("profile.delete_title")),
+        LanguageManager::tr(QStringLiteral("profile.delete_confirm")).arg(name),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QFile file(path);
+    if (file.remove()) {
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("profile.deleted")).arg(name),
+                          LogPanel::Info);
+        // A running profile whose file was just removed stays running (the payload is already in memory);
+        // deleting the entry only takes it off the list. Rescan rebuilds the rows and repoint the route.
+        refreshStrategies();
+    } else {
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("profile.delete_failed"))
+                              .arg(QDir::toNativeSeparators(path)),
+                          LogPanel::Error);
+    }
 }
 
 void MainWindow::onStateChanged(IZapretBackend::State state)
@@ -1304,10 +1534,13 @@ QString MainWindow::errorCardId() const
 
 void MainWindow::attachErrorBadge(const QString &id, const QString &message)
 {
-    StrategyCard *card = m_cards.value(id, nullptr);
+    ProfileCard *card = m_cards.value(id, nullptr);
     if (!card)
         return;
-    card->setError(message);   // an empty message clears the badge
+    // ProfileCard has no separate clearError(): an empty message is the clear, and the red edge plus the
+    // reason in the tooltip are what the row does with it. The row is only here to say which profile failed
+    // and why, not to offer a retry — that is the power button's again.
+    card->setError(message);
     if (card->hasError())
         m_errorCardId = id;
     else if (m_errorCardId == id)
@@ -1343,10 +1576,20 @@ void MainWindow::notifyError(const QString &message, bool interactive)
 
 void MainWindow::onPingUpdated(const QString &host, int status, int latencyMs)
 {
-    auto it = m_indicators.constFind(host);
-    if (it == m_indicators.constEnd())
-        return;
-    it.value()->setStatus(PingIndicator::statusFromServiceInt(status), latencyMs);
+    const PingIndicator::PingStatus ps = PingIndicator::statusFromServiceInt(status);
+
+    // Remember the verdict so a profile row built later in this cycle can be seeded with the live number
+    // instead of grey (populateCards reads m_lastPing), then push it to the dashboard ring and to every
+    // row that carries a chip for this host. One probe, three places told, all from the same value.
+    PingMemo memo;
+    memo.status = ps;
+    memo.latencyMs = latencyMs;
+    m_lastPing.insert(host, memo);
+
+    if (auto it = m_indicators.constFind(host); it != m_indicators.constEnd())
+        it.value()->setStatus(ps, latencyMs);
+    for (ProfileCard *card : std::as_const(m_cards))
+        card->setPing(host, ps, latencyMs);
 }
 
 void MainWindow::onStrategiesLoaded(int count)
@@ -1407,6 +1650,51 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (m_manager->isRunning() && canStopFrom(m_manager->state()))
         m_manager->stop();
     event->accept();
+}
+
+// ---- frameless-window drag ----------------------------------------------------
+//
+// The window carries no system frame, so the only thing it has to be grabbed by is its own header. These
+// three handlers turn a left-press on the header band into a move of the whole window. Everything else —
+// a press on a page, a card, a button — is not in the header band and falls through to the ordinary
+// widget behaviour, so the drag never steals a click from a control that lives below the title line.
+
+void MainWindow::mousePressEvent(QMouseEvent *event)
+{
+    // The header bar occupies the top kHeaderDragHeight px of the window, spanning the full width minus
+    // nothing: the two chrome buttons are children that consume their own presses, so a press that reaches
+    // MainWindow here is on bare header space. Anywhere else in that band, start dragging.
+    if (event->button() == Qt::LeftButton && event->position().y() <= kHeaderDragHeight) {
+        m_dragging = true;
+        m_dragOffset = event->position().toPoint();
+        event->accept();
+        return;
+    }
+    QMainWindow::mousePressEvent(event);
+}
+
+void MainWindow::mouseMoveEvent(QMouseEvent *event)
+{
+    if (m_dragging && (event->buttons() & Qt::LeftButton)) {
+        // The window is frameless and fixed-size, so this is the only thing that moves it. mapToGlobal on
+        // the central widget would fight the rail offset; frameGeometry() is the window's own top-left in
+        // global space, and subtracting the press offset from the pointer's global position keeps the grab
+        // point under the cursor exactly.
+        move(event->globalPosition().toPoint() - m_dragOffset);
+        event->accept();
+        return;
+    }
+    QMainWindow::mouseMoveEvent(event);
+}
+
+void MainWindow::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (m_dragging) {
+        m_dragging = false;
+        event->accept();
+        return;
+    }
+    QMainWindow::mouseReleaseEvent(event);
 }
 
 

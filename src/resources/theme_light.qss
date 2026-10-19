@@ -71,6 +71,20 @@ QLabel#railVersion {
     color: #9CA3AF; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
 }
 
+/* ---------- window chrome (frameless) ----------------------------------------
+   Same pair as the dark sheet. Icon-only QToolButtons in the header, each carrying a "glyph" property so
+   applyTheme() re-bakes it; the close control is tinted to the light theme's red on hover so leaving reads
+   apart from minimising. */
+QToolButton#windowButton {
+    background-color: transparent; color: #6B7280;
+    border: 1px solid transparent; border-radius: 8px; padding: 0;
+}
+QToolButton#windowButton:hover { background-color: #E5E7EB; border-color: #D1D5DB; color: #1F2937; }
+QToolButton#windowButton:pressed { background-color: #D1D5DB; }
+QToolButton#windowButton:focus { outline: none; border-color: #DDD6FE; }
+QToolButton#windowButton[role="close"]:hover { background-color: #DC2626; border-color: #DC2626; color: #FFFFFF; }
+QToolButton#windowButton[role="close"]:pressed { background-color: #B91C1C; border-color: #B91C1C; }
+
 /* ---------- header ---------- */
 QWidget#headerBar { background-color: #F3F4F6; }
 QLabel#appTitle {
@@ -108,7 +122,8 @@ QPushButton#ghostButton:disabled { color: #9CA3AF; border-color: #E5E7EB; }
 
 /* ---------- pages ---------- */
 QStackedWidget#pageStack { background-color: #F3F4F6; }
-QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage { background-color: #F3F4F6; }
+QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage { background-color: #F3F4F6; }
+QWidget#settingsPageHost, QWidget#settingsPage { background-color: #F3F4F6; }
 QLabel#pageTitle {
     background-color: transparent;
     font-size: 15pt; font-weight: 700; color: #1F2937;
@@ -118,26 +133,52 @@ QLabel#pageSubtitle {
     font-size: 9pt; color: #6B7280;
 }
 
-QFrame#card, StrategyCard, QFrame#strategyCard {
+/* ---------- profile rows ----------
+    One horizontal row per profile: the name at the left, the mini ping chips in the middle, the row menu
+    at the right. A row is a choice, not a control — starting belongs to the dashboard's power button — so
+    the only interactive states are the two the window paints with dynamic properties: the accent edge says
+    "this is the profile the button will run", the red edge says "this one failed" and moves the reason to
+    the tooltip. Because QSS never re-reads a property on its own, ProfileCard unpolishes/repolishes on
+    every change, exactly as the rail's [alert] tab does. */
+QFrame#profileCard {
     background-color: #FFFFFF;
     border: 1px solid #D1D5DB;
     border-radius: 12px;
 }
-StrategyCard:hover, QFrame#strategyCard:hover { background-color: #F9FAFB; }
-StrategyCard[active="true"], QFrame#strategyCard[active="true"] {
+QFrame#profileCard:hover { background-color: #F9FAFB; border-color: #9CA3AF; }
+QFrame#profileCard[selected="true"] {
     border: 2px solid #7C3AED;
     background-color: #EDE9FE;
 }
-StrategyCard[error="true"], QFrame#strategyCard[error="true"] {
+QFrame#profileCard[error="true"] {
     border: 2px solid #DC2626;
     background-color: #FDF2F2;
 }
-QLabel#cardError      { color: #DC2626; font-size: 9pt; }
-QLabel#cardTitle { font-size: 11pt; font-weight: 700; color: #1F2937; }
-QLabel#cardDesc  { font-size: 9pt;  color: #6B7280; }
-QLabel#cardHint  { font-size: 8pt;  color: #9CA3AF; }
+QLabel#profileName {
+    background-color: transparent; color: #1F2937; font-size: 11pt; font-weight: 600;
+}
+QWidget#profilePings { background-color: transparent; border: none; }
+/* A chip is one service's mark and its latency on a faint recessed plate, so the pair reads as a unit
+   rather than as two loose labels. The glyph and its colour are baked by ProfileCard from
+   PingIndicator::dotColor(), so only the number's text lives here. */
+QWidget#miniPing {
+    background-color: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 7px;
+}
+QLabel#miniPingIcon { background-color: transparent; }
+QLabel#miniPingValue {
+    background-color: transparent; color: #6B7280; font-size: 10px; font-weight: 600;
+}
 QLabel#muted     { color: #6B7280; }
 QLabel#placeholder { color: #9CA3AF; font-size: 11pt; }
+
+/* The row's menu button: a 30x30 plate holding the three-dot glyph, quiet until the pointer arrives. */
+QToolButton#cardMenu {
+    background-color: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0;
+}
+QToolButton#cardMenu:hover { background-color: #E5E7EB; border-color: #D1D5DB; }
+QToolButton#cardMenu:pressed { background-color: #D1D5DB; }
+QToolButton#cardMenu:focus { outline: none; }
+QMenu#cardMenuPopup { min-width: 148px; }
 
 QPushButton {
     background-color: #FFFFFF; color: #1F2937;
@@ -173,6 +214,9 @@ QLineEdit#pathBad  { border: 1px solid #DC2626; }
 QLabel#validOk  { color: #059669; font-size: 9pt; }
 QLabel#validBad { color: #DC2626; font-size: 9pt; }
 QLabel#trayNote { color: #B45309; font-size: 8pt; }
+/* The Save button's acknowledgement — green, because it reports an outcome rather than an action, and it
+   sits beside the primary button without competing with it for attention. */
+QLabel#savedNote { color: #059669; font-size: 10pt; font-weight: 600; background: transparent; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;
     width: 22px; border: none; }
 QComboBox::down-arrow { image: url(:/icons/arrow-down.svg); width: 14px; height: 14px; }
@@ -241,8 +285,8 @@ QProgressBar::chunk { background-color: #0891B2; border-radius: 5px; }
    card list's viewport) painted black instead of the light background. */
 QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
 QScrollArea > QWidget > QWidget, QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel,
-QWidget#logHeader, QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage,
-QWidget#placeholderPage, QWidget#headerBar {
+QWidget#logHeader, QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage,
+QWidget#placeholderPage, QWidget#settingsPageHost, QWidget#settingsPage, QWidget#headerBar {
     background-color: #F3F4F6;
 }
 QFrame#sidebar { background-color: #E5E7EB; }

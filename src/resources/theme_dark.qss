@@ -18,7 +18,7 @@
    above, so a sheet change without the matching Theme.cpp change shows up as two greens.
 
    Every object name below is a contract with the C++ side (setObjectName in MainWindow / LogPanel /
-   StrategyCard / SettingsDialog / PingIndicator), and several are asserted by tests/uitest.cpp —
+   ProfileCard / SettingsPage / PingIndicator), and several are asserted by tests/uitest.cpp —
    renaming one silently unstyles the widget it targets.
    ==========================================================================*/
 
@@ -82,6 +82,21 @@ QLabel#railVersion {
     color: #5A6175; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
 }
 
+/* ---------- window chrome (frameless) ----------------------------------------
+   The window carries no system frame, so its two controls live in the header. They are icon-only
+   QToolButtons that carry a "glyph" property (so applyTheme() re-bakes them like every other baked
+   icon) and a "role" property that separates the destructive one: the close button turns to the failure
+   red on hover so "leave" reads differently from "tuck away", while minimise keeps the neutral plate. */
+QToolButton#windowButton {
+    background-color: transparent; color: #9CA3AF;
+    border: 1px solid transparent; border-radius: 8px; padding: 0;
+}
+QToolButton#windowButton:hover { background-color: #1F2833; border-color: #1F2833; color: #E7E9F2; }
+QToolButton#windowButton:pressed { background-color: #1F2833; border-color: #2A3644; }
+QToolButton#windowButton:focus { outline: none; border-color: #2E2545; }
+QToolButton#windowButton[role="close"]:hover { background-color: #F87171; border-color: #F87171; color: #0B0C10; }
+QToolButton#windowButton[role="close"]:pressed { background-color: #E05B5B; border-color: #E05B5B; }
+
 /* ---------- header ---------- */
 QWidget#headerBar { background-color: #0B0C10; }
 QLabel#appTitle {
@@ -119,7 +134,8 @@ QPushButton#ghostButton:disabled { color: #454A5C; border-color: #1F2230; }
 
 /* ---------- pages ---------- */
 QStackedWidget#pageStack { background-color: #0B0C10; }
-QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage { background-color: #0B0C10; }
+QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage { background-color: #0B0C10; }
+QWidget#settingsPageHost, QWidget#settingsPage { background-color: #0B0C10; }
 QLabel#pageTitle {
     background-color: transparent;
     font-size: 15pt; font-weight: 700; color: #E7E9F2;
@@ -141,38 +157,54 @@ QToolButton:hover  { background-color: #1F222D; border-color: #262A36; color: #E
 QToolButton:pressed { background-color: #15161C; }
 QToolButton:disabled { color: #454A5C; background-color: transparent; border-color: transparent; }
 
-/* ---------- cards ---------- */
-QFrame#card, StrategyCard, QFrame#strategyCard {
+/* ---------- profile rows ----------
+   One horizontal row per profile: the name at the left, the mini ping chips in the middle, the row menu
+   at the right. A row is a choice, not a control — starting belongs to the dashboard's power button — so
+   the only interactive states are the two the window paints with dynamic properties: the neon edge says
+   "this is the profile the button will run", the red edge says "this one failed" and moves the reason to
+   the tooltip. Because QSS never re-reads a property on its own, ProfileCard unpolishes/repolishes on
+   every change, exactly as the rail's [alert] tab does. */
+QFrame#profileCard {
     background-color: #15161C;
     border: 1px solid #262A36;
-    border-radius: 14px;
+    border-radius: 12px;
 }
-/* A hover edge in the accent colour, matched by the animated drop shadow StrategyCard installs: the
-   shadow is tinted with Theme::accent() so the two glow in the same hue. */
-StrategyCard:hover, QFrame#strategyCard:hover {
-    background-color: #191C24;
-    border: 1px solid #C084FC;
-}
-StrategyCard[active="true"], QFrame#strategyCard[active="true"] {
+QFrame#profileCard:hover { background-color: #191C24; border: 1px solid #343A4A; }
+QFrame#profileCard[selected="true"] {
     border: 1px solid #C084FC;
     background-color: #17131F;
 }
-StrategyCard[active="true"]:hover, QFrame#strategyCard[active="true"]:hover { background-color: #1C1727; }
-/* A failed start keeps its reason on the card itself, not only in the log panel. */
-StrategyCard[error="true"], QFrame#strategyCard[error="true"] {
+QFrame#profileCard[selected="true"]:hover { background-color: #1C1727; }
+QFrame#profileCard[error="true"] {
     border: 1px solid #F87171;
     background-color: #1B1215;
 }
-QLabel#cardTitle { font-size: 11pt; font-weight: 700; color: #E7E9F2; background: transparent; }
-QLabel#cardDesc  { font-size: 9pt;  color: #8A91A6; background: transparent; }
-QLabel#cardHint  { font-size: 8pt;  color: #5A6175; background: transparent; }
-QLabel#muted     { color: #8A91A6; background: transparent; }
-QLabel#placeholder { color: #5A6175; font-size: 11pt; background: transparent; }
-QLabel#cardError { color: #F87171; font-size: 9pt; background: transparent; }
-QWidget#cardErrorRow, QFrame#cardErrorRow {
-    background-color: #221418; border: 1px solid #3A1F24; border-radius: 8px;
+QLabel#profileName {
+    background-color: transparent; color: #E7E9F2; font-size: 11pt; font-weight: 600;
 }
-QLabel#cardErrorIcon { background: transparent; }
+QWidget#profilePings { background-color: transparent; border: none; }
+/* A chip is one service's mark and its latency, set on a faint recessed plate so the pair reads as a unit
+   rather than as two loose labels on the row. The glyph and its colour are baked by ProfileCard from
+   PingIndicator::dotColor(), so only the number's text lives here. */
+QWidget#miniPing {
+    background-color: #0F1116; border: 1px solid #262A36; border-radius: 7px;
+}
+QLabel#miniPingIcon { background-color: transparent; }
+QLabel#miniPingValue {
+    background-color: transparent; color: #9CA3AF; font-size: 10px; font-weight: 600;
+}
+QLabel#muted { color: #8A91A6; background: transparent; }
+QLabel#placeholder { color: #5A6175; font-size: 11pt; background: transparent; }
+
+/* The row's menu button: a 30x30 plate holding the three-dot glyph, quiet until the pointer arrives, and
+   the same rounded popup as every other QMenu in the app. */
+QToolButton#cardMenu {
+    background-color: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0;
+}
+QToolButton#cardMenu:hover { background-color: #1F222D; border-color: #262A36; }
+QToolButton#cardMenu:pressed { background-color: #15161C; }
+QToolButton#cardMenu:focus { outline: none; }
+QMenu#cardMenuPopup { min-width: 148px; }
 
 /* ---------- buttons ---------- */
 QPushButton {
@@ -218,6 +250,10 @@ QLabel#validOk  { color: #34D399; font-size: 9pt; }
 QLabel#validBad { color: #F87171; font-size: 9pt; }
 /* "Minimize to tray" that this desktop cannot honour — a warning, not an error. */
 QLabel#trayNote { color: #FBBF24; font-size: 8pt; }
+/* The Save button's acknowledgement. Green rather than the accent because it reports an outcome, not an
+   action — the same #34D399 the sheet uses for any "it worked", and it sits beside the primary button
+   without competing with it for attention. */
+QLabel#savedNote { color: #34D399; font-size: 10pt; font-weight: 600; background: transparent; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right;
     width: 22px; border: none; }
 QComboBox::down-arrow { image: url(:/icons/arrow-down.svg); width: 14px; height: 14px; }
@@ -311,7 +347,8 @@ QProgressBar::chunk { background-color: #22D3EE; border-radius: 7px; }
 QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
 QScrollArea, QScrollArea > QWidget > QWidget,
 QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,
-QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage, QWidget#placeholderPage,
+QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage, QWidget#placeholderPage,
+QWidget#settingsPageHost, QWidget#settingsPage,
 QWidget#headerBar {
     background-color: #0B0C10;
 }
