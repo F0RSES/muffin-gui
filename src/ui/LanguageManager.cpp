@@ -161,16 +161,6 @@ const QVector<Row> &catalog()
             "无法删除文件：%1", "Impossible de supprimer le fichier : %1",
             "फ़ाइल हटाई नहीं जा सकी: %1"),
         // ---- the profiles page ----
-        // A list of rows, each carrying its own reachability. The subtitle names the two things that
-        // distinguish this screen from the dashboard: the row is a choice, and the number is a measurement.
-        ROW("page.profiles_subtitle",
-            "Один профиль за раз. Числа — отклик сервисов, меню строки копирует команду и удаляет файл.",
-            "One profile at a time. The figures are each service's reply; a row's menu copies its command and deletes its file.",
-            "Un perfil a la vez. Las cifras son la respuesta de cada servicio; el menú de una fila copia su comando y elimina su archivo.",
-            "Immer ein Profil. Die Zahlen sind die Antwort jedes Dienstes; das Menü einer Zeile kopiert ihren Befehl und löscht ihre Datei.",
-            "一次一个档案。数字是各服务的响应；行菜单可复制命令并删除文件。",
-            "Un profil à la fois. Les chiffres sont la réponse de chaque service ; le menu d'une ligne copie sa commande et supprime son fichier.",
-            "एक समय में एक प्रोफ़ाइल। आँकड़े हर सेवा का उत्तर हैं; पंक्ति का मेनू उसका कमांड कॉपी करता है और फ़ाइल हटाता है।"),
         ROW("placeholder.no_strategies",
             "Стратегии не найдены.\n\nСкачайте zapret сами — или укажите папку, которая уже есть на диске.",
             "No strategies found.\n\nDownload zapret yourself — or point to a folder that is already on this disk.",

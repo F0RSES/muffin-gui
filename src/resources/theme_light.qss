@@ -128,10 +128,6 @@ QLabel#pageTitle {
     background-color: transparent;
     font-size: 15pt; font-weight: 700; color: #1F2937;
 }
-QLabel#pageSubtitle {
-    background-color: transparent;
-    font-size: 9pt; color: #6B7280;
-}
 
 /* ---------- profile rows ----------
     One horizontal row per profile: the name at the left, the mini ping chips in the middle, the row menu

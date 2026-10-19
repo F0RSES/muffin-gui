@@ -553,8 +553,9 @@ QWidget *MainWindow::buildDashboardPage()
 
 // The profiles page — one horizontal row per strategy, each carrying the services it exists to unblock
 // and a menu for what can be done to the entry itself. Reached from the dashboard's route pill, with its
-// own way back, and holding the two actions the retired toolbar used to: rescan the folder, and fetch
-// zapret when the folder is empty.
+// own way back, and holding the two actions this page is for: rescan the folder, and measure the
+// services now. Fetching zapret is not one of them — a page that lists profiles has nothing to say about
+// where the folder came from, and the settings page and the empty-list placeholder both already offer it.
 QWidget *MainWindow::buildProfilesPage()
 {
     auto *page = new QWidget(m_pages);
@@ -608,29 +609,16 @@ QWidget *MainWindow::buildProfilesPage()
     i18nTip(refresh, QStringLiteral("action.refresh_tip"));
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshStrategies);
 
-    auto *download = new QPushButton(QString(), page);
-    download->setObjectName(QStringLiteral("ghostButton"));
-    download->setProperty("glyph", QStringLiteral("arrow-down"));
-    download->setProperty("glyphPx", 16);
-    download->setIcon(Theme::themedIcon(QStringLiteral("arrow-down"), 16));
-    i18nText(download, QStringLiteral("action.download_zapret"));
-    i18nTip(download, QStringLiteral("action.download_zapret_tip"));
-    connect(download, &QPushButton::clicked, this, &MainWindow::downloadZapret);
-
     head->addWidget(back);
     head->addSpacing(6);
     head->addWidget(title);
     head->addSpacing(12);
     head->addWidget(m_pingTestButton);
+    // The corner is the list's own utility: read the folder again. Everything else this page can do has
+    // a place to say it in — the measurement in its label, the download on the settings page.
     head->addStretch(1);
     head->addWidget(refresh);
-    head->addWidget(download);
     box->addLayout(head);
-
-    auto *subtitle = new QLabel(page);
-    subtitle->setObjectName(QStringLiteral("pageSubtitle"));
-    i18nText(subtitle, QStringLiteral("page.profiles_subtitle"));
-    box->addWidget(subtitle);
 
     // m_stack is still what it always was — the profile rows or the "nothing found" page.
     m_stack = new QStackedWidget(page);

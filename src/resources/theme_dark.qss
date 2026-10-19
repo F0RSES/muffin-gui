@@ -140,10 +140,6 @@ QLabel#pageTitle {
     background-color: transparent;
     font-size: 15pt; font-weight: 700; color: #E7E9F2;
 }
-QLabel#pageSubtitle {
-    background-color: transparent;
-    font-size: 9pt; color: #8A91A6;
-}
 /* ---------- tool buttons ---------- */
 /* The main window has no toolbar any more; these survive for the tool buttons a native file dialog or a
    QComboBox can still put on screen. */
