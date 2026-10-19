@@ -1107,53 +1107,12 @@ void MainWindow::applyTheme()
 // descendants and come along in the same walk.
 void MainWindow::retranslateUi()
 {
-    const auto widgets = findChildren<QWidget *>();
-    for (QWidget *w : widgets) {
-        const QString key = w->property("i18nKey").toString();
-        if (!key.isEmpty()) {
-            if (auto *button = qobject_cast<QAbstractButton *>(w))
-                button->setText(LanguageManager::tr(key));
-            else if (auto *label = qobject_cast<QLabel *>(w))
-                label->setText(LanguageManager::tr(key));
-        }
-        const QString tip = w->property("i18nTip").toString();
-        if (!tip.isEmpty())
-            w->setToolTip(LanguageManager::tr(tip));
-        const QString acc = w->property("i18nAcc").toString();
-        if (!acc.isEmpty())
-            w->setAccessibleName(LanguageManager::tr(acc));
-
-        // A combo's entries carry their data (a level int, a theme name) independently of their text, so
-        // the labels can be rewritten in place — indices and the current selection survive.
-        if (auto *combo = qobject_cast<QComboBox *>(w)) {
-            const QStringList keys = w->property("i18nItems").toStringList();
-            for (int i = 0; i < keys.size() && i < combo->count(); ++i)
-                combo->setItemText(i, LanguageManager::tr(keys.at(i)));
-        }
-        if (auto *spin = qobject_cast<QSpinBox *>(w)) {
-            const QString suffixKey = w->property("i18nSuffix").toString();
-            if (!suffixKey.isEmpty())
-                spin->setSuffix(LanguageManager::tr(suffixKey));
-        }
-        // A line edit's placeholder is the one hint the field has: it is not a value, so it rewrites too.
-        if (auto *edit = qobject_cast<QLineEdit *>(w)) {
-            const QString ph = w->property("i18nPlaceholder").toString();
-            if (!ph.isEmpty())
-                edit->setPlaceholderText(LanguageManager::tr(ph));
-        }
-    }
+    retranslateTree(this);
 
     // Cards compute their summary from the strategy rather than from a key, so they re-derive it; the
     // action button already carries its own key and needs nothing extra.
     for (StrategyCard *card : findChildren<StrategyCard *>())
         card->retranslateText();
-
-    const auto actions = findChildren<QAction *>();
-    for (QAction *action : actions) {
-        const QString key = action->property("i18nKey").toString();
-        if (!key.isEmpty())
-            action->setText(LanguageManager::tr(key));
-    }
 
     // The rail's flag, the menu tick, and any text the status machine writes rather than the builders.
     updateLanguageButton();

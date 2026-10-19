@@ -136,6 +136,15 @@ inline Widget *i18nSuffix(Widget *w, const QString &key)
     return w;
 }
 
+// Apply every i18n* property under `root`, in the language LanguageManager now holds: text on buttons
+// and labels, tooltips, accessible names, combo entries, spin suffixes, line-edit placeholders, and the
+// text of any QAction parented into the tree. Returns the number of widgets it rewrote, so a caller
+// (or a test) can tell "nothing to do" from "nothing was tagged".
+//
+// MainWindow::retranslateUi() is this plus the few strings that are derived rather than keyed (a card's
+// summary, the rail's flag, the status chip); dialogs that are built fresh each time never need it.
+int retranslateTree(QObject *root);
+
 template <typename Widget>
 inline Widget *i18nPlaceholder(Widget *w, const QString &key)
 {

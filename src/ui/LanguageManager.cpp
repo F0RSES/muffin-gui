@@ -1,7 +1,13 @@
 #include "LanguageManager.h"
 
+#include <QAbstractButton>
 #include <QAction>
 #include <QDebug>
+#include <QComboBox>
+#include <QLabel>
+#include <QLineEdit>
+#include <QSpinBox>
+#include <QWidget>
 #include <QIcon>
 #include <QVector>
 
@@ -578,6 +584,71 @@ QAction *i18nText(QAction *action, const QString &key)
     action->setProperty("i18nKey", key);
     action->setText(LanguageManager::tr(key));
     return action;
+}
+
+int retranslateTree(QObject *root)
+{
+    int rewritten = 0;
+    if (!root)
+        return 0;
+
+    const auto widgets = root->findChildren<QWidget *>();
+    for (QWidget *w : widgets) {
+        const QString key = w->property("i18nKey").toString();
+        if (!key.isEmpty()) {
+            if (auto *button = qobject_cast<QAbstractButton *>(w)) {
+                button->setText(LanguageManager::tr(key));
+                ++rewritten;
+            } else if (auto *label = qobject_cast<QLabel *>(w)) {
+                label->setText(LanguageManager::tr(key));
+                ++rewritten;
+            }
+        }
+        const QString tip = w->property("i18nTip").toString();
+        if (!tip.isEmpty()) {
+            w->setToolTip(LanguageManager::tr(tip));
+            ++rewritten;
+        }
+        const QString acc = w->property("i18nAcc").toString();
+        if (!acc.isEmpty()) {
+            w->setAccessibleName(LanguageManager::tr(acc));
+            ++rewritten;
+        }
+
+        // A combo's entries carry their data (a level int, a theme name) independently of their text, so
+        // the labels can be rewritten in place: indices and the current selection survive.
+        if (auto *combo = qobject_cast<QComboBox *>(w)) {
+            const QStringList keys = w->property("i18nItems").toStringList();
+            for (int i = 0; i < keys.size() && i < combo->count(); ++i) {
+                combo->setItemText(i, LanguageManager::tr(keys.at(i)));
+                ++rewritten;
+            }
+        }
+        if (auto *spin = qobject_cast<QSpinBox *>(w)) {
+            const QString suffixKey = w->property("i18nSuffix").toString();
+            if (!suffixKey.isEmpty()) {
+                spin->setSuffix(LanguageManager::tr(suffixKey));
+                ++rewritten;
+            }
+        }
+        if (auto *edit = qobject_cast<QLineEdit *>(w)) {
+            const QString ph = w->property("i18nPlaceholder").toString();
+            if (!ph.isEmpty()) {
+                edit->setPlaceholderText(LanguageManager::tr(ph));
+                ++rewritten;
+            }
+        }
+    }
+
+    const auto actions = root->findChildren<QAction *>();
+    for (QAction *action : actions) {
+        const QString key = action->property("i18nKey").toString();
+        if (!key.isEmpty()) {
+            action->setText(LanguageManager::tr(key));
+            ++rewritten;
+        }
+    }
+    return rewritten;
 }
 
 const QStringList &LanguageManager::codes()

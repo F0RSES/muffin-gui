@@ -28,6 +28,7 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QIcon>
@@ -849,6 +850,34 @@ static void testLanguage()
                   QStringLiteral("log button '%1' says what its key says").arg(key));
         }
         check(tagged == 3, "copy, clear and save are all tagged for retranslation");
+    }
+
+    // The walk itself, on a widget that already exists: tag-and-rewrite is what makes a language switch
+    // take effect without a restart, so it is checked on the log panel's own toolbar — buttons, the
+    // filter combo's entries, and the tooltips — rather than on a MainWindow this suite does not build.
+    {
+        LogPanel panel;
+        LanguageManager::instance().setCode(QStringLiteral("de"));
+        const int touched = retranslateTree(&panel);
+        QPushButton *copy = nullptr;
+        for (QPushButton *b : panel.findChildren<QPushButton *>())
+            if (b->property("i18nKey").toString() == QLatin1String("log.copy"))
+                copy = b;
+        check(copy && copy->text() == QStringLiteral("Kopieren"),
+              "retranslateTree re-says a button in the new language");
+        check(copy && copy->toolTip() == QStringLiteral("Das gesamte Protokoll in die Zwischenablage kopieren"),
+              "and its tooltip");
+        QComboBox *filter = panel.findChild<QComboBox *>();
+        check(filter && filter->itemText(0) == QStringLiteral("Alle")
+                  && filter->itemText(3) == QStringLiteral("Fehler"),
+              "combo entries follow, in index order");
+        check(filter && filter->itemData(3).toInt() == LogPanel::Error,
+              "and the value behind an entry is untouched by its label");
+        check(touched >= 8, QStringLiteral("the walk rewrote %1 tagged strings").arg(touched));
+        LanguageManager::instance().setCode(QStringLiteral("ru"));
+        retranslateTree(&panel);
+        check(copy->text() == QStringLiteral("Копировать"),
+              "switching back re-says them again");
     }
 
     // The persisted choice: the default, and a value that survives the object that wrote it.
