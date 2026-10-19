@@ -14,13 +14,9 @@ QToolTip {
     border: 1px solid #D6D8E4; padding: 5px 8px; border-radius: 6px;
 }
 
+/* ---------- tool buttons ---------- */
+/* The main window has no toolbar; these survive for the tool buttons a native dialog can show. */
 QToolBar, QToolBar::separator { background-color: #E9EBF3; border: none; spacing: 6px; }
-QToolBar#mainToolBar {
-    background-color: #F4F5FA;
-    border-bottom: 1px solid #DCDEEA;
-    padding: 7px 14px;
-    spacing: 6px;
-}
 QToolButton {
     background-color: transparent; color: #404655;
     border: 1px solid transparent; border-radius: 8px; padding: 6px 10px;
@@ -29,35 +25,83 @@ QToolButton:hover  { background-color: #DCDFEB; border-color: #C9CCDC; }
 QToolButton:pressed { background-color: #CDD1E0; }
 QToolButton:disabled { color: #A7ABBB; }
 
-/* ---------- sidebar rail: same structure as the dark sheet, daylight tokens ---------- */
-QWidget#sidebar { background-color: #E9EBF3; border-right: 1px solid #DCDEEA; }
+/* ---------- shell: rail + main area -------------------------------------------
+   The same 70 px rail of glyphs as the dark sheet, in daylight tokens. */
+QFrame#sidebar {
+    background-color: #E9EBF3;
+    border-right: 1px solid #DCDEEA;
+}
+QFrame#mainArea { background-color: #F4F5FA; }
 QLabel#brandLogo { background-color: transparent; }
-QLabel#brandName {
-    background-color: transparent;
-    font-size: 12pt; font-weight: 700; letter-spacing: 0.5px; color: #111827;
-}
-QLabel#brandCaption {
-    background-color: transparent;
-    font-size: 8pt; font-weight: 500; letter-spacing: 1.2px; color: #9CA3AF;
-}
-QFrame#sidebarRule { background-color: #D8DBE8; border: none; }
+
 QPushButton#navButton {
     background-color: transparent; color: #6B7280;
-    border: 1px solid transparent; border-radius: 10px;
-    padding: 9px 12px; text-align: left; font-size: 10pt; font-weight: 500;
+    border: 1px solid transparent; border-radius: 12px; padding: 0;
 }
-QPushButton#navButton:hover { background-color: #DCDFEB; color: #1F2937; border-color: #D0D4E3; }
+QPushButton#navButton:hover { background-color: #DCDFEB; border-color: #D0D4E3; color: #1F2937; }
 QPushButton#navButton:pressed { background-color: #D0D4E3; }
-QPushButton#navButton:checked {
-    background-color: #F4EFFF; color: #7C3AED; border-color: #DDD0F5; font-weight: 600;
-}
-QPushButton#navButton:focus { outline: none; }
+QPushButton#navButton:checked { background-color: #F4EFFF; border-color: #DDD0F5; color: #7C3AED; }
+QPushButton#navButton:focus { outline: none; border-color: #DDD0F5; }
 QPushButton#navButton:disabled { color: #B4B8C6; background-color: transparent; }
-QPushButton#navButton[alert="true"] { color: #DC2626; }
+QPushButton#navButton[alert="true"] { color: #DC2626; border-color: #FCA5A5; background-color: #FEF2F2; }
+
+QLabel#railVersion {
+    background-color: transparent;
+    color: #9CA3AF; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
+}
+
+/* ---------- header ---------- */
+QWidget#headerBar { background-color: #F4F5FA; }
+QLabel#appTitle {
+    background-color: transparent;
+    font-family: "Montserrat", "Outfit", "Segoe UI", "Inter", sans-serif;
+    font-weight: 800; font-size: 24px; letter-spacing: 0.5px; color: #7C3AED;
+}
+QLabel#appSubtitle {
+    background-color: transparent;
+    color: #9CA3AF; font-size: 11px; font-weight: 500;
+}
+QFrame#headerRule { background-color: #DCDEEA; border: none; }
+
+/* The green here is Theme::pingOk() — #10B981 in both themes, because the ping rings and the power ring
+   are painted from that one token and cannot follow a per-theme sheet colour. */
+QWidget#statusDot { background-color: #10B981; border-radius: 3px; }
+QWidget#statusDot[statusKind="stopped"]  { background-color: #9CA3AF; }
+QWidget#statusDot[statusKind="starting"] { background-color: #D97706; }
+QWidget#statusDot[statusKind="running"]  { background-color: #10B981; }
+QWidget#statusDot[statusKind="error"]    { background-color: #DC2626; }
+QLabel#statusText {
+    background-color: transparent;
+    color: #10B981; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+}
+QLabel#statusText[statusKind="stopped"]  { color: #9CA3AF; }
+QLabel#statusText[statusKind="starting"] { color: #D97706; }
+QLabel#statusText[statusKind="running"]  { color: #059669; }
+QLabel#statusText[statusKind="error"]    { color: #DC2626; }
+
+/* ---------- route pill ---------- */
+QPushButton#routePill {
+    background-color: #FFFFFF; color: #1F2937;
+    border: 1px solid #DCDEEA; border-radius: 999px;
+    padding: 7px 16px; font-size: 12px; font-weight: 600;
+}
+QPushButton#routePill:hover { border-color: #7C3AED; color: #7C3AED; background-color: #F4EFFF; }
+QPushButton#routePill:pressed { background-color: #EDE4FB; }
+QPushButton#routePill:focus { outline: none; border-color: #DDD0F5; }
+
+QPushButton#ghostButton {
+    background-color: transparent; color: #6B7280;
+    border: 1px solid #DCDEEA; border-radius: 10px;
+    padding: 6px 12px; font-size: 10pt; font-weight: 500;
+}
+QPushButton#ghostButton:hover { background-color: #EDEEF5; border-color: #C9CCDC; color: #1F2937; }
+QPushButton#ghostButton:pressed { background-color: #DCDFEB; }
+QPushButton#ghostButton:focus { outline: none; }
+QPushButton#ghostButton:disabled { color: #B4B8C6; border-color: #E2E4EF; }
 
 /* ---------- pages ---------- */
 QStackedWidget#pageStack { background-color: #F4F5FA; }
-QWidget#dashboardPage, QWidget#logsPage { background-color: #F4F5FA; }
+QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage { background-color: #F4F5FA; }
 QLabel#pageTitle {
     background-color: transparent;
     font-size: 15pt; font-weight: 700; color: #111827;
@@ -161,19 +205,13 @@ QScrollBar::handle:horizontal { background: #C7CAD9; border-radius: 4px; min-wid
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: none; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
-QStatusBar { background-color: #E7E9F2; color: #6B7280; border-top: 1px solid #DCDEEA; }
-QStatusBar::item { border: none; }
-QLabel#statusLabel {
-    font-weight: 600; padding: 3px 10px; border-radius: 999px;
-    border: 1px solid #DCDEEA; background-color: #FFFFFF;
-}
-QLabel#statusLabel[statusKind="stopped"] { color: #6B7280; }
-QLabel#statusLabel[statusKind="starting"] { color: #D97706; border-color: #F6DFB0; background-color: #FDF6E7; }
-QLabel#statusLabel[statusKind="running"]  { color: #059669; border-color: #B7E4D2; background-color: #ECFDF5; }
-QLabel#statusLabel[statusKind="error"]    { color: #DC2626; border-color: #FCA5A5; background-color: #FEF2F2; }
-QLabel#dirLabel { color: #9CA3AF; font-size: 9pt; }
-QLabel#pingName { color: #6B7280; font-size: 9pt; }
-QLabel#pingValue { color: #1F2937; font-size: 9pt; font-weight: 600; }
+/* ---------- footer + ping badges ---------- */
+QFrame#footerBar { background-color: #F4F5FA; border-top: 1px solid #DCDEEA; }
+QLabel#footerHint { background-color: transparent; color: #9CA3AF; font-size: 11px; }
+QLabel#dirLabel { background-color: transparent; color: #B4B8C6; font-size: 11px; }
+QLabel#pingNumber { background-color: transparent; color: #111827; font-size: 12px; font-weight: 700; }
+QLabel#pingClock  { background-color: transparent; }
+QLabel#pingLabel  { background-color: transparent; color: #9CA3AF; font-size: 10px; }
 
 QMenu {
     background-color: #FFFFFF; color: #1F2937;
@@ -197,7 +235,9 @@ QProgressBar::chunk { background-color: #0891B2; border-radius: 5px; }
    card list's viewport) painted black instead of the light background. */
 QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
 QScrollArea > QWidget > QWidget, QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel,
-QWidget#logHeader, QWidget#dashboardPage, QWidget#logsPage, QWidget#placeholderPage {
+QWidget#logHeader, QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage,
+QWidget#placeholderPage, QWidget#headerBar {
     background-color: #F4F5FA;
 }
-QWidget#sidebar { background-color: #E9EBF3; }
+QFrame#sidebar { background-color: #E9EBF3; }
+QFrame#mainArea, QFrame#footerBar { background-color: #F4F5FA; }

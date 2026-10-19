@@ -184,8 +184,12 @@ QColor Theme::error()            { return tokensFor(isDark()).err; }
 QColor Theme::warning()          { return tokensFor(isDark()).warn; }
 QColor Theme::pingUnknown()      { return QColor(0x6B, 0x72, 0x80); }
 QColor Theme::pingWaiting()      { return tokensFor(isDark()).warn; }
-QColor Theme::pingOk()           { return tokensFor(isDark()).ok; }
+// #10B981 rather than success()'s #34D399: the dashboard draws its connected chip, its live ping rings
+// and a running power button all in this one green, and two greens that close read as a mistake. Both
+// sheets carry the same hex — change the sheet and this together.
+QColor Theme::pingOk()           { return QColor(0x10, 0xB9, 0x81); }
 QColor Theme::pingFail()         { return tokensFor(isDark()).err; }
+QColor Theme::pingMuted()        { return QColor(0x9C, 0xA3, 0xAF); }
 
 QColor Theme::logColor(int level)
 {

@@ -9,13 +9,14 @@
 
 class QAction;
 class QCloseEvent;
+class QFrame;
+class QHBoxLayout;
 class QLabel;
 class QPushButton;
 class QScrollArea;
 class QStackedWidget;
 class QSystemTrayIcon;
 class QTimer;
-class QToolBar;
 class QVBoxLayout;
 class QWidget;
 
@@ -24,13 +25,19 @@ namespace zapret {
 class LogPanel;
 class PingIndicator;
 class PingService;
+class PowerButton;
 class Settings;
 class StrategyCard;
 class ZapretManager;
 
-// The application window: a navigation rail down the left, one full-width page at a time to its
-// right (strategy cards, then the journal), reachability in the status bar, everything driven through
-// ZapretManager + Settings.
+// The application window: a narrow icon rail down the left, one full-width page at a time to its right,
+// everything driven through ZapretManager + Settings.
+//
+// The rail is 70 px of glyphs only — brand at the top, the journal in the middle, settings and the
+// version at the foot. The page beside it is the dashboard: a header naming the app and its connection
+// state, one enormous power button that starts and stops the strategy, and a row of neon ping badges.
+// Strategy cards are not a page you navigate to so much as a choice you make from the dashboard's
+// "route" pill, because picking the route and running it are one decision, not two screens.
 //
 // It owns no domain logic. Cards come from the manager's catalog (which is the parser's output), the
 // start/stop path is the manager's, and persisted values are Settings'. What lives here is only
@@ -46,6 +53,10 @@ public:
 
     // Text/colour of the toolbar status chip for a backend state. Static so the mapping is testable.
     static QString statusText(IZapretBackend::State state, const QString &strategyName);
+    // The header's one-word chip for a state ("CONNECTED", "OFFLINE"). Uppercase and English on purpose:
+    // it is a design element beside a 6 px dot, not a sentence, and the mock spells it that way. The
+    // longer, strategy-naming form stays in statusText() for the tray tooltip and the log.
+    static QString connectionText(IZapretBackend::State state);
     // QSS dynamic-property value for [statusKind="..."].
     static QString statusKind(IZapretBackend::State state);
 
@@ -96,17 +107,23 @@ public:
     QString errorCardId() const;
 
     // ---- rail navigation ------------------------------------------------------------
-    // The rail replaced a splitter that kept the journal permanently beside the cards; at the 1100 px
-    // minimum width both halves were too narrow to read anything, so each is now a full-width page.
     // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
     // one without walking the widget tree.
+    //
+    // PageStrategies is not reachable from the rail: the rail is three glyphs and the mock has no room
+    // for a fourth. It opens from the dashboard's route pill, which is where the choice belongs — you
+    // pick a strategy in order to run it.
     enum Page : int
     {
-        PageDashboard = 0,
-        PageLogs      = 1
+        PageDashboard  = 0,
+        PageStrategies = 1,
+        PageLogs       = 2
     };
     int currentPage() const;
     void setCurrentPage(int page);
+    // The page to fall back to when a full-screen view is closed: always the dashboard, never whichever
+    // page happened to be up before.
+    Q_INVOKABLE void showDashboard();
     // Set while the journal is hidden and a warning or error arrives, cleared by opening it: the page
     // switch costs the user the passive view of the log, so something has to say "there is news here".
     bool logAlertActive() const;
@@ -125,6 +142,9 @@ protected:
 private slots:
     void onStartRequested(const QString &id);
     void onStopRequested();
+    // The power button: stop what is running, otherwise start what the route pill names. One slot for
+    // both because the button is one control whose meaning the state decides.
+    void onPowerClicked();
     void onStateChanged(IZapretBackend::State state);
     void onStrategyStarted(const QString &id, const QString &name);
     void onStrategyStopped();
@@ -138,17 +158,24 @@ private slots:
 
 private:
     void buildCentral();
-    // The left rail: brand, the two page switches, and the settings/power actions at its foot.
+    // The rail: brand at the head, the journal in the middle, settings and the version at the foot.
     QWidget *buildSidebar();
-    // One rail button. The glyph name goes in a property so applyTheme() can re-tint it: Theme::icon()
-    // bakes the colour into a pixmap, so a theme switch cannot repaint an already-loaded glyph.
-    QPushButton *addNavButton(QVBoxLayout *box, const QString &glyph, const QString &text);
+    // The column to the rail's right: header, page stack, footer.
+    QWidget *buildMainArea();
+    QWidget *buildHeader();
+    QWidget *buildFooter();
+    QWidget *buildDashboardPage();
+    QWidget *buildStrategiesPage();
+    QWidget *buildLogsPage();
+    // One rail glyph. The name goes in a property so applyTheme() can re-tint it: Theme::icon() bakes the
+    // colour into a pixmap, so a theme switch cannot repaint an already-loaded glyph.
+    QPushButton *addRailButton(QVBoxLayout *box, const QString &glyph, const QString &text);
     // Turns the journal's tab red while it holds a warning or error the user has not opened. The
     // property is what the QSS [alert="true"] rule keys off, so it needs the same unpolish/polish
     // dance StrategyCard uses for [active] and [error].
     void setLogAlert(bool on);
-    void buildToolBar();
-    void buildStatusBar();
+    // The one line the header's chip is allowed to be built from: text plus colour from the state.
+    void setConnectionChip(const QString &text, const QString &statusKind);
     // Create the tray icon if the platform has a tray host. Idempotent; returns whether one exists.
     bool ensureTray();
     void startTrayRetry();
@@ -161,6 +188,10 @@ private:
     void applyTheme();
     void requestQuit();
     void startStrategy(const QString &id, bool interactive);
+    // The footer's temporary line — what statusBar()->showMessage used to be. The redesign retired the
+    // status bar, and a window that creates one just to flash a sentence in it for three seconds is how
+    // the old chrome creeps back.
+    void showTransientMessage(const QString &text, int timeoutMs);
 
     // Pin a backend failure onto the card that caused it (an empty message clears it), and tell the
     // user once — repeated identical failures are logged and badged, but not re-dialoged.
@@ -172,22 +203,26 @@ private:
     PingService *m_ping = nullptr;
     LogPanel *m_log = nullptr;
 
-    QToolBar *m_toolBar = nullptr;
-    QWidget *m_sidebar = nullptr;          // the rail: brand, page switches, foot actions
-    QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageLogs
-    QPushButton *m_navDashboard = nullptr;
+    QWidget *m_sidebar = nullptr;          // the rail: brand, the journal glyph, settings and version
+    QFrame *m_mainArea = nullptr;          // header, page stack, footer
+    QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageStrategies <-> PageLogs
     QPushButton *m_navLogs = nullptr;      // carries the [alert="true"] property
-    QPushButton *m_navPower = nullptr;     // its tooltip is the only place the tray policy is spelled out
+    PowerButton *m_power = nullptr;        // the dashboard's one control
+    QPushButton *m_routePill = nullptr;    // "Smart route" — names the strategy the power button runs
+    QWidget *m_statusDot = nullptr;        // the 6 px chip beside the connection text
+    QLabel *m_statusLabel = nullptr;       // "CONNECTED" and friends
+    QLabel *m_dirLabel = nullptr;          // the resolved zapret root, in the footer
+    QLabel *m_footerLabel = nullptr;       // the ping cadence, or a transient message
+    QTimer *m_footerTimer = nullptr;       // for how long a transient message holds the footer
+    QString m_footerIdleText;              // what the footer says when nothing is being announced
     QWidget *m_dashboardPage = nullptr;
+    QWidget *m_strategiesPage = nullptr;
     QWidget *m_logsPage = nullptr;
     QScrollArea *m_scroll = nullptr;
     QStackedWidget *m_stack = nullptr;      // cards list <-> "no strategies found" placeholder
     QWidget *m_cardHost = nullptr;
     QVBoxLayout *m_cardLayout = nullptr;
     QWidget *m_placeholder = nullptr;      // "no strategies found" page: the text plus its two ways out
-    QAction *m_stopAction = nullptr;         // toolbar "Остановить", enabled only while managed
-    QLabel *m_statusLabel = nullptr;
-    QLabel *m_dirLabel = nullptr;
 
     QSystemTrayIcon *m_tray = nullptr;
     QTimer *m_trayRetry = nullptr;           // the tray host can appear after we start

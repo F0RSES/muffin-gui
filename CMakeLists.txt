@@ -103,6 +103,7 @@ set(ZAPRET_UI_SOURCES
     src/ui/Theme.cpp
     src/ui/Settings.cpp
     src/ui/PingIndicator.cpp
+    src/ui/PowerButton.cpp
     src/ui/StrategyCard.cpp
     src/ui/LogPanel.cpp
     src/ui/DownloadDialog.cpp
@@ -116,6 +117,7 @@ set(ZAPRET_UI_HEADERS
     src/ui/Theme.h
     src/ui/Settings.h
     src/ui/PingIndicator.h
+    src/ui/PowerButton.h
     src/ui/StrategyCard.h
     src/ui/LogPanel.h
     src/ui/DownloadDialog.h

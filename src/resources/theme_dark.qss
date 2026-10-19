@@ -1,15 +1,21 @@
 /* ============================================================================
-   Muffin — dark theme, "dark dashboard".
+   Muffin — dark theme, "minimalist cyberpunk dashboard".
 
    Tokens (mirrored by Theme.cpp::tokensFor(true) — change both, they are one palette):
-     bg #0B0C10   rail #101219   surface #15161C   recessed #090A0D   hover #1F222D
-     border #262A36   edge #343A4A   text #E7E9F2   muted #8A91A6   faint #5A6175
+     bg #0B0C10   surface #15161C   recessed #090A0D   hover #1F222D
+     hairline #1F2833   border #262A36   edge #343A4A   text #E7E9F2   muted #8A91A6   faint #5A6175
      accent #C084FC (hover #D8B4FE, pressed #A855F7, tint #1C1727)   accent2 #22D3EE
-     ok #34D399   err #F87171   warn #FBBF24
+     ok #34D399   neon green #10B981 (Theme::pingOk: the connected chip, live ping rings)
+     neon grey #9CA3AF (Theme::pingMuted: a ping badge's label and clock)
+     err #F87171   warn #FBBF24
 
-   Shape: a fixed rail on the left carries the brand and the navigation; the page stack to its right
-   shows one full-width page at a time (strategy cards, then the log). Rules are grouped in that
-   order — rail, pages, toolbar, cards, buttons, inputs, log, chrome.
+   Shape: a 70 px rail of glyphs on the left; to its right one column that is header, one full-width
+   page at a time, and a hairline footer. Rules are grouped in that order — shell, header, route pill,
+   pages, tool buttons, cards, buttons, inputs, log, footer, ping badges, chrome.
+
+   The circles are not styled here: PowerButton and PingIndicator paint their own rims and halos,
+   because a stylesheet cannot clip a glow to a circle. The hexes they paint with are the ones listed
+   above, so a sheet change without the matching Theme.cpp change shows up as two greens.
 
    Every object name below is a contract with the C++ side (setObjectName in MainWindow / LogPanel /
    StrategyCard / SettingsDialog / PingIndicator), and several are asserted by tests/uitest.cpp —
@@ -29,47 +35,94 @@ QToolTip {
     border: 1px solid #262A36; padding: 6px 9px; border-radius: 8px;
 }
 
-/* ---------- sidebar rail ---------- */
-QWidget#sidebar {
-    background-color: #101219;
-    border-right: 1px solid #1F2230;
+/* ---------- shell: rail + main area -------------------------------------------
+   Two columns, edge to edge, one hairline between them. The rail is 70 px of glyphs with no labels
+   anywhere; everything that carries text lives to its right. */
+QFrame#sidebar {
+    background-color: #0B0C10;
+    border-right: 1px solid #1F2833;
 }
+QFrame#mainArea { background-color: #0B0C10; }
 QLabel#brandLogo { background-color: transparent; }
-QLabel#brandName {
-    background-color: transparent;
-    font-size: 12pt; font-weight: 700; letter-spacing: 0.5px; color: #E7E9F2;
-}
-QLabel#brandCaption {
-    background-color: transparent;
-    font-size: 8pt; font-weight: 500; letter-spacing: 1.2px; color: #5A6175;
-}
-QFrame#sidebarRule { background-color: #1F2230; border: none; }
 
-/* One rule for every rail button: the two page switches (checkable, driven by an exclusive
-   QButtonGroup) and the two actions at the bottom (Настройки, power) which never get a checked
-   state and so fall through to the hover rule only. */
+/* One rule for every rail glyph. They are icon-only QPushButtons — the accessible name and the tooltip
+   are set in C++, so the sheet's whole job is to make the button vanish apart from its icon. */
 QPushButton#navButton {
-    background-color: transparent; color: #8A91A6;
-    border: 1px solid transparent; border-radius: 10px;
-    padding: 9px 12px; text-align: left; font-size: 10pt; font-weight: 500;
+    background-color: transparent; color: #9CA3AF;
+    border: 1px solid transparent; border-radius: 12px; padding: 0;
 }
 QPushButton#navButton:hover {
-    background-color: #191B23; color: #E7E9F2; border-color: #22252F;
+    background-color: #15171E; border-color: #1F2833; color: #E7E9F2;
 }
-QPushButton#navButton:pressed { background-color: #15161C; }
-QPushButton#navButton:checked {
-    background-color: #1C1727; color: #C084FC; border-color: #2E2545;
-    font-weight: 600;
-}
-QPushButton#navButton:focus { outline: none; }
+QPushButton#navButton:pressed { background-color: #1C1727; }
+QPushButton#navButton:checked { background-color: #1C1727; border-color: #2E2545; color: #C084FC; }
+QPushButton#navButton:focus { outline: none; border-color: #2E2545; }
 QPushButton#navButton:disabled { color: #454A5C; background-color: transparent; }
-/* The journal tab while the page it opens is hidden: a new warning or error went unnoticed, so the
-   label carries the alert colour (the rail glyph is a baked pixmap and cannot recolour itself). */
-QPushButton#navButton[alert="true"] { color: #F87171; }
+/* The journal's glyph while the page it opens is hidden: a new warning or error went unnoticed. The glyph
+   itself is a baked pixmap and cannot recolour itself, so the alert lives on the button's frame. */
+QPushButton#navButton[alert="true"] { color: #F87171; border-color: #4B2530; background-color: #1B1215; }
+
+QLabel#railVersion {
+    background-color: transparent;
+    color: #5A6175; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
+}
+
+/* ---------- header ---------- */
+QWidget#headerBar { background-color: #0B0C10; }
+QLabel#appTitle {
+    background-color: transparent;
+    font-family: "Montserrat", "Outfit", "Inter", "Segoe UI", sans-serif;
+    font-weight: 800; font-size: 24px; letter-spacing: 0.5px; color: #C084FC;
+}
+QLabel#appSubtitle {
+    background-color: transparent;
+    color: #5A6175; font-size: 11px; font-weight: 500;
+}
+QFrame#headerRule { background-color: #1F2833; border: none; }
+
+/* The dot and its word read the same statusKind property, so the pair can never disagree about whether
+   this is a connected machine. Green #10B981 is Theme::pingOk() — change one, change the other. */
+QWidget#statusDot { background-color: #10B981; border-radius: 3px; }
+QWidget#statusDot[statusKind="stopped"]  { background-color: #5A6175; }
+QWidget#statusDot[statusKind="starting"] { background-color: #FBBF24; }
+QWidget#statusDot[statusKind="running"]  { background-color: #10B981; }
+QWidget#statusDot[statusKind="error"]    { background-color: #F87171; }
+QLabel#statusText {
+    background-color: transparent;
+    color: #10B981; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+}
+QLabel#statusText[statusKind="stopped"]  { color: #5A6175; }
+QLabel#statusText[statusKind="starting"] { color: #FBBF24; }
+QLabel#statusText[statusKind="running"]  { color: #10B981; }
+QLabel#statusText[statusKind="error"]    { color: #F87171; }
+
+/* ---------- route pill ---------- */
+/* The dashboard's only text control: it names the strategy the power button will run, and opens the
+   catalog. A 999 px radius on a padded button is a capsule at any height Qt gives it. */
+QPushButton#routePill {
+    background-color: #12141A; color: #E7E9F2;
+    border: 1px solid #1F2833; border-radius: 999px;
+    padding: 7px 16px; font-size: 12px; font-weight: 600;
+}
+QPushButton#routePill:hover { border-color: #C084FC; color: #C084FC; background-color: #17131F; }
+QPushButton#routePill:pressed { background-color: #1C1727; }
+QPushButton#routePill:focus { outline: none; border-color: #2E2545; }
+
+/* A button that is chrome rather than content: back, refresh, download. Present on the two secondary
+   pages, quiet enough that neither competes with the dashboard's circle. */
+QPushButton#ghostButton {
+    background-color: transparent; color: #8A91A6;
+    border: 1px solid #262A36; border-radius: 10px;
+    padding: 6px 12px; font-size: 10pt; font-weight: 500;
+}
+QPushButton#ghostButton:hover { background-color: #1F222D; border-color: #343A4A; color: #E7E9F2; }
+QPushButton#ghostButton:pressed { background-color: #15161C; }
+QPushButton#ghostButton:focus { outline: none; }
+QPushButton#ghostButton:disabled { color: #454A5C; border-color: #1F2230; }
 
 /* ---------- pages ---------- */
 QStackedWidget#pageStack { background-color: #0B0C10; }
-QWidget#dashboardPage, QWidget#logsPage { background-color: #0B0C10; }
+QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage { background-color: #0B0C10; }
 QLabel#pageTitle {
     background-color: transparent;
     font-size: 15pt; font-weight: 700; color: #E7E9F2;
@@ -78,15 +131,10 @@ QLabel#pageSubtitle {
     background-color: transparent;
     font-size: 9pt; color: #8A91A6;
 }
-/* ---------- toolbar ---------- */
-/* The rail owns navigation now, so the toolbar is a thin action strip: same glyphs, no page tabs. */
+/* ---------- tool buttons ---------- */
+/* The main window has no toolbar any more; these survive for the tool buttons a native file dialog or a
+   QComboBox can still put on screen. */
 QToolBar, QToolBar::separator { background-color: #0B0C10; border: none; spacing: 6px; }
-QToolBar#mainToolBar {
-    background-color: #0B0C10;
-    border-bottom: 1px solid #1A1D26;
-    padding: 7px 14px;
-    spacing: 6px;
-}
 QToolButton {
     background-color: transparent; color: #B8BED0;
     border: 1px solid transparent; border-radius: 9px; padding: 6px 11px;
@@ -216,21 +264,19 @@ QScrollBar::handle:horizontal { background: #262A36; border-radius: 4px; min-wid
 QScrollBar::handle:horizontal:hover { background: #C084FC; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: none; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
-/* ---------- status bar ---------- */
-QStatusBar { background-color: #0B0C10; color: #8A91A6; border-top: 1px solid #1A1D26; }
-QStatusBar::item { border: none; }
-QLabel#statusLabel {
-    font-weight: 600; padding: 3px 10px; border-radius: 999px;
-    border: 1px solid #262A36; background-color: #15161C;
-}
-QLabel#statusLabel[statusKind="stopped"] { color: #8A91A6; border-color: #262A36; }
-QLabel#statusLabel[statusKind="starting"] { color: #FBBF24; border-color: #4A3A18; background-color: #1E1810; }
-QLabel#statusLabel[statusKind="running"]  { color: #34D399; border-color: #1B4A3A; background-color: #0F1F1A; }
-QLabel#statusLabel[statusKind="error"]    { color: #F87171; border-color: #4B2530; background-color: #1B1215; }
-QLabel#dirLabel { color: #5A6175; font-size: 9pt; }
-/* Reachability chips: a friendly name and a measured latency, both quieter than the status pill. */
-QLabel#pingName { color: #8A91A6; font-size: 9pt; }
-QLabel#pingValue { color: #E7E9F2; font-size: 9pt; font-weight: 600; }
+/* ---------- footer ---------- */
+/* The thin strip the status bar became. It carries the resolved zapret path on the left and the ping
+   cadence in the middle, and it is also where a transient sentence appears — see showTransientMessage(). */
+QFrame#footerBar { background-color: #0B0C10; border-top: 1px solid #1F2833; }
+QLabel#footerHint { background-color: transparent; color: #5A6175; font-size: 11px; }
+QLabel#dirLabel { background-color: transparent; color: #454A5C; font-size: 11px; }
+
+/* ---------- ping badges ----------
+   The ring, its halo and the glyph inside it are painted by PingIndicator; the sheet owns only the two
+   labels that frame it. #10B981/#9CA3AF are the values Theme::pingOk()/Theme::pingMuted() paint with. */
+QLabel#pingNumber { background-color: transparent; color: #FFFFFF; font-size: 12px; font-weight: 700; }
+QLabel#pingClock  { background-color: transparent; }
+QLabel#pingLabel  { background-color: transparent; color: #9CA3AF; font-size: 10px; }
 
 /* ---------- menus ---------- */
 QMenu {
@@ -264,15 +310,17 @@ QProgressBar::chunk { background-color: #22D3EE; border-radius: 7px; }
    stylesheet cascade the last match wins — so a top-level window, a stacked widget or a scroll
    viewport left transparent composites onto *black*. Invisible in the dark theme, glaring in the light
    one, so every surface meant to carry the app background is re-asserted here, after all generic
-   rules. The rail is re-asserted too, with its own colour: it is an id rule like these and must not
-   lose the tie to the block above. */
+   rules. The rail and the main area are id rules like these and must not lose the tie to the block
+   above; the header, footer and route pill are transparent-by-inheritance and must not gain one. */
 QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
 QScrollArea, QScrollArea > QWidget > QWidget,
 QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,
-QWidget#dashboardPage, QWidget#logsPage, QWidget#placeholderPage {
+QWidget#dashboardPage, QWidget#strategiesPage, QWidget#logsPage, QWidget#placeholderPage,
+QWidget#headerBar {
     background-color: #0B0C10;
 }
-QWidget#sidebar { background-color: #101219; }
+QFrame#sidebar, QFrame#mainArea { background-color: #0B0C10; }
+QFrame#footerBar { background-color: #0B0C10; }
 
 
 

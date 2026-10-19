@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ping ring glyph for a host with no brand mark of its own (google.com and anything the user adds).
+     Monochrome currentColor + declared 24px box — see icons/app.svg for the contract. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.8"/>
+    <path d="M3.4 9.6h17.2M3.4 14.4h17.2"/>
+    <path d="M12 3.2c2.6 2.4 3.9 5.3 3.9 8.8s-1.3 6.4-3.9 8.8c-2.6-2.4-3.9-5.3-3.9-8.8s1.3-6.4 3.9-8.8z"/>
+</svg>

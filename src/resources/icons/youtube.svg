@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- YouTube mark for the ping ring. A single filled path with fill-rule="evenodd": the play triangle is
+     the inner subpath, so it cuts out of the body instead of being painted over it. currentColor +
+     declared 24px box — see icons/app.svg for why both matter to Theme::icon(). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+    <path fill="currentColor" fill-rule="evenodd" stroke="none"
+          d="M21.62 7.24a2.81 2.81 0 0 0-1.98-1.99C17.96 4.8 12 4.8 12 4.8s-5.96 0-7.64.45a2.81 2.81 0 0 0-1.98 1.99C1.93 8.93 1.93 12 1.93 12s0 3.07.45 4.76a2.81 2.81 0 0 0 1.98 1.99c1.68.45 7.64.45 7.64.45s5.96 0 7.64-.45a2.81 2.81 0 0 0 1.98-1.99c.45-1.69.45-4.76.45-4.76s0-3.07-.45-4.76ZM10.02 15.24V8.76L15.27 12l-5.25 3.24Z"/>
+</svg>

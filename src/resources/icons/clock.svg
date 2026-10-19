@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ping age glyph: the clock beside a latency number. Monochrome currentColor + declared 24px box —
+     see icons/app.svg for why both halves of that contract matter to Theme::icon(). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.6"/>
+    <path d="M12 7.2V12l3.4 2.2"/>
+</svg>

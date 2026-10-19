@@ -70,11 +70,14 @@ public:
     static QColor logColor(int level);
     // Default icon tint for the current theme.
     static QColor iconColor();
-    // Ping indicator dot colours (spec-fixed, theme-independent).
+    // Ping indicator colours (spec-fixed neon, theme-independent): the ring, and the grey of its label
+    // and clock glyph. pingOk is the dashboard's single "live" green — the connected chip, the running
+    // power ring and a reachable service's halo are all this one colour.
     static QColor pingUnknown();
     static QColor pingWaiting();
     static QColor pingOk();
     static QColor pingFail();
+    static QColor pingMuted();
 
     // Load :/icons/<name>.svg tinted with `color`. `size` is the primary pixel size; the icon also
     // carries 16/24/32 rasterisations so toolbars, menus and HiDPI all get a crisp glyph.

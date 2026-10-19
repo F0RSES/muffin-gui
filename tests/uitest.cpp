@@ -16,6 +16,7 @@
 #include "MainWindow.h"
 #include "PingIndicator.h"
 #include "PingService.h"
+#include "PowerButton.h"
 #include "Settings.h"
 #include "SettingsDialog.h"
 #include "Strategy.h"
@@ -393,7 +394,10 @@ static void testPingIndicator()
     std::printf("\n[PingIndicator]\n");
 
     PingIndicator chip(QStringLiteral("Youtube"));
-    check(chip.minimumWidth() >= 120, "chip has a 120px minimum width");
+    // The badge is a column now, not a status-bar chip: a fixed width that fits a name and a 50 px ring,
+    // and no minimum that would push the dashboard's row apart.
+    check(chip.width() >= 64, "badge has a width a 50px ring fits");
+    check(chip.minimumWidth() < 120, "badge no longer reserves status-bar chip width");
     check(chip.status() == PingIndicator::PingStatus::Unknown, "starts Unknown");
     check(PingIndicator::latencyText(PingIndicator::PingStatus::Unknown, -1) == QStringLiteral("—"),
           "Unknown shows an em dash");
@@ -404,17 +408,39 @@ static void testPingIndicator()
     check(PingIndicator::latencyText(PingIndicator::PingStatus::Waiting, -1) == QStringLiteral("…"),
           "Waiting shows ellipsis");
 
+    // The figure above the ring is the same state without the unit: a bare number when there is one, and
+    // something that is not a number when there is not.
+    check(PingIndicator::latencyNumber(PingIndicator::PingStatus::Ok, 24) == QStringLiteral("24"),
+          "Ok shows the bare number");
+    check(PingIndicator::latencyNumber(PingIndicator::PingStatus::Fail, -1) == QStringLiteral("!"),
+          "Fail shows a mark, not a zero that could read as a fast reply");
+    check(PingIndicator::latencyNumber(PingIndicator::PingStatus::Waiting, -1) == QStringLiteral("…"),
+          "Waiting shows ellipsis");
+    check(PingIndicator::latencyNumber(PingIndicator::PingStatus::Unknown, -1) == QStringLiteral("—"),
+          "Unknown shows an em dash");
+
     check(PingIndicator::statusFromServiceInt(0) == PingIndicator::PingStatus::Waiting, "0 -> Waiting");
     check(PingIndicator::statusFromServiceInt(1) == PingIndicator::PingStatus::Ok, "1 -> Ok");
     check(PingIndicator::statusFromServiceInt(2) == PingIndicator::PingStatus::Fail, "2 -> Fail");
     check(PingIndicator::statusFromServiceInt(42) == PingIndicator::PingStatus::Unknown, "other -> Unknown");
 
-    check(PingIndicator::dotColor(PingIndicator::PingStatus::Ok) == Theme::pingOk(), "Ok dot is green");
-    check(PingIndicator::dotColor(PingIndicator::PingStatus::Fail) == Theme::pingFail(), "Fail dot is red");
+    check(PingIndicator::dotColor(PingIndicator::PingStatus::Ok) == Theme::pingOk(), "Ok ring is green");
+    check(PingIndicator::dotColor(PingIndicator::PingStatus::Fail) == Theme::pingFail(), "Fail ring is red");
     check(PingIndicator::dotColor(PingIndicator::PingStatus::Waiting) == Theme::pingWaiting(),
-          "Waiting dot is amber");
+          "Waiting ring is amber");
     check(PingIndicator::dotColor(PingIndicator::PingStatus::Unknown) == Theme::pingUnknown(),
-          "Unknown dot is grey");
+          "Unknown ring is grey");
+    // The dashboard's one green is a spec colour, not the general success token: the connected chip, the
+    // live rings and a running power button all paint with this one value.
+    check(Theme::pingOk() == QColor(0x10, 0xB9, 0x81), "the live green is #10B981");
+
+    // Which mark a service gets, and that an unknown host still gets one rather than an empty ring.
+    check(PingIndicator::glyphForService(QStringLiteral("Youtube")) == QStringLiteral("youtube"),
+          "youtube gets its brand mark");
+    check(PingIndicator::glyphForService(QStringLiteral("DISCORD")) == QStringLiteral("discord"),
+          "the match ignores case, the names come from hostnames");
+    check(PingIndicator::glyphForService(QStringLiteral("Google")) == QStringLiteral("globe"),
+          "anything else gets the globe");
 
     check(!chip.isPulsing(), "Unknown does not pulse");
     chip.setStatus(PingIndicator::PingStatus::Ok, 34);
@@ -423,6 +449,48 @@ static void testPingIndicator()
     check(chip.toolTip().contains(QStringLiteral("34 мс")), "tooltip carries the latency");
     chip.setStatus(PingIndicator::PingStatus::Fail, -1);
     check(!chip.isPulsing(), "Fail stops the pulse");
+
+    // Renaming a badge re-picks its mark: a chip that kept youtube's glyph after being pointed at
+    // discord would be the one thing on screen lying about what it measured.
+    chip.setServiceName(QStringLiteral("Discord"));
+    check(chip.glyph() == QStringLiteral("discord"), "setServiceName follows the name to the mark");
+    check(chip.serviceName() == QStringLiteral("Discord"), "and keeps the name");
+}
+
+// ------------------------------------------------------------- PowerButton ----
+static void testPowerButton()
+{
+    std::printf("\n[PowerButton]\n");
+
+    PowerButton button;
+    check(button.diameter() == 200, "the default circle is 200 px");
+    // The widget is the circle plus the halo's margin on both sides — a button exactly as wide as its own
+    // ring clips its glow into a square.
+    check(button.width() == 200 + 2 * PowerButton::kHaloMargin, "the widget reserves halo room");
+    check(button.height() == button.width(), "and the same on both axes");
+    check(button.mode() == PowerButton::Mode::Idle, "starts idle");
+    check(PowerButton::modeColor(PowerButton::Mode::Idle) == Theme::accent(),
+          "idle is the accent purple");
+    check(PowerButton::modeColor(PowerButton::Mode::Busy) == Theme::accent(),
+          "a transition in flight stays purple and only breathes");
+    check(PowerButton::modeColor(PowerButton::Mode::Active) == Theme::pingOk(),
+          "a live run wears the same green as the connected chip");
+    check(button.glyph() == QStringLiteral("power"), "the default glyph is the power mark");
+
+    button.setMode(PowerButton::Mode::Busy);
+    check(button.mode() == PowerButton::Mode::Busy, "mode is readable back");
+    check(button.glow() > 0.0 && button.glow() <= 1.0, "the pulse holds the glow in range");
+    button.setMode(PowerButton::Mode::Idle);
+    check(qFuzzyCompare(button.glow(), 1.0), "leaving Busy parks the glow at full");
+
+    // A diameter change has to move the glyph's rasterised size with it, or a 120 px button would carry
+    // a 64 px power mark; and absurd sizes are clamped rather than honoured, because a 0 px circle is a
+    // widget nobody can click.
+    button.setDiameter(120);
+    check(button.diameter() == 120, "setDiameter is readable back");
+    check(button.width() == 120 + 2 * PowerButton::kHaloMargin, "and resizes the widget");
+    button.setDiameter(0);
+    check(button.diameter() == 48, "a zero diameter is clamped, not obeyed");
 }
 
 // ------------------------------------------------------------ StrategyCard ----
@@ -615,6 +683,21 @@ static void testWindowPolicy()
     check(MainWindow::statusKind(S::Error) != MainWindow::statusKind(S::Stopped),
           "a failure is not shown as an ordinary stop");
 
+    // The header's chip is the same mapping in one word. It has to distinguish all five states on its
+    // own now: with the toolbar's pill gone it is the only place the state is written, and a chip that
+    // said "OFFLINE" during a teardown would be the window lying about a live firewall.
+    check(MainWindow::connectionText(S::Running) == QStringLiteral("CONNECTED"),
+          "a live run is the connected state the mock draws");
+    check(MainWindow::connectionText(S::Stopped) != MainWindow::connectionText(S::Stopping),
+          "idle and tearing-down are different words");
+    check(MainWindow::connectionText(S::Starting) != MainWindow::connectionText(S::Running),
+          "coming up is not yet up");
+    check(!MainWindow::connectionText(S::Error).isEmpty(), "a failure has wording");
+    // The chip's word and its dot share one property value, so the pair cannot disagree.
+    check(MainWindow::connectionText(S::Running) != MainWindow::connectionText(S::Error)
+              && MainWindow::statusKind(S::Running) != MainWindow::statusKind(S::Error),
+          "the two states that look most alike at 12 px differ in both word and colour");
+
     // ---- the action matrix ----
     // Every start/stop control in the window is derived from these two predicates, so the whole table IS
     // the feature. What was missing was one row: a Stopping state that left both the toolbar's
@@ -688,10 +771,24 @@ static void testTheme(QApplication &app)
     check(app.styleSheet().contains(QStringLiteral("#C084FC")), "accent colour present in the sheet");
     check(app.styleSheet().contains(QStringLiteral("#0B0C10")), "dashboard background present in the sheet");
     check(app.styleSheet().contains(QStringLiteral("strategyCard")), "card rules present");
-    // The rail and the page stack are the window's new skeleton: if their rules go missing, the nav
-    // buttons render as default raised buttons and the pages composite onto black.
+    // The rail and the page stack are the window's skeleton: if their rules go missing, the nav buttons
+    // render as default raised buttons and the pages composite onto black.
     check(app.styleSheet().contains(QStringLiteral("navButton")), "rail button rules present");
     check(app.styleSheet().contains(QStringLiteral("pageStack")), "page stack rules present");
+    // The dashboard redesign's own names. Each is a widget MainWindow paints or lays out by objectName,
+    // and an unstyled one is a visible regression: #mainArea/#footerBar composite onto black, #appTitle
+    // loses its 24 px weight, #statusDot loses the border-radius that makes it a dot at all.
+    for (const QString &name : {QStringLiteral("mainArea"), QStringLiteral("appTitle"),
+                                QStringLiteral("statusDot"), QStringLiteral("statusText"),
+                                QStringLiteral("routePill"), QStringLiteral("footerBar"),
+                                QStringLiteral("pingNumber"), QStringLiteral("pingLabel")}) {
+        check(app.styleSheet().contains(name),
+              QStringLiteral("dashboard rule present: %1").arg(name));
+    }
+    // The two neon values the C++ painters use must also be in the sheet, or the stylesheet and the
+    // hand-painted circles drift apart into two greens and two greys.
+    check(app.styleSheet().contains(QStringLiteral("#10B981")), "the sheet's live green is the painted one");
+    check(app.styleSheet().contains(QStringLiteral("#9CA3AF")), "the sheet's badge grey is the painted one");
     check(app.palette().color(QPalette::Window) == Theme::windowBackground(), "palette matches tokens");
 
     Theme::apply(app, false);
@@ -715,6 +812,14 @@ static void testTheme(QApplication &app)
         check(sheet.contains(QStringLiteral("navButton")),
               QStringLiteral("%1 sheet styles the rail").arg(dark ? QStringLiteral("dark")
                                                                  : QStringLiteral("light")));
+        // The dashboard's painted circles read their colours from C++ tokens, but everything framing them
+        // is sheet styling — and both sheets must carry it, or the light theme shows an unstyled rail.
+        for (const QString &name : {QStringLiteral("mainArea"), QStringLiteral("statusDot"),
+                                    QStringLiteral("routePill"), QStringLiteral("pingLabel")}) {
+            check(sheet.contains(name),
+                  QStringLiteral("%1 sheet styles %2")
+                      .arg(dark ? QStringLiteral("dark") : QStringLiteral("light"), name));
+        }
         // The unread-journal alert is a dynamic property like [error], and its colour has the same two
         // sources as the accent: the rail label reads it off the sheet, while the badge glyph on a failed
         // card is tinted with Theme::error() in C++. One red, or the tab and the card disagree.
@@ -765,7 +870,10 @@ static void testTheme(QApplication &app)
                                 QStringLiteral("ping-wait"), QStringLiteral("error"),
                                 // The rail's own set: brand, the two pages and the foot action.
                                 QStringLiteral("home"), QStringLiteral("logs"),
-                                QStringLiteral("power")};
+                                QStringLiteral("power"),
+                                // The dashboard's set: a ping badge's clock and the marks inside its ring.
+                                QStringLiteral("clock"), QStringLiteral("globe"),
+                                QStringLiteral("youtube"), QStringLiteral("discord")};
     for (const QString &g : glyphs)
         check(QFile::exists(QStringLiteral(":/icons/%1.svg").arg(g)),
               QStringLiteral("icon file exists: %1").arg(g));
@@ -776,7 +884,8 @@ static void testTheme(QApplication &app)
     // alone is not enough for the ones the redesign added.
     Theme::apply(app, true);
     for (const QString &g : {QStringLiteral("home"), QStringLiteral("logs"), QStringLiteral("power"),
-                             QStringLiteral("app")}) {
+                             QStringLiteral("app"), QStringLiteral("clock"), QStringLiteral("globe"),
+                             QStringLiteral("youtube"), QStringLiteral("discord")}) {
         const QPixmap pm = Theme::icon(g, Theme::accent(), 20).pixmap(20, 20);
         check(!pm.isNull(), QStringLiteral("rail glyph rasterises: %1").arg(g));
         bool inked = false;
@@ -787,6 +896,27 @@ static void testTheme(QApplication &app)
                     if (qAlpha(img.pixel(x, y)) > 40) { inked = true; break; }
         }
         check(inked, QStringLiteral("rail glyph has ink: %1").arg(g));
+    }
+
+    // The brand marks are filled paths whose play triangle / eyes are cut out by fill-rule, so a ring's
+    // 22 px white render must have holes in it as well as ink — a solid blob is the same size as the
+    // mark and reads as an unrelated circle at a glance.
+    {
+        const QPixmap pm = Theme::icon(QStringLiteral("youtube"), QColor(Qt::white), 22).pixmap(22, 22);
+        check(!pm.isNull(), "the youtube mark rasterises at ring size");
+        int inked = 0, empty = 0;
+        if (!pm.isNull()) {
+            const QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+            for (int y = 0; y < img.height(); ++y) {
+                for (int x = 0; x < img.width(); ++x) {
+                    if (qAlpha(img.pixel(x, y)) > 40)
+                        ++inked;
+                    else
+                        ++empty;
+                }
+            }
+        }
+        check(inked > 0 && empty > 0, "the mark is drawn, and its play triangle is cut out");
     }
 
     // The badge glyph must actually rasterise in both themes, or a failed start shows a red hole.
@@ -917,6 +1047,7 @@ int main(int argc, char **argv)
     testSettingsMigration();
     testLogPanel();
     testPingIndicator();
+    testPowerButton();
     testStrategyCard();
     testTrayPolicy();
     testWindowPolicy();
