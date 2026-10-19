@@ -48,6 +48,11 @@ public:
     // does nothing" and "Save never says it saved" are the two ways this page could quietly regress.
     QPushButton *saveButton() const { return m_save; }
     QLabel *savedNote() const { return m_savedNote; }
+    // The two short fields. Exposed because their shape is the page's promise: a field that holds one
+    // value stays beside its label instead of spanning the form, and the interval box carries no
+    // stepper arrows. Both are things a later layout change can silently undo.
+    QComboBox *themeField() const { return m_themeBox; }
+    QSpinBox *pingIntervalField() const { return m_pingSpin; }
 
     // True when `dir` is a zapret root, or a base that contains a windows/ or linux/ root.
     static bool pathLooksValid(const QString &dir);

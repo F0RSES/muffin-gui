@@ -30,6 +30,11 @@ namespace {
 // How long the acknowledgement next to the Save button holds. Long enough to read, short enough that it
 // cannot be mistaken for the page's opinion of the values currently in the fields.
 constexpr int kSavedNoteMs = 2000;
+
+// The width of a field that holds one short value. A form column stretches whatever is put in it, and a
+// theme picker that spans the page reads as a sentence rather than as a choice of three words — the same
+// reason the interval box does not need a line long enough to type a novel into.
+constexpr int kNarrowFieldPx = 200;
 } // namespace
 
 SettingsPage::SettingsPage(Settings &settings, QWidget *parent)
@@ -92,6 +97,7 @@ void SettingsPage::build()
     m_trayNote->setVisible(!QSystemTrayIcon::isSystemTrayAvailable());
 
     m_themeBox = new QComboBox(this);
+    m_themeBox->setMaximumWidth(kNarrowFieldPx);
     m_themeBox->addItem(LanguageManager::tr(QStringLiteral("theme.dark")), Theme::nameForMode(Theme::Mode::Dark));
     m_themeBox->addItem(LanguageManager::tr(QStringLiteral("theme.light")), Theme::nameForMode(Theme::Mode::Light));
     m_themeBox->addItem(LanguageManager::tr(QStringLiteral("theme.system")), Theme::nameForMode(Theme::Mode::System));
@@ -99,6 +105,11 @@ void SettingsPage::build()
                             QStringLiteral("theme.system") });
 
     m_pingSpin = new QSpinBox(this);
+    m_pingSpin->setMaximumWidth(kNarrowFieldPx);
+    // No stepper arrows. They are the platform's own control, drawn by the style rather than by the
+    // sheet, and the value they set is a number the user types or nudges once a year — the arrows cost
+    // more attention than the field they belong to. Typing and the wheel still work.
+    m_pingSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     m_pingSpin->setRange(3, 60);
     m_pingSpin->setSuffix(LanguageManager::tr(QStringLiteral("settings.ping_suffix")));
     i18nSuffix(m_pingSpin, QStringLiteral("settings.ping_suffix"));
@@ -110,6 +121,20 @@ void SettingsPage::build()
     auto *themeRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.theme"));
     auto *pingRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.ping"));
 
+    // The two short fields, held to the left. A QFormLayout gives a field the whole width of its column,
+    // which is right for a path and wrong for a three-word choice: the page then reads as two long
+    // controls and a lot of empty form. The stretch beside each one is what keeps it beside its label
+    // rather than across the screen.
+    auto *themeField = new QHBoxLayout;
+    themeField->setContentsMargins(0, 0, 0, 0);
+    themeField->addWidget(m_themeBox);
+    themeField->addStretch(1);
+
+    auto *pingField = new QHBoxLayout;
+    pingField->setContentsMargins(0, 0, 0, 0);
+    pingField->addWidget(m_pingSpin);
+    pingField->addStretch(1);
+
     auto *form = new QFormLayout;
     form->setSpacing(10);
     form->addRow(pathRowLabel, pathRow);
@@ -117,8 +142,8 @@ void SettingsPage::build()
     form->addRow(QString(), m_startLastCheck);
     form->addRow(QString(), m_trayCheck);
     form->addRow(QString(), m_trayNote);
-    form->addRow(themeRowLabel, m_themeBox);
-    form->addRow(pingRowLabel, m_pingSpin);
+    form->addRow(themeRowLabel, themeField);
+    form->addRow(pingRowLabel, pingField);
 
     // The commit row. The dialog's OK/Cancel pair is gone: a page has no frame to dismiss, so leaving it
     // is the cancel, and the only thing that has to be explicit is the write. The acknowledgement sits to

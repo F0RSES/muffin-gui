@@ -32,6 +32,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
 #include <QLabel>
@@ -42,6 +43,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QSpinBox>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
@@ -50,6 +52,7 @@
 #include <QTextLayout>
 #include <QToolButton>
 #include <QVariant>
+#include <QWidget>
 
 #include <QtTest/QTest>
 
@@ -58,6 +61,29 @@
 using namespace zapret;
 
 static int g_failures = 0;
+
+// True when `w` sits in a QHBoxLayout that has a spacer after it — the shape the settings page uses to
+// keep a short field beside its label instead of across the whole form. Walking the layouts is the only
+// way to see it: a stretch is an item, not a widget, so nothing about the field itself records that it
+// has one, and a maximum width alone would still leave the control floating in its column.
+static bool fieldEndsInStretch(QWidget *w)
+{
+    if (!w || !w->parentWidget())
+        return false;
+    const auto layouts = w->parentWidget()->findChildren<QLayout *>();
+    for (QLayout *l : layouts) {
+        auto *row = qobject_cast<QHBoxLayout *>(l);
+        if (!row)
+            continue;
+        const int at = row->indexOf(w);
+        if (at < 0)
+            continue;
+        for (int i = at + 1; i < row->count(); ++i)
+            if (row->itemAt(i) && row->itemAt(i)->spacerItem())
+                return true;
+    }
+    return false;
+}
 
 static void check(bool cond, const QString &what)
 {
@@ -583,6 +609,36 @@ static void testProfileCard()
     card.setPing(QStringLiteral("nobody.test"), PingIndicator::PingStatus::Ok, 1);
     check(card.pingChipCount() == 2, "an unlisted host added no phantom chip");
 
+    // ---- the ring's own shape ----
+    // A chip is a mark inside a ring, and the ring is the part that had been drawn too small to read:
+    // the mark at 16 px inside a 7 px radius, with its number touching the border. The three things that
+    // fixed it are all invisible to a screenshot diff and visible to a layout edit, so they are pinned.
+    // setHosts() retires the chips it replaces through deleteLater, and deferred deletion does not run
+    // just because events were processed — so the tree still holds last rebuild's ghosts until they are
+    // flushed. Counting before this would count chips the row no longer shows.
+    QTest::qWait(10);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    const auto chips = card.findChildren<QWidget *>(QStringLiteral("miniPing"));
+    check(chips.size() == 2, "one ring per service the row reports");
+    if (chips.size() == 2) {
+        QWidget *chip = chips.first();
+        check(chip->property("pingStatus").toString() == QLatin1String("ok"),
+              "the ring carries the verdict the sheet colours it from");
+        check(chip->graphicsEffect() != nullptr,
+              "the ring's glow is an effect, because QSS has no box-shadow");
+        QLayout *pad = chip->layout();
+        check(pad && pad->contentsMargins().left() > 0 && pad->contentsMargins().top() > 0,
+              "mark and figure are padded off the ring's edge");
+        const auto marks = chip->findChildren<QLabel *>(QStringLiteral("miniPingIcon"));
+        check(!marks.isEmpty() && marks.first()->width() >= 20,
+              "the mark is enlarged, not merely re-painted");
+    }
+    // An effect paints outside the widget it is set on, and a child is clipped to its parent's rect — so
+    // the row that holds the chips has to reserve the halo's room or every glow is cut flat at the edge.
+    QWidget *host = card.findChild<QWidget *>(QStringLiteral("profilePings"));
+    check(host && host->layout() && host->layout()->contentsMargins().top() >= 6,
+          "the chip row leaves room so the glow is not clipped");
+
     // ---- the failure surface ----
     // No badge row any more: the edge turns red and the reason moves to the tooltip, so the tooltip is the
     // assertion here - the whole reason, in order, after the path.
@@ -678,6 +734,20 @@ static void testTrayPolicy()
     check(ack != nullptr && !ack->text().isEmpty(), "Save put an acknowledgement beside the button");
     check(ack && ack->text() == LanguageManager::tr(QStringLiteral("settings.saved")),
           "and it is the catalog's 'saved' wording, not the key");
+
+    // ---- the two short fields ----
+    // A page that lets a form column stretch every field gives a three-word choice the same presence as
+    // a path, which is how the settings sheet starts reading as a form to fill rather than as switches to
+    // flip. The cap is one half of the fix; the row that ends in a stretch is the other, and both are
+    // things a later layout edit can undo without a visible clue in the code.
+    QComboBox *theme = page.themeField();
+    QSpinBox *interval = page.pingIntervalField();
+    check(theme && theme->maximumWidth() == 200, "the theme picker is one short value wide");
+    check(interval && interval->maximumWidth() == 200, "and so is the ping interval");
+    check(interval && interval->buttonSymbols() == QAbstractSpinBox::NoButtons,
+          "the interval box shows no stepper arrows");
+    check(theme && fieldEndsInStretch(theme), "the theme picker is held to the left of its row");
+    check(interval && fieldEndsInStretch(interval), "and so is the interval box");
 
     // A write that came from somewhere else (a download, the startup auto-location) re-reads the page
     // rather than leaving it showing a stale path.
@@ -996,6 +1066,18 @@ static void testTheme(QApplication &app)
         check(sheet.contains(QStringLiteral("miniPing")),
               QStringLiteral("%1 sheet styles the row's ping chips").arg(dark ? QStringLiteral("dark")
                                                                               : QStringLiteral("light")));
+        // The ring's colour is the verdict, and the verdict only reaches QSS through the token the row
+        // stamps — a sheet without these rules draws every ring the same grey, whatever the service said.
+        check(sheet.contains(QStringLiteral("miniPing[pingStatus=\"ok\"]")),
+              QStringLiteral("%1 sheet colours a live ring").arg(dark ? QStringLiteral("dark")
+                                                                     : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("miniPing[pingStatus=\"fail\"]")),
+              QStringLiteral("%1 sheet colours a failed ring").arg(dark ? QStringLiteral("dark")
+                                                                       : QStringLiteral("light")));
+        // The row's menu opens on press, so the style's own arrow is a second affordance for one action.
+        check(sheet.contains(QStringLiteral("#cardMenu::menu-indicator")),
+              QStringLiteral("%1 sheet hides the row menu's arrow").arg(dark ? QStringLiteral("dark")
+                                                                            : QStringLiteral("light")));
         check(sheet.contains(QStringLiteral("savedNote")),
               QStringLiteral("%1 sheet colours the save acknowledgement").arg(
                   dark ? QStringLiteral("dark") : QStringLiteral("light")));

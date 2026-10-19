@@ -7,6 +7,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -20,9 +21,54 @@ namespace zapret {
 
 namespace {
 
-// The chip's mark is a third the size of the dashboard's ring. On that screen the ring is the news; here
+// The chip's mark. Two thirds of the dashboard's 22 px mark: on that screen the ring is the news, here
 // the number is the news and the mark only says which service the number belongs to.
-constexpr int kMiniGlyphPx = 14;
+constexpr int kMiniGlyphPx = 18;
+// The box the mark is set into — a hair larger than the glyph so the mark never touches the ring.
+constexpr int kMiniIconPx = 20;
+// Inside the ring: the mark and the figure are set off its edge, and apart from each other. A chip that
+// packs its contents against the border reads as two labels with a line drawn around them, which is the
+// "too tight" the row had.
+constexpr int kMiniPadX = 8;
+constexpr int kMiniPadY = 4;
+constexpr int kMiniGapPx = 6;
+// The halo. QSS has no box-shadow, so the glow is a graphics effect on the chip — and an effect paints
+// outside the widget it is set on, which is why the row that holds the chips reserves this much room on
+// every side (see m_pingRow's margins): a child is clipped to its parent's rect, and a ring cut off at
+// the rim is the one thing this design cannot show.
+constexpr int kMiniGlowBlurPx = 14;
+constexpr int kMiniGlowRoomPx = 8;
+constexpr int kMiniGlowAlpha = 130;
+
+// The chip's ring is drawn by the sheet from a status token, because QSS cannot read a QColor and
+// PingIndicator::dotColor() is C++'s to know. One spelling per status, both sheets, same words.
+const char *statusToken(PingIndicator::PingStatus status)
+{
+    switch (status)
+    {
+    case PingIndicator::PingStatus::Waiting: return "waiting";
+    case PingIndicator::PingStatus::Ok:      return "ok";
+    case PingIndicator::PingStatus::Fail:    return "fail";
+    case PingIndicator::PingStatus::Unknown: break;
+    }
+    return "unknown";
+}
+
+// QSS never re-reads a dynamic property on its own, so a chip whose verdict moved has to be taken apart
+// and put back together — the same dance the row does for [selected] and [error]. Setting it when it
+// already reads the same would re-polish every chip of every row on every cycle for nothing.
+void applyStatusToken(QWidget *chip, PingIndicator::PingStatus status)
+{
+    if (!chip)
+        return;
+    const QString token = QString::fromLatin1(statusToken(status));
+    if (chip->property("pingStatus").toString() == token)
+        return;
+    chip->setProperty("pingStatus", token);
+    chip->style()->unpolish(chip);
+    chip->style()->polish(chip);
+    chip->update();
+}
 
 // Quote a token the way a shell would need it, so a copied command line can be pasted and run.
 QString quoteArg(const QString &token)
@@ -82,7 +128,11 @@ void ProfileCard::build()
     m_pingHost->setObjectName(QStringLiteral("profilePings"));
     m_pingHost->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     m_pingRow = new QHBoxLayout(m_pingHost);
-    m_pingRow->setContentsMargins(0, 0, 0, 0);
+    // Not padding for the chips — room for their halos. A graphics effect paints beyond the widget it
+    // is set on, and a child is clipped to its parent's rect, so without this the ring's glow would be
+    // cut flat where the row ends. The chips themselves would fit with no margin at all.
+    m_pingRow->setContentsMargins(kMiniGlowRoomPx, kMiniGlowRoomPx,
+                                  kMiniGlowRoomPx, kMiniGlowRoomPx);
     m_pingRow->setSpacing(12);
 
     m_menu = new QToolButton(this);
@@ -173,7 +223,7 @@ QString ProfileCard::commandLine() const
 
 void ProfileCard::setHosts(const QStringList &hosts)
 {
-    // Rebuild rather than reconcile: the host list is three entries long and set once at startup, and a
+    // Rebuild rather than reconcile: the host list is two entries long and set once at startup, and a
     // card that kept a stale chip for a service nobody probes any more is exactly the kind of number the
     // page would rather not show.
     for (const Ping &ping : std::as_const(m_pings))
@@ -185,14 +235,20 @@ void ProfileCard::setHosts(const QStringList &hosts)
         auto *chip = new QWidget(m_pingHost);
         chip->setObjectName(QStringLiteral("miniPing"));
         chip->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        // The neon around the ring. QSS has no box-shadow, so this is the only way a chip can glow —
+        // and refreshPing() moves its colour with the verdict, which is the whole point of the ring.
+        auto *glow = new QGraphicsDropShadowEffect(chip);
+        glow->setBlurRadius(kMiniGlowBlurPx);
+        glow->setOffset(0.0, 0.0);
+        chip->setGraphicsEffect(glow);
 
         auto *box = new QHBoxLayout(chip);
-        box->setContentsMargins(0, 0, 0, 0);
-        box->setSpacing(4);
+        box->setContentsMargins(kMiniPadX, kMiniPadY, kMiniPadX, kMiniPadY);
+        box->setSpacing(kMiniGapPx);
 
         auto *icon = new QLabel(chip);
         icon->setObjectName(QStringLiteral("miniPingIcon"));
-        icon->setFixedSize(16, 16);
+        icon->setFixedSize(kMiniIconPx, kMiniIconPx);
         icon->setScaledContents(true);
 
         auto *value = new QLabel(chip);
@@ -207,6 +263,7 @@ void ProfileCard::setHosts(const QStringList &hosts)
         ping.chip = chip;
         ping.icon = icon;
         ping.value = value;
+        ping.glow = glow;
         m_pings.insert(host, ping);
         refreshPing(host, m_pings[host]);
     }
@@ -229,10 +286,22 @@ void ProfileCard::refreshPing(const QString &host, Ping &ping)
     if (!ping.icon || !ping.value)
         return;
     const QString glyph = PingIndicator::glyphForService(host);
+    const QColor status = PingIndicator::dotColor(ping.status);
     // The mark carries the status colour — the same mapping the dashboard's rings use, so one green
     // means "answering" on both screens.
-    ping.icon->setPixmap(Theme::icon(glyph, PingIndicator::dotColor(ping.status), kMiniGlyphPx)
+    ping.icon->setPixmap(Theme::icon(glyph, status, kMiniGlyphPx)
                              .pixmap(kMiniGlyphPx, kMiniGlyphPx));
+
+    // The ring and its halo answer to the same verdict: the sheet paints the rim from the token, the
+    // effect paints the glow from the colour, and both move together with the mark so a chip can never
+    // say "answering" in one part of itself and "timeout" in another.
+    if (ping.glow) {
+        QColor halo = status;
+        halo.setAlpha(kMiniGlowAlpha);
+        ping.glow->setColor(halo);
+    }
+    applyStatusToken(ping.chip, ping.status);
+
     const QString text = PingIndicator::latencyText(ping.status, ping.latencyMs);
     ping.value->setText(text);
     ping.value->setToolTip(QStringLiteral("%1 — %2").arg(host, text));

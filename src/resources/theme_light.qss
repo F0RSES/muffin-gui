@@ -158,15 +158,20 @@ QLabel#profileName {
     background-color: transparent; color: #1F2937; font-size: 11pt; font-weight: 600;
 }
 QWidget#profilePings { background-color: transparent; border: none; }
-/* A chip is one service's mark and its latency on a faint recessed plate, so the pair reads as a unit
-   rather than as two loose labels. The glyph and its colour are baked by ProfileCard from
-   PingIndicator::dotColor(), so only the number's text lives here. */
+/* A chip is one service's mark inside its ring, and its latency beside them, on a faint recessed plate
+   so the pair reads as a unit rather than as two loose labels. The ring's colour is the verdict:
+   ProfileCard stamps [pingStatus] from the same mapping PingIndicator::dotColor() paints the dashboard's
+   rings with — the live green is theme-independent, the amber and the red are this sheet's own. The halo
+   is a QGraphicsDropShadowEffect in C++ (QSS has no box-shadow) and the row reserves its room. */
 QWidget#miniPing {
-    background-color: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 7px;
+    background-color: #F9FAFB; border: 2px solid #D1D5DB; border-radius: 11px;
 }
+QWidget#miniPing[pingStatus="ok"]      { border-color: #10B981; }
+QWidget#miniPing[pingStatus="waiting"] { border-color: #D97706; }
+QWidget#miniPing[pingStatus="fail"]    { border-color: #DC2626; }
 QLabel#miniPingIcon { background-color: transparent; }
 QLabel#miniPingValue {
-    background-color: transparent; color: #6B7280; font-size: 10px; font-weight: 600;
+    background-color: transparent; color: #6B7280; font-size: 11px; font-weight: 600;
 }
 QLabel#muted     { color: #6B7280; }
 QLabel#placeholder { color: #9CA3AF; font-size: 11pt; }
@@ -178,6 +183,10 @@ QToolButton#cardMenu {
 QToolButton#cardMenu:hover { background-color: #E5E7EB; border-color: #D1D5DB; }
 QToolButton#cardMenu:pressed { background-color: #D1D5DB; }
 QToolButton#cardMenu:focus { outline: none; }
+/* Three dots and nothing else: the handle pops its menu on press (InstantPopup in code), so the style's
+   down-arrow is a second affordance on a control that has just opened its menu, and in a 30x30 plate it
+   pushes the dots off centre. */
+QToolButton#cardMenu::menu-indicator { image: none; width: 0px; }
 QMenu#cardMenuPopup { min-width: 148px; }
 
 QPushButton {
@@ -225,8 +234,10 @@ QComboBox QAbstractItemView {
     border: 1px solid #9CA3AF; border-radius: 8px; padding: 4px;
     selection-background-color: #7C3AED; selection-color: #FFFFFF; outline: none;
 }
-QSpinBox::up-button, QSpinBox::down-button { background: #E5E7EB; width: 16px; border: none; }
-QSpinBox::up-arrow, QSpinBox::down-arrow { width: 10px; height: 10px; }
+/* The app's only spin box is the ping interval, and it hides its buttons in code; these rules close the
+   gutter those arrows would have claimed so a hidden control leaves no dead width behind it. */
+QSpinBox::up-button, QSpinBox::down-button { width: 0px; border: none; background: transparent; }
+QSpinBox::up-arrow, QSpinBox::down-arrow { image: none; width: 0px; height: 0px; }
 
 QCheckBox { spacing: 8px; color: #1F2937; background: transparent; }
 QCheckBox::indicator {

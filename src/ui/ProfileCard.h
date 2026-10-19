@@ -10,6 +10,7 @@
 class QHBoxLayout;
 class QLabel;
 class QMenu;
+class QGraphicsDropShadowEffect;
 class QToolButton;
 
 namespace zapret {
@@ -88,11 +89,16 @@ protected:
 private:
     // One chip: the service's mark, tinted with its status, and the latency beside it. The status is
     // kept here so retheme()/retranslateText() can re-derive both halves without a second lookup.
+    // One chip: the service's mark inside a ring that carries its status, and the latency beside it.
+    // The status is kept here so retheme()/retranslateText() can re-derive every part of the chip
+    // without a second lookup — the glyph's tint, the sheet's [pingStatus] token and the halo's colour
+    // all come off the same value, which is the only way the three of them cannot disagree.
     struct Ping
     {
         QWidget *chip = nullptr;
         QLabel *icon = nullptr;
         QLabel *value = nullptr;
+        QGraphicsDropShadowEffect *glow = nullptr;
         PingIndicator::PingStatus status = PingIndicator::PingStatus::Unknown;
         int latencyMs = -1;
     };
