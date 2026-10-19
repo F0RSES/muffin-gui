@@ -3,7 +3,6 @@
 #include <QVector>
 #include <QWidget>
 
-class QCheckBox;
 class QComboBox;
 class QPlainTextEdit;
 class QPushButton;
@@ -81,7 +80,7 @@ private:
     QVector<Entry> m_entries;
     QPlainTextEdit *m_view = nullptr;
     QComboBox *m_levelBox = nullptr;
-    QCheckBox *m_autoScroll = nullptr;
+    bool m_autoScrollOn = true;   // always on since the checkbox left the toolbar
     QPushButton *m_copyButton = nullptr;
     QPushButton *m_clearButton = nullptr;
     QPushButton *m_saveButton = nullptr;

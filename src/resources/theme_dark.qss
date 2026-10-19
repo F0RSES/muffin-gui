@@ -10,8 +10,8 @@
      err #F87171   warn #FBBF24
 
    Shape: a 70 px rail of glyphs on the left; to its right one column that is header, one full-width
-   page at a time, and a hairline footer. Rules are grouped in that order — shell, header, route pill,
-   pages, tool buttons, cards, buttons, inputs, log, footer, ping badges, chrome.
+   page at a time, and a hairline footer. Rules are grouped in that order — shell, header, pages,
+   tool buttons, cards, buttons, inputs, log, footer, ping badges, chrome.
 
    The circles are not styled here: PowerButton and PingIndicator paint their own rims and halos,
    because a stylesheet cannot clip a glow to a circle. The hexes they paint with are the ones listed
@@ -46,18 +46,33 @@ QFrame#mainArea { background-color: #0B0C10; }
 QLabel#brandLogo { background-color: transparent; }
 
 /* One rule for every rail glyph. They are icon-only QPushButtons — the accessible name and the tooltip
-   are set in C++, so the sheet's whole job is to make the button vanish apart from its icon. */
+   are set in C++, so the sheet's whole job is to make the button vanish apart from its icon.
+
+   The same rounded plate appears under hover, under the pointer while pressed, and under whichever glyph
+   owns the page on screen: one shape, #1F2833, 8 px of radius, so journal and settings read as peers of
+   each other instead of one of them being the only control that ever answers the pointer. */
 QPushButton#navButton {
     background-color: transparent; color: #9CA3AF;
-    border: 1px solid transparent; border-radius: 12px; padding: 0;
+    border: 1px solid transparent; border-radius: 8px; padding: 0;
 }
 QPushButton#navButton:hover {
-    background-color: #15171E; border-color: #1F2833; color: #E7E9F2;
+    background-color: #1F2833; border-color: #1F2833; color: #E7E9F2;
 }
-QPushButton#navButton:pressed { background-color: #1C1727; }
-QPushButton#navButton:checked { background-color: #1C1727; border-color: #2E2545; color: #C084FC; }
+QPushButton#navButton:pressed { background-color: #1F2833; border-color: #2A3644; }
+QPushButton#navButton:checked { background-color: #1F2833; border-color: #2E2545; color: #C084FC; }
 QPushButton#navButton:focus { outline: none; border-color: #2E2545; }
 QPushButton#navButton:disabled { color: #454A5C; background-color: transparent; }
+
+/* The language picker is the rail's one QToolButton: a flag instead of a glyph, and the same plate so
+   it belongs to the group above it. Its icon is colour artwork and must not be flattened, hence no
+   border/text tricks beyond the hover plate. */
+QToolButton#langButton {
+    background-color: transparent; border: 1px solid transparent; border-radius: 8px;
+    padding: 0;
+}
+QToolButton#langButton:hover { background-color: #1F2833; border-color: #1F2833; }
+QToolButton#langButton:pressed { background-color: #1F2833; border-color: #2A3644; }
+QToolButton#langButton:focus { outline: none; border-color: #2E2545; }
 /* The journal's glyph while the page it opens is hidden: a new warning or error went unnoticed. The glyph
    itself is a baked pixmap and cannot recolour itself, so the alert lives on the button's frame. */
 QPushButton#navButton[alert="true"] { color: #F87171; border-color: #4B2530; background-color: #1B1215; }
@@ -73,10 +88,6 @@ QLabel#appTitle {
     background-color: transparent;
     font-family: "Montserrat", "Outfit", "Inter", "Segoe UI", sans-serif;
     font-weight: 800; font-size: 24px; letter-spacing: 0.5px; color: #C084FC;
-}
-QLabel#appSubtitle {
-    background-color: transparent;
-    color: #5A6175; font-size: 11px; font-weight: 500;
 }
 QFrame#headerRule { background-color: #1F2833; border: none; }
 
@@ -96,20 +107,6 @@ QLabel#statusText[statusKind="starting"] { color: #FBBF24; }
 QLabel#statusText[statusKind="running"]  { color: #10B981; }
 QLabel#statusText[statusKind="error"]    { color: #F87171; }
 
-/* ---------- route pill ---------- */
-/* The dashboard's only text control: it names the strategy the power button will run, and opens the
-   catalog. A 999 px radius on a padded button is a capsule at any height Qt gives it. */
-QPushButton#routePill {
-    background-color: #12141A; color: #E7E9F2;
-    border: 1px solid #1F2833; border-radius: 999px;
-    padding: 7px 16px; font-size: 12px; font-weight: 600;
-}
-QPushButton#routePill:hover { border-color: #C084FC; color: #C084FC; background-color: #17131F; }
-QPushButton#routePill:pressed { background-color: #1C1727; }
-QPushButton#routePill:focus { outline: none; border-color: #2E2545; }
-
-/* A button that is chrome rather than content: back, refresh, download. Present on the two secondary
-   pages, quiet enough that neither competes with the dashboard's circle. */
 QPushButton#ghostButton {
     background-color: transparent; color: #8A91A6;
     border: 1px solid #262A36; border-radius: 10px;
@@ -269,7 +266,6 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
    cadence in the middle, and it is also where a transient sentence appears — see showTransientMessage(). */
 QFrame#footerBar { background-color: #0B0C10; border-top: 1px solid #1F2833; }
 QLabel#footerHint { background-color: transparent; color: #5A6175; font-size: 11px; }
-QLabel#dirLabel { background-color: transparent; color: #454A5C; font-size: 11px; }
 
 /* ---------- ping badges ----------
    The ring, its halo and the glyph inside it are painted by PingIndicator; the sheet owns only the two
@@ -311,7 +307,7 @@ QProgressBar::chunk { background-color: #22D3EE; border-radius: 7px; }
    viewport left transparent composites onto *black*. Invisible in the dark theme, glaring in the light
    one, so every surface meant to carry the app background is re-asserted here, after all generic
    rules. The rail and the main area are id rules like these and must not lose the tie to the block
-   above; the header, footer and route pill are transparent-by-inheritance and must not gain one. */
+   above; the header and footer are transparent-by-inheritance and must not gain one. */
 QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
 QScrollArea, QScrollArea > QWidget > QWidget,
 QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,

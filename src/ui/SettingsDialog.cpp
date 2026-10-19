@@ -1,5 +1,6 @@
 #include "SettingsDialog.h"
 #include "DownloadDialog.h"
+#include "LanguageManager.h"
 #include "Settings.h"
 #include "StrategyParser.h"
 #include "Theme.h"
@@ -36,18 +37,24 @@ SettingsDialog::~SettingsDialog() = default;
 
 void SettingsDialog::build()
 {
-    setWindowTitle(QStringLiteral("Настройки Muffin"));
+    // Same rule as the main window: a configuration sheet is a form with a known size, and stretching it
+    // to the screen only spreads six rows over a thousand pixels of background.
+    setFixedSize(620, 400);
+    setWindowFlag(Qt::WindowMaximizeButtonHint, false);
     setModal(true);
+    setWindowTitle(LanguageManager::tr(QStringLiteral("settings.title")));
 
     m_pathEdit = new QLineEdit(this);
-    m_pathEdit->setPlaceholderText(QStringLiteral("/home/…/zapret/linux или C:\\…\\zapret\\windows"));
+    m_pathEdit->setPlaceholderText(QStringLiteral("/home/…/zapret/linux ")
+                                   + LanguageManager::tr(QStringLiteral("common.or"))
+                                   + QStringLiteral(" C:\\...\\zapret\\windows"));
     m_pathEdit->setClearButtonEnabled(true);
 
-    m_browseButton = new QPushButton(QStringLiteral("Обзор…"), this);
-    m_detectButton = new QPushButton(QStringLiteral("Автопоиск"), this);
-    m_detectButton->setToolTip(QStringLiteral("Найти дерево zapret в $ZAPRET_ROOT, ~/Documents/zapret, /opt/zapret"));
-    m_downloadButton = new QPushButton(QStringLiteral("Скачать…"), this);
-    m_downloadButton->setToolTip(QStringLiteral("Загрузить последнюю версию zapret с GitHub в папку приложения"));
+    i18nText(m_browseButton = new QPushButton(this), QStringLiteral("settings.browse"));
+    i18nText(m_detectButton = new QPushButton(this), QStringLiteral("settings.autodetect"));
+    i18nTip(m_detectButton, QStringLiteral("settings.autodetect_tip"));
+    i18nText(m_downloadButton = new QPushButton(this), QStringLiteral("settings.download"));
+    i18nTip(m_downloadButton, QStringLiteral("settings.download_tip"));
 
     auto *pathRow = new QHBoxLayout;
     pathRow->setContentsMargins(0, 0, 0, 0);
@@ -60,42 +67,50 @@ void SettingsDialog::build()
     m_pathState = new QLabel(this);
     m_pathState->setWordWrap(true);
 
-    m_startLastCheck = new QCheckBox(QStringLiteral("Запускать последнюю стратегию при старте"), this);
-    m_trayCheck = new QCheckBox(QStringLiteral("Сворачивать в трей при закрытии"), this);
+    i18nText(m_startLastCheck = new QCheckBox(this), QStringLiteral("settings.start_last"));
+    i18nText(m_trayCheck = new QCheckBox(this), QStringLiteral("settings.tray"));
 
     // A ticked box that cannot be honoured is worse than an explanation. Sessions without a StatusNotifier
     // host (bare GNOME, a plain Wayland compositor) report no tray at all, so spell out what closing the
     // window will actually do — MainWindow still retries, so the tray may appear later by itself.
-    m_trayNote = new QLabel(QStringLiteral(
-        "В этой среде нет области уведомлений: закрытие окна остановит zapret и выйдет из приложения.\n"
-        "Настройка сохранена — если панель запустится позже, трей появится сам."), this);
+    m_trayNote = new QLabel(this);
     m_trayNote->setObjectName(QStringLiteral("trayNote"));
+    i18nText(m_trayNote, QStringLiteral("settings.tray_note"));
     m_trayNote->setWordWrap(true);
     m_trayNote->setVisible(!QSystemTrayIcon::isSystemTrayAvailable());
 
     m_themeBox = new QComboBox(this);
-    m_themeBox->addItem(QStringLiteral("Тёмная"), Theme::nameForMode(Theme::Mode::Dark));
-    m_themeBox->addItem(QStringLiteral("Светлая"), Theme::nameForMode(Theme::Mode::Light));
-    m_themeBox->addItem(QStringLiteral("Системная"), Theme::nameForMode(Theme::Mode::System));
+    m_themeBox->addItem(LanguageManager::tr(QStringLiteral("theme.dark")), Theme::nameForMode(Theme::Mode::Dark));
+    m_themeBox->addItem(LanguageManager::tr(QStringLiteral("theme.light")), Theme::nameForMode(Theme::Mode::Light));
+    m_themeBox->addItem(LanguageManager::tr(QStringLiteral("theme.system")), Theme::nameForMode(Theme::Mode::System));
+    i18nItems(m_themeBox, { QStringLiteral("theme.dark"), QStringLiteral("theme.light"),
+                            QStringLiteral("theme.system") });
 
     m_pingSpin = new QSpinBox(this);
     m_pingSpin->setRange(3, 60);
-    m_pingSpin->setSuffix(QStringLiteral(" сек"));
+    m_pingSpin->setSuffix(LanguageManager::tr(QStringLiteral("settings.ping_suffix")));
+    i18nSuffix(m_pingSpin, QStringLiteral("settings.ping_suffix"));
     m_pingSpin->setSingleStep(1);
+
+    // Labels are built here rather than passed as strings to addRow so each one can carry the key it
+    // came from; a QFormLayout's own label has no handle to tag.
+    auto *pathRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.path"));
+    auto *themeRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.theme"));
+    auto *pingRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.ping"));
 
     auto *form = new QFormLayout;
     form->setSpacing(10);
-    form->addRow(QStringLiteral("Путь к zapret"), pathRow);
+    form->addRow(pathRowLabel, pathRow);
     form->addRow(QString(), m_pathState);
     form->addRow(QString(), m_startLastCheck);
     form->addRow(QString(), m_trayCheck);
     form->addRow(QString(), m_trayNote);
-    form->addRow(QStringLiteral("Тема"), m_themeBox);
-    form->addRow(QStringLiteral("Интервал пинга"), m_pingSpin);
+    form->addRow(themeRowLabel, m_themeBox);
+    form->addRow(pingRowLabel, m_pingSpin);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("OK"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
+    i18nText(buttons->button(QDialogButtonBox::Ok), QStringLiteral("common.ok"));
+    i18nText(buttons->button(QDialogButtonBox::Cancel), QStringLiteral("common.cancel"));
 
     auto *column = new QVBoxLayout(this);
     column->setContentsMargins(18, 18, 18, 16);
@@ -162,12 +177,12 @@ bool SettingsDialog::pathLooksValid(const QString &dir)
 QString SettingsDialog::describePath(const QString &dir)
 {
     if (dir.trimmed().isEmpty())
-        return QStringLiteral("Путь не выбран.");
+        return LanguageManager::tr(QStringLiteral("path.none"));
 
     const Strategy::Platform direct = ZapretPaths::detectPlatform(dir);
     if (direct != Strategy::Platform::Unknown) {
         const QList<Strategy> found = StrategyParser::parseTree(dir, direct, 2);
-        return QStringLiteral("Найдено: %1, стратегий: %2")
+        return LanguageManager::tr(QStringLiteral("path.found"))
             .arg(direct == Strategy::Platform::Windows ? QStringLiteral("windows")
                                                        : QStringLiteral("linux"),
                  QString::number(found.size()));
@@ -179,10 +194,10 @@ QString SettingsDialog::describePath(const QString &dir)
         for (const ZapretLocator::Found &f : roots)
             names << (f.platform == Strategy::Platform::Windows ? QStringLiteral("windows")
                                                                  : QStringLiteral("linux"));
-        return QStringLiteral("Базовая папка: найдены %1").arg(names.join(QStringLiteral(", ")));
+        return LanguageManager::tr(QStringLiteral("path.base")).arg(names.join(QStringLiteral(", ")));
     }
 
-    return QStringLiteral("Это не дерево zapret: нет ни bin/winws.exe + *.bat, ни init.d/nfqws.");
+    return LanguageManager::tr(QStringLiteral("path.not_zapret"));
 }
 
 void SettingsDialog::revalidatePath()
@@ -211,7 +226,7 @@ void SettingsDialog::browse()
 {
     const QString start = m_pathEdit->text().trimmed();
     const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("Папка с zapret"),
+        this, LanguageManager::tr(QStringLiteral("settings.folder_title")),
         start.isEmpty() ? QDir::homePath() : start,
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (!dir.isEmpty())
@@ -222,7 +237,7 @@ void SettingsDialog::autoDetect()
 {
     const QList<ZapretLocator::Found> found = ZapretLocator::locate();
     if (found.isEmpty()) {
-        setPathState(false, QStringLiteral("Zapret не найден — укажите путь вручную."));
+        setPathState(false, LanguageManager::tr(QStringLiteral("path.not_found_manual")));
         return;
     }
     m_pathEdit->setText(QDir::toNativeSeparators(found.first().path));

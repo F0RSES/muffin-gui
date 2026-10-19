@@ -12,6 +12,7 @@
 
 #include "IZapretBackend.h"
 #include "DownloadDialog.h"
+#include "LanguageManager.h"
 #include "LogPanel.h"
 #include "MainWindow.h"
 #include "PingIndicator.h"
@@ -35,6 +36,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -760,6 +762,114 @@ static void testWindowPolicy()
           "an empty fallback chain never outranks the pending start");
 }
 
+// ------------------------------------------------------------ LanguageManager ----
+//
+// The catalog is compiled in rather than loaded, so these are the checks that keep it honest: that the
+// seven languages exist in the order the picker shows them, that no row has a hole, that the fallback
+// rules are the documented ones, that a language switch actually changes what new widgets say, and
+// that the flag artwork the rail button is built from is really in the resources.
+static void testLanguage()
+{
+    std::printf("\n[LanguageManager]\n");
+
+    const QStringList codes = LanguageManager::codes();
+    check(codes == QStringList({QStringLiteral("ru"), QStringLiteral("en"), QStringLiteral("es"),
+                                QStringLiteral("de"), QStringLiteral("zh"), QStringLiteral("fr"),
+                                QStringLiteral("hi")}),
+          "seven languages, in menu order");
+    check(LanguageManager::instance().currentCode() == QLatin1String("ru"),
+          "the UI opens in Russian, the language every sheet was drawn in");
+
+    const QStringList keys = LanguageManager::keys();
+    check(keys.size() > 100, QStringLiteral("the catalog holds %1 keys").arg(keys.size()));
+    check(keys.size() == QSet<QString>(keys.cbegin(), keys.cend()).size(),
+          "no key is defined twice");
+
+    int holes = 0;
+    for (const QString &key : keys) {
+        for (const QString &code : codes) {
+            const QString text = LanguageManager::translate(code, key);
+            if (text.isEmpty() || text == key)
+                ++holes;
+        }
+    }
+    check(holes == 0,
+          QStringLiteral("every key has text in every language (%1 cells)").arg(keys.size() * codes.size()));
+
+    check(LanguageManager::translate(QStringLiteral("de"), QStringLiteral("nav.settings"))
+              == QStringLiteral("Einstellungen"),
+          "German is German");
+    check(LanguageManager::translate(QStringLiteral("zh"), QStringLiteral("nav.logs"))
+              == QStringLiteral("日志"), "Chinese is Chinese");
+    check(LanguageManager::nativeName(QStringLiteral("hi")).contains(QStringLiteral("हि")),
+          "a language names itself in its own script");
+
+    // The documented fallback: an unknown key says the key, never nothing.
+    check(LanguageManager::tr(QStringLiteral("no.such.key.at.all"))
+              == QStringLiteral("no.such.key.at.all"),
+          "a missing key falls back to its own name rather than to blank");
+    // A format string with its argument in one call.
+    check(LanguageManager::tr(QStringLiteral("status.running"), QStringLiteral("nfqws"))
+              .contains(QStringLiteral("nfqws")),
+          "tr(key, arg) fills %1");
+
+    for (const QString &code : codes) {
+        QIcon flag = LanguageManager::flagIcon(code);
+        check(!flag.isNull(), QStringLiteral("flag icon present for %1").arg(code));
+        check(!flag.pixmap(22, 16).isNull(), QStringLiteral("flag renders for %1").arg(code));
+    }
+
+    // Switching language: one signal, and nothing for a no-op or an unsupported code.
+    QSignalSpy changed(&LanguageManager::instance(), &LanguageManager::languageChanged);
+    LanguageManager::instance().setCode(QStringLiteral("qq"));
+    check(LanguageManager::instance().currentCode() == QLatin1String("ru"),
+          "an unknown code is refused, not applied");
+    check(changed.count() == 0, "and refusing one emits nothing");
+    LanguageManager::instance().setCode(QStringLiteral("en"));
+    check(LanguageManager::instance().currentCode() == QLatin1String("en"), "en applied");
+    check(changed.count() == 1, "one signal for one real change");
+    LanguageManager::instance().setCode(QStringLiteral("en"));
+    check(changed.count() == 1, "and none when nothing moved");
+
+    // A widget built after the switch speaks the new language straight out of its keys, and the keys it
+    // carries are the ones retranslateUi() walks — the property is the whole contract between the two.
+    {
+        LogPanel panel;
+        check(panel.view() != nullptr, "the log panel still builds under English");
+        const auto buttons = panel.findChildren<QPushButton *>();
+        int tagged = 0;
+        for (QPushButton *b : buttons) {
+            const QString key = b->property("i18nKey").toString();
+            if (key.isEmpty())
+                continue;
+            ++tagged;
+            check(LanguageManager::keys().contains(key),
+                  QStringLiteral("log button key '%1' is in the catalog").arg(key));
+            check(b->text() == LanguageManager::tr(key),
+                  QStringLiteral("log button '%1' says what its key says").arg(key));
+        }
+        check(tagged == 3, "copy, clear and save are all tagged for retranslation");
+    }
+
+    // The persisted choice: the default, and a value that survives the object that wrote it.
+    QTemporaryDir dir;
+    const QString file = dir.filePath(QStringLiteral("language-test.ini"));
+    {
+        Settings s(file);
+        check(s.language() == QLatin1String("ru"), "an unset language is Russian");
+        s.setLanguage(QStringLiteral("fr"));
+    }
+    {
+        Settings s(file);
+        check(s.language() == QLatin1String("fr"), "the chosen language is stored");
+    }
+
+    // Back to the language the rest of this suite reads the chrome in.
+    LanguageManager::instance().setCode(QStringLiteral("ru"));
+    check(LanguageManager::tr(QStringLiteral("nav.logs")) == QStringLiteral("Логи"),
+          "restoring ru restores the Russian chrome");
+}
+
 // ------------------------------------------------------------------- Theme ----
 static void testTheme(QApplication &app)
 {
@@ -780,7 +890,7 @@ static void testTheme(QApplication &app)
     // loses its 24 px weight, #statusDot loses the border-radius that makes it a dot at all.
     for (const QString &name : {QStringLiteral("mainArea"), QStringLiteral("appTitle"),
                                 QStringLiteral("statusDot"), QStringLiteral("statusText"),
-                                QStringLiteral("routePill"), QStringLiteral("footerBar"),
+                                QStringLiteral("langButton"), QStringLiteral("footerBar"),
                                 QStringLiteral("pingNumber"), QStringLiteral("pingLabel")}) {
         check(app.styleSheet().contains(name),
               QStringLiteral("dashboard rule present: %1").arg(name));
@@ -793,7 +903,7 @@ static void testTheme(QApplication &app)
 
     Theme::apply(app, false);
     check(!Theme::isDark(), "light mode is active");
-    check(app.styleSheet().contains(QStringLiteral("#F4F5FA")), "light background in the sheet");
+    check(app.styleSheet().contains(QStringLiteral("#F3F4F6")), "light background in the sheet");
 
     // Both sheets must carry the rules the dynamic properties switch on, or a badge/notice would render
     // as unstyled default text.
@@ -815,7 +925,7 @@ static void testTheme(QApplication &app)
         // The dashboard's painted circles read their colours from C++ tokens, but everything framing them
         // is sheet styling — and both sheets must carry it, or the light theme shows an unstyled rail.
         for (const QString &name : {QStringLiteral("mainArea"), QStringLiteral("statusDot"),
-                                    QStringLiteral("routePill"), QStringLiteral("pingLabel")}) {
+                                    QStringLiteral("langButton"), QStringLiteral("pingLabel")}) {
             check(sheet.contains(name),
                   QStringLiteral("%1 sheet styles %2")
                       .arg(dark ? QStringLiteral("dark") : QStringLiteral("light"), name));
@@ -1051,6 +1161,7 @@ int main(int argc, char **argv)
     testStrategyCard();
     testTrayPolicy();
     testWindowPolicy();
+    testLanguage();
     testTheme(app);
     testPingService();
     testDownloadDialog();

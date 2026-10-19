@@ -34,6 +34,8 @@ public:
     ~StrategyCard() override;
 
     void setStrategy(const Strategy &strategy);
+    // Re-run the text the strategy implies (title, summary, hint) in the language the UI now uses.
+    void retranslateText();
     const Strategy &strategy() const { return m_strategy; }
 
     // The id the start/stop signals carry. Defaults to the strategy's own id.

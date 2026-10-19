@@ -1,8 +1,8 @@
 #include "LogPanel.h"
+#include "LanguageManager.h"
 #include "Theme.h"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QFile>
@@ -46,59 +46,45 @@ LogPanel::LogPanel(QWidget *parent)
     auto *header = new QFrame(this);
     header->setObjectName(QStringLiteral("logHeader"));
 
-    auto *title = new QLabel(QStringLiteral("Логи"), header);
-    title->setObjectName(QStringLiteral("cardTitle"));
-
-    m_autoScroll = new QCheckBox(QStringLiteral("Автопрокрутка"), header);
-    m_autoScroll->setChecked(true);
-
-    auto *levelCaption = new QLabel(QStringLiteral("Уровень"), header);
+    // One row: the level filter on the left, the three actions on the right.
+    //
+    // The panel used to open with a title, an auto-scroll checkbox and a
+    // second row underneath. The title named a box of logs that is already unmistakable, the grey line
+    // below it explained what the rows show, and nobody chooses auto-scroll twice — so the journal now
+    // starts where the text starts and always follows a new line.
+    auto *levelCaption = new QLabel(header);
     levelCaption->setObjectName(QStringLiteral("muted"));
+    i18nText(levelCaption, QStringLiteral("log.level"));
 
     m_levelBox = new QComboBox(header);
-    // Display text only — the filter reads itemData() (the int level), so nothing keys off these
-    // words. They were Latin ("All"/"Info"/...) while every other label here is Russian, which the
-    // redesign made conspicuous by giving the journal a full-width page of its own.
-    m_levelBox->addItem(QStringLiteral("Все"), int(All));
-    m_levelBox->addItem(QStringLiteral("Инфо"), int(Info));
-    m_levelBox->addItem(QStringLiteral("Предупреждение"), int(Warn));
-    m_levelBox->addItem(QStringLiteral("Ошибка"), int(Error));
+    // Display text only — the filter reads itemData() (the int level), so nothing keys off these words.
+    m_levelBox->addItem(LanguageManager::tr(QStringLiteral("log.filter.all")), int(All));
+    m_levelBox->addItem(LanguageManager::tr(QStringLiteral("log.filter.info")), int(Info));
+    m_levelBox->addItem(LanguageManager::tr(QStringLiteral("log.filter.warn")), int(Warn));
+    m_levelBox->addItem(LanguageManager::tr(QStringLiteral("log.filter.error")), int(Error));
     m_levelBox->setCurrentIndex(0);
+    i18nItems(m_levelBox, { QStringLiteral("log.filter.all"), QStringLiteral("log.filter.info"),
+                            QStringLiteral("log.filter.warn"), QStringLiteral("log.filter.error") });
 
-    m_copyButton = new QPushButton(QStringLiteral("Копировать"), header);
-    m_clearButton = new QPushButton(QStringLiteral("Очистить"), header);
-    m_saveButton = new QPushButton(QStringLiteral("Сохранить в файл"), header);
-    m_copyButton->setToolTip(QStringLiteral("Скопировать весь лог в буфер обмена"));
-    m_clearButton->setToolTip(QStringLiteral("Очистить лог"));
-    m_saveButton->setToolTip(QStringLiteral("Сохранить лог в файл"));
+    m_copyButton = new QPushButton(header);
+    m_clearButton = new QPushButton(header);
+    m_saveButton = new QPushButton(header);
+    i18nText(m_copyButton, QStringLiteral("log.copy"));
+    i18nText(m_clearButton, QStringLiteral("log.clear"));
+    i18nText(m_saveButton, QStringLiteral("log.save"));
+    i18nTip(m_copyButton, QStringLiteral("log.copy_tip"));
+    i18nTip(m_clearButton, QStringLiteral("log.clear_tip"));
+    i18nTip(m_saveButton, QStringLiteral("log.save_tip"));
 
-    // Two rows, not one: the full set of labels needs ~560 px on a single line, which is wider than
-    // the panel's 400 px minimum and clipped the buttons. Row 1 is identity + scroll behaviour,
-    // row 2 is the filter plus the three actions.
-    auto *rows = new QVBoxLayout(header);
-    rows->setContentsMargins(0, 0, 0, 0);
-    rows->setSpacing(6);
-
-    auto *top = new QHBoxLayout;
-    top->setContentsMargins(0, 0, 0, 0);
-    top->setSpacing(8);
-    top->addWidget(title);
-    top->addSpacing(6);
-    top->addWidget(m_autoScroll);
-    top->addStretch(1);
-
-    auto *bottom = new QHBoxLayout;
-    bottom->setContentsMargins(0, 0, 0, 0);
-    bottom->setSpacing(8);
-    bottom->addWidget(levelCaption);
-    bottom->addWidget(m_levelBox);
-    bottom->addStretch(1);
-    bottom->addWidget(m_copyButton);
-    bottom->addWidget(m_clearButton);
-    bottom->addWidget(m_saveButton);
-
-    rows->addLayout(top);
-    rows->addLayout(bottom);
+    auto *row = new QHBoxLayout(header);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(8);
+    row->addWidget(levelCaption);
+    row->addWidget(m_levelBox);
+    row->addStretch(1);
+    row->addWidget(m_copyButton);
+    row->addWidget(m_clearButton);
+    row->addWidget(m_saveButton);
 
     m_view = new QPlainTextEdit(this);
     m_view->setObjectName(QStringLiteral("logView"));
@@ -230,12 +216,15 @@ void LogPanel::setFilterLevel(int level)
 
 bool LogPanel::autoScroll() const
 {
-    return m_autoScroll->isChecked();
+    // Always true now that the checkbox is gone: a log that stops following itself is the bug every
+    // reporter here actually hit. The setter stays so a caller (or a test) can pin the behaviour off
+    // without reaching into the widget.
+    return m_autoScrollOn;
 }
 
 void LogPanel::setAutoScroll(bool on)
 {
-    m_autoScroll->setChecked(on);
+    m_autoScrollOn = on;
     if (on)
         scrollToBottom();
 }
@@ -286,14 +275,15 @@ void LogPanel::saveToFile()
 {
     const QString suggested = QStringLiteral("zapret-%1.log")
                                   .arg(QTime::currentTime().toString(QStringLiteral("HH-mm-ss")));
-    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранить логи"),
+    const QString path = QFileDialog::getSaveFileName(this,
+                                                      LanguageManager::tr(QStringLiteral("log.save_title")),
                                                       suggested,
-                                                      QStringLiteral("Логи (*.log);;Текст (*.txt);;Все файлы (*)"));
+                                                      LanguageManager::tr(QStringLiteral("log.save_filters")));
     if (path.isEmpty())
         return;
     if (!saveToFile(path))
-        QMessageBox::warning(this, QStringLiteral("Сохранение логов"),
-                             QStringLiteral("Не удалось записать файл: %1").arg(path));
+        QMessageBox::warning(this, LanguageManager::tr(QStringLiteral("log.save_failed_title")),
+                             LanguageManager::tr(QStringLiteral("log.save_failed")).arg(path));
 }
 
 } // namespace zapret

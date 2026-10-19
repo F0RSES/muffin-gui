@@ -1,4 +1,5 @@
 #include "StrategyCard.h"
+#include "LanguageManager.h"
 #include "StrategyParser.h"
 #include "Theme.h"
 
@@ -100,8 +101,8 @@ void StrategyCard::build()
     m_button->setMinimumWidth(124);
     // The idle appearance has to be applied here: setRunning() ignores a no-op transition, so the
     // label/objectName a fresh card starts with would otherwise stay empty.
-    m_button->setText(QStringLiteral("Запустить"));
     m_button->setObjectName(QStringLiteral("primaryButton"));
+    refreshButton();
 
     // Failure badge: an alert glyph plus the reason the last start failed. It lives between the
     // description and the action row and is hidden until setError() puts text in it, so a healthy card
@@ -178,9 +179,9 @@ QString StrategyCard::kindLabel(Strategy::Kind kind)
     {
     case Strategy::Kind::Batch:       return QStringLiteral("BAT");
     case Strategy::Kind::PowerShell:  return QStringLiteral("PowerShell");
-    case Strategy::Kind::ShellScript: return QStringLiteral("init-скрипт");
+    case Strategy::Kind::ShellScript: return LanguageManager::tr(QStringLiteral("card.kind.shell"));
     case Strategy::Kind::SystemdUnit: return QStringLiteral("systemd");
-    case Strategy::Kind::Binary:      return QStringLiteral("бинарник");
+    case Strategy::Kind::Binary:      return LanguageManager::tr(QStringLiteral("card.kind.binary"));
     case Strategy::Kind::Unknown:     break;
     }
     return QStringLiteral("—");
@@ -198,19 +199,19 @@ QString StrategyCard::describeStrategy(const Strategy &strategy)
         const QString exe = QFileInfo(strategy.executablePath.isEmpty()
                                           ? strategy.filePath
                                           : strategy.executablePath).fileName();
-        QString text = QStringLiteral("Прямой запуск %1").arg(exe);
+        QString text = LanguageManager::tr(QStringLiteral("card.desc.binary")).arg(exe);
         if (!strategy.argv.isEmpty())
-            text += QStringLiteral(", %1 арг.").arg(strategy.argv.size());
+            text += LanguageManager::tr(QStringLiteral("card.desc.args")).arg(strategy.argv.size());
         return text;
     }
     case Strategy::Kind::Batch:
-        return QStringLiteral("Обёртка cmd.exe /c %1").arg(strategy.fileName);
+        return LanguageManager::tr(QStringLiteral("card.desc.batch")).arg(strategy.fileName);
     case Strategy::Kind::PowerShell:
-        return QStringLiteral("Запуск через PowerShell: %1").arg(strategy.fileName);
+        return LanguageManager::tr(QStringLiteral("card.desc.powershell")).arg(strategy.fileName);
     case Strategy::Kind::ShellScript:
-        return QStringLiteral("Init-скрипт zapret (%1 start/stop)").arg(strategy.fileName);
+        return LanguageManager::tr(QStringLiteral("card.desc.shell")).arg(strategy.fileName);
     case Strategy::Kind::SystemdUnit:
-        return QStringLiteral("Unit-файл systemd: %1").arg(strategy.fileName);
+        return LanguageManager::tr(QStringLiteral("card.desc.systemd")).arg(strategy.fileName);
     case Strategy::Kind::Unknown:
         break;
     }
@@ -230,9 +231,9 @@ void StrategyCard::setStrategy(const Strategy &strategy)
     QString hint = kindLabel(strategy.kind);
     if (strategy.requiresRoot)
         hint += QStringLiteral(" · %1").arg(
-            strategy.platform == Strategy::Platform::Windows
-                ? QStringLiteral("нужен администратор")
-                : QStringLiteral("нужен root"));
+            LanguageManager::tr(strategy.platform == Strategy::Platform::Windows
+                                   ? QStringLiteral("card.need_admin")
+                                   : QStringLiteral("card.need_root")));
     m_hint->setText(hint);
 
     if (!strategy.filePath.isEmpty()) {
@@ -244,6 +245,13 @@ void StrategyCard::setStrategy(const Strategy &strategy)
         m_strategy.id = m_strategy.filePath;
 
     refreshErrorBadge();
+}
+
+// Re-derive every word the card shows. setStrategy() is the only place title, description and hint are
+// computed, and the action button re-reads its own key, so this is the whole of the card's retranslation.
+void StrategyCard::retranslateText()
+{
+    setStrategy(m_strategy);
 }
 
 void StrategyCard::setId(const QString &id)
@@ -306,23 +314,27 @@ void StrategyCard::setActionEnabled(bool enabled, const QString &reason)
 
 void StrategyCard::refreshButton()
 {
-    QString text;
+    QString key;
     QString styleName;
     if (m_running) {
-        text = QStringLiteral("Остановить");
+        key = QStringLiteral("card.stop");
         styleName = QStringLiteral("dangerButton");
     } else if (hasError()) {
-        // The action after a failure is the same action that failed — say so instead of "Запустить".
-        text = QStringLiteral("Повторить");
+        // The action after a failure is the same action that failed — say so instead of "start".
+        key = QStringLiteral("card.retry");
         styleName = QStringLiteral("primaryButton");
     } else {
-        text = QStringLiteral("Запустить");
+        key = QStringLiteral("card.start");
         styleName = QStringLiteral("primaryButton");
     }
 
-    if (m_button->text() == text && m_button->objectName() == styleName)
+    // The key goes on the button as well as the words: MainWindow::retranslateUi() reads it back, so a
+    // card built before a language switch still follows it. The text is set here; only the style object
+    // name can still need changing, and only when it disagrees with the action this button now offers.
+    i18nText(m_button, key);
+    if (m_button->objectName() == styleName)
         return;
-    m_button->setText(text);
+
     m_button->setObjectName(styleName);
     // Object name changed, so QSS must be re-evaluated for the button.
     m_button->style()->unpolish(m_button);
@@ -401,14 +413,14 @@ void StrategyCard::contextMenuEvent(QContextMenuEvent *event)
     QMenu menu(this);
 
     QAction *copy = menu.addAction(Theme::themedIcon(QStringLiteral("copy"), 16),
-                                   QStringLiteral("Скопировать команду"));
+                                   LanguageManager::tr(QStringLiteral("card.menu.copy_command")));
     copy->setEnabled(!m_strategy.filePath.isEmpty());
     connect(copy, &QAction::triggered, this, [this] {
         QApplication::clipboard()->setText(commandLine());
     });
 
     QAction *open = menu.addAction(Theme::themedIcon(QStringLiteral("settings"), 16),
-                                   QStringLiteral("Открыть папку со стратегией"));
+                                   LanguageManager::tr(QStringLiteral("card.menu.open_folder")));
     const QString dir = m_strategy.dirPath.isEmpty()
                             ? QFileInfo(m_strategy.filePath).absolutePath()
                             : m_strategy.dirPath;

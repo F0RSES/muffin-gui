@@ -1,4 +1,5 @@
 #include "DownloadDialog.h"
+#include "LanguageManager.h"
 
 #include "ZapretPaths.h"
 
@@ -27,11 +28,11 @@ DownloadDialog::~DownloadDialog() = default;
 
 void DownloadDialog::build()
 {
-    setWindowTitle(QStringLiteral("Скачать zapret"));
+    setWindowTitle(LanguageManager::tr(QStringLiteral("action.download_zapret")));
     setModal(true);
     setMinimumWidth(480);
 
-    m_info = new QLabel(QStringLiteral("Сведения о релизе появятся после проверки GitHub."), this);
+    m_info = new QLabel(LanguageManager::tr(QStringLiteral("dl.info")), this);
     m_info->setObjectName(QStringLiteral("muted"));
     m_info->setWordWrap(true);
 
@@ -39,12 +40,12 @@ void DownloadDialog::build()
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
 
-    m_status = new QLabel(QStringLiteral("Ожидание."), this);
+    m_status = new QLabel(LanguageManager::tr(QStringLiteral("dl.waiting")), this);
     m_status->setWordWrap(true);
 
-    m_cancelButton = new QPushButton(QStringLiteral("Отмена"), this);
+    m_cancelButton = new QPushButton(LanguageManager::tr(QStringLiteral("common.cancel")), this);
 
-    m_downloadButton = new QPushButton(QStringLiteral("Скачать"), this);
+    m_downloadButton = new QPushButton(LanguageManager::tr(QStringLiteral("dl.download_button")), this);
     m_downloadButton->setObjectName(QStringLiteral("primaryButton"));
     m_downloadButton->setDefault(true);
     // Nothing to act on yet: no url, no size, no digest. Enabling it here would be a button whose only
@@ -81,23 +82,23 @@ void DownloadDialog::build()
 QString DownloadDialog::humanSize(qint64 bytes)
 {
     if (bytes < 0)
-        return QStringLiteral("неизвестно");
+        return LanguageManager::tr(QStringLiteral("size.unknown"));
     if (bytes < 1024)
-        return QStringLiteral("%1 Б").arg(bytes);
+        return LanguageManager::tr(QStringLiteral("size.bytes")).arg(bytes);
     const double ki = bytes / 1024.0;
     if (ki < 1024.0)
-        return QStringLiteral("%1 КиБ").arg(ki, 0, 'f', 0);
+        return LanguageManager::tr(QStringLiteral("size.kib")).arg(ki, 0, 'f', 0);
     const double mi = ki / 1024.0;
     if (mi < 1024.0)
-        return QStringLiteral("%1 МиБ").arg(mi, 0, 'f', 1);
-    return QStringLiteral("%1 ГиБ").arg(mi / 1024.0, 0, 'f', 1);
+        return LanguageManager::tr(QStringLiteral("size.mib")).arg(mi, 0, 'f', 1);
+    return LanguageManager::tr(QStringLiteral("size.gib")).arg(mi / 1024.0, 0, 'f', 1);
 }
 
 void DownloadDialog::startFetch()
 {
     if (m_downloader->isBusy())
         return;
-    setStatus(QStringLiteral("Проверяю последнюю версию на GitHub…"));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.checking")));
     m_downloader->fetchLatestRelease();
 }
 
@@ -163,21 +164,23 @@ void DownloadDialog::onReleaseFetched(ZapretRelease release)
 
     // Say what will be fetched AND where it will go: this is the one moment the user can still notice
     // they were about to write into an unexpected folder.
-    QString text = QStringLiteral("Релиз %1\nФайл: %2, %3\nУстановить в: %4")
-                       .arg(release.version.isEmpty() ? QStringLiteral("(без имени)") : release.version,
+    QString text = LanguageManager::tr(QStringLiteral("dl.release"))
+                       .arg(release.version.isEmpty()
+                                ? LanguageManager::tr(QStringLiteral("dl.unnamed"))
+                                : release.version,
                             release.assetName,
                             humanSize(release.sizeBytes),
                             QDir::toNativeSeparators(targetDir()));
     // GitHub has published assets[].digest since 2022 but not on every asset, and an older or mirrored
     // release has none at all. Refusing to download then would be worse than saying so plainly.
     text += release.sha256.isEmpty()
-                ? QStringLiteral("\nSHA-256 для этого файла не опубликован — сверка невозможна.")
-                : QStringLiteral("\nSHA-256 будет сверен с опубликованным.");
+                ? LanguageManager::tr(QStringLiteral("dl.no_sha"))
+                : LanguageManager::tr(QStringLiteral("dl.sha_will_check"));
 
     m_info->setText(text);
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
-    setStatus(QStringLiteral("Готово к скачиванию."));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.ready")));
     m_downloadButton->setEnabled(true);
 }
 
@@ -185,8 +188,8 @@ void DownloadDialog::onFetchFailed(QString message)
 {
     setStatus(message.section(QLatin1Char('\n'), 0, 0));
     const auto answer = QMessageBox::critical(
-        this, QStringLiteral("Скачать zapret"),
-        QStringLiteral("Не удалось узнать последнюю версию:\n\n%1").arg(message),
+        this, LanguageManager::tr(QStringLiteral("action.download_zapret")),
+        LanguageManager::tr(QStringLiteral("dl.version_failed")).arg(message),
         QMessageBox::Retry | QMessageBox::Cancel, QMessageBox::Cancel);
     if (answer == QMessageBox::Retry)
         startFetch();
@@ -200,14 +203,14 @@ void DownloadDialog::onProgress(qint64 receivedBytes, qint64 totalBytes)
             m_progress->setRange(0, 100);
         const qint64 percent = receivedBytes * 100 / totalBytes;
         m_progress->setValue(static_cast<int>(percent > 100 ? 100 : percent));
-        setStatus(QStringLiteral("Скачано %1 из %2…").arg(humanSize(receivedBytes), humanSize(totalBytes)));
+        setStatus(LanguageManager::tr(QStringLiteral("dl.downloading_of")).arg(humanSize(receivedBytes), humanSize(totalBytes)));
     }
     else
     {
         // No Content-Length: a bar that cannot be filled must not pretend to be sitting at 0%.
         if (m_progress->maximum() != 0)
             m_progress->setRange(0, 0);
-        setStatus(QStringLiteral("Скачано %1…").arg(humanSize(receivedBytes)));
+        setStatus(LanguageManager::tr(QStringLiteral("dl.downloading_short")).arg(humanSize(receivedBytes)));
     }
 }
 
@@ -215,7 +218,7 @@ void DownloadDialog::onExtractionStarted()
 {
     // The digest matched and unpacking began; the rest of the work has no byte count to show.
     m_progress->setRange(0, 0);
-    setStatus(QStringLiteral("SHA-256 совпал. Распаковываю…"));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.sha_ok")));
 }
 
 void DownloadDialog::onPromotionFailed(QString message)
@@ -232,7 +235,7 @@ void DownloadDialog::onDownloadFinished(QString path)
     m_installedPath = path;
     m_progress->setRange(0, 100);
     m_progress->setValue(100);
-    setStatus(QStringLiteral("Установлено в %1").arg(QDir::toNativeSeparators(path)));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.installed_in")).arg(QDir::toNativeSeparators(path)));
     setBusy(false);
 
     // The path decides the message. A promoted install lands in the root-owned tree whose payload the
@@ -240,19 +243,18 @@ void DownloadDialog::onDownloadFinished(QString path)
     // works exactly the same but asks for the password each time.
     const bool promoted =
         !ZapretPaths::systemInstallDir().isEmpty() && path == ZapretPaths::systemInstallDir();
-    QString text = QStringLiteral("zapret установлен в:\n%1")
+    QString text = LanguageManager::tr(QStringLiteral("dl.installed_msg"))
                        .arg(QDir::toNativeSeparators(path));
     if (promoted)
     {
-        text += QStringLiteral("\n\nСистемная копия принадлежит root, поэтому запуск стратегий "
-                               "не будет требовать пароль.");
+        text += LanguageManager::tr(QStringLiteral("dl.root_note"));
     }
     else if (!m_promotionNote.isEmpty())
     {
         text += QStringLiteral("\n\n%1").arg(m_promotionNote);
     }
 
-    QMessageBox::information(this, QStringLiteral("Скачать zapret"), text);
+    QMessageBox::information(this, LanguageManager::tr(QStringLiteral("action.download_zapret")), text);
 
     // Announced before accept() so the owner holds the path while this dialog is still the window any
     // follow-up message belongs to.
@@ -270,8 +272,8 @@ void DownloadDialog::onDownloadFailed(QString message)
     // The full text, not its first line: an exit code or an expected/actual digest pair is the whole
     // value of the message. Retry stays possible, so a transient loss costs one click instead of a new
     // round trip to the release API.
-    QMessageBox::critical(this, QStringLiteral("Скачать zapret"),
-                          QStringLiteral("Скачивание не удалось:\n\n%1").arg(message));
+    QMessageBox::critical(this, LanguageManager::tr(QStringLiteral("action.download_zapret")),
+                          LanguageManager::tr(QStringLiteral("dl.failed")).arg(message));
     m_downloadButton->setEnabled(!m_release.downloadUrl.isEmpty());
 }
 
@@ -280,7 +282,7 @@ void DownloadDialog::onCancelled()
     setBusy(false);
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
-    setStatus(QStringLiteral("Отменено."));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.cancelled")));
     reject();
 }
 
@@ -296,10 +298,8 @@ bool DownloadDialog::confirmReplace(const QString &target)
         return true;
 
     const auto answer = QMessageBox::question(
-        this, QStringLiteral("Скачать zapret"),
-        QStringLiteral("В %1 уже есть файлы (%2).\n\n"
-                       "Скачивание установит туда новую копию zapret; старые файлы будут удалены "
-                       "после того, как проверка подтвердит новое дерево.\n\nПродолжить?")
+        this, LanguageManager::tr(QStringLiteral("action.download_zapret")),
+        LanguageManager::tr(QStringLiteral("dl.replace_question"))
             .arg(QDir::toNativeSeparators(target), QString::number(entries.size())),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     return answer == QMessageBox::Yes;
@@ -313,9 +313,8 @@ void DownloadDialog::chooseDownload()
     const QString target = targetDir();
     if (target.isEmpty())
     {
-        QMessageBox::critical(this, QStringLiteral("Скачать zapret"),
-                              QStringLiteral("Эта система не даёт доступный каталог данных приложения, "
-                                             "куда можно установить zapret."));
+        QMessageBox::critical(this, LanguageManager::tr(QStringLiteral("action.download_zapret")),
+                              LanguageManager::tr(QStringLiteral("dl.no_data_dir")));
         return;
     }
 
@@ -328,7 +327,7 @@ void DownloadDialog::chooseDownload()
     setBusy(true);
     m_progress->setRange(0, m_release.sizeBytes > 0 ? 100 : 0);
     m_progress->setValue(0);
-    setStatus(QStringLiteral("Скачиваю…"));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.downloading")));
     m_downloader->download(m_release);
 }
 
@@ -342,7 +341,7 @@ void DownloadDialog::chooseCancel()
     // Stop offering both actions while the abort unwinds; cancelled() closes the dialog when it lands.
     m_cancelButton->setEnabled(false);
     m_downloadButton->setEnabled(false);
-    setStatus(QStringLiteral("Отменяю…"));
+    setStatus(LanguageManager::tr(QStringLiteral("dl.cancelling")));
     m_downloader->cancel();
 }
 

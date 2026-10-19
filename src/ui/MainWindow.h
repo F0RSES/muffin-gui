@@ -12,11 +12,13 @@ class QCloseEvent;
 class QFrame;
 class QHBoxLayout;
 class QLabel;
+class QMenu;
 class QPushButton;
 class QScrollArea;
 class QStackedWidget;
 class QSystemTrayIcon;
 class QTimer;
+class QToolButton;
 class QVBoxLayout;
 class QWidget;
 
@@ -169,7 +171,9 @@ private:
     QWidget *buildLogsPage();
     // One rail glyph. The name goes in a property so applyTheme() can re-tint it: Theme::icon() bakes the
     // colour into a pixmap, so a theme switch cannot repaint an already-loaded glyph.
-    QPushButton *addRailButton(QVBoxLayout *box, const QString &glyph, const QString &text);
+    QPushButton *addRailButton(QVBoxLayout *box, const QString &glyph, const QString &textKey);
+    // The language picker's menu: one checkable action per catalog language, each tagged with its code.
+    QMenu *buildLanguageMenu();
     // Turns the journal's tab red while it holds a warning or error the user has not opened. The
     // property is what the QSS [alert="true"] rule keys off, so it needs the same unpolish/polish
     // dance StrategyCard uses for [active] and [error].
@@ -198,6 +202,21 @@ private:
     void attachErrorBadge(const QString &id, const QString &message);
     void notifyError(const QString &message, bool interactive);
 
+    // Rewrite every translatable string in this window's whole object tree.
+    //
+    // Widgets that carry text declare it twice: once when they are built (setText(tr("key"))) and once
+    // as a dynamic property naming that key ("i18nKey", plus "i18nTip" for the tooltip, "i18nAcc" for
+    // the accessible name, "i18nItems" for a combo's entries, "i18nSuffix" for a spin box). This walk
+    // re-reads the properties and re-applies the text in the language LanguageManager now holds, so
+    // switching language is one call and one repaint — no restart, and no per-widget retranslate list
+    // that a new button could silently be missing from. Because the walk starts here, it also reaches
+    // the dialogs built with this window as parent (SettingsDialog, DownloadDialog) and the cards,
+    // which are descendants too.
+    void retranslateUi();
+    // The rail's language glyph is the current language's flag, and the menu ticks it: both follow the
+    // code LanguageManager holds, whether it changed from the menu or from a settings write.
+    void updateLanguageButton();
+
     Settings *m_settings = nullptr;
     ZapretManager *m_manager = nullptr;
     PingService *m_ping = nullptr;
@@ -207,11 +226,11 @@ private:
     QFrame *m_mainArea = nullptr;          // header, page stack, footer
     QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageStrategies <-> PageLogs
     QPushButton *m_navLogs = nullptr;      // carries the [alert="true"] property
+    QPushButton *m_navStrategies = nullptr;
+    QToolButton *m_langButton = nullptr;   // the current language's flag, opening the language menu
     PowerButton *m_power = nullptr;        // the dashboard's one control
-    QPushButton *m_routePill = nullptr;    // "Smart route" — names the strategy the power button runs
     QWidget *m_statusDot = nullptr;        // the 6 px chip beside the connection text
     QLabel *m_statusLabel = nullptr;       // "CONNECTED" and friends
-    QLabel *m_dirLabel = nullptr;          // the resolved zapret root, in the footer
     QLabel *m_footerLabel = nullptr;       // the ping cadence, or a transient message
     QTimer *m_footerTimer = nullptr;       // for how long a transient message holds the footer
     QString m_footerIdleText;              // what the footer says when nothing is being announced

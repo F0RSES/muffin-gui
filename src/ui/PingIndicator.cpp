@@ -1,5 +1,6 @@
 #include "PingIndicator.h"
 
+#include "LanguageManager.h"
 #include "Theme.h"
 
 #include <QFontDatabase>
@@ -249,10 +250,10 @@ QString PingIndicator::latencyText(PingStatus status, int latencyMs)
         return QStringLiteral("…");
     case PingStatus::Ok:
         if (latencyMs >= 0)
-            return QStringLiteral("%1 мс").arg(latencyMs);
+            return LanguageManager::tr(QStringLiteral("ping.ms")).arg(latencyMs);
         return QStringLiteral("ok");
     case PingStatus::Fail:
-        return QStringLiteral("таймаут");
+        return LanguageManager::tr(QStringLiteral("ping.timeout"));
     case PingStatus::Unknown:
         break;
     }

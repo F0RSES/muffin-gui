@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "DownloadDialog.h"
+#include "LanguageManager.h"
 #include "LogPanel.h"
 #include "PingIndicator.h"
 #include "PingService.h"
@@ -14,25 +15,30 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
-#include <QFontDatabase>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
+#include <QSize>
 #include <QSizePolicy>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QStyleHints>
 #include <QSystemTrayIcon>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace zapret {
@@ -59,17 +65,32 @@ QString friendlyHostName(const QString &host)
 
 // The toolbar stop's standing tooltip. updateStatusUi() replaces it with the reason the action is
 // unavailable while a teardown runs, and has to restore this exact text afterwards — spelling it twice
-// is how the two drift.
-const QString kStopActionHint = QStringLiteral("Остановить запущенную стратегию (Ctrl+Shift+X)");
+// is how the two drift. Functions, not constants: the text is the current language's, and a static
+// QString would freeze whichever language happened to be loaded when the binary first touched it.
+QString stopActionHint()
+{
+    return LanguageManager::tr(QStringLiteral("hint.stop"));
+}
 
 // The power button's other standing tooltip — what it says when there is nothing to stop.
-const QString startActionHint = QStringLiteral("Запустить выбранную стратегию (Ctrl+Shift+S)");
+QString startActionHint()
+{
+    return LanguageManager::tr(QStringLiteral("hint.start"));
+}
+
+// The window is fixed, not resizable and never maximised (see the constructor): 900x700 is the canvas
+// the mock is drawn on, and every gap below is measured against it.
+constexpr int kWindowWidth = 900;
+constexpr int kWindowHeight = 700;
 
 // The rail is fixed, not resizable: it carries glyphs only, and 70 px around a 24 px icon is the width
 // the mock specifies and the one that never needs to change.
 constexpr int kSidebarWidth = 70;
 constexpr int kRailGlyphPx = 24;
 constexpr int kBrandGlyphPx = 28;
+// The language picker's flag. 22x16 is the aspect the SVGs are drawn at; the button gives it a 46x30
+// hit area, the same width as the glyphs above it so the rail reads as one column.
+constexpr int kFlagGlyphPx = 22;
 
 // The dashboard's circle. 200 px of rim, and PowerButton adds its own halo margin on every side, so the
 // widget is taller than this — which is why the spacing below is measured from the widget, not the ring.
@@ -99,11 +120,17 @@ MainWindow::MainWindow(QWidget *parent)
     // back to the GUI thread. It is deleted explicitly in the destructor.
     m_ping = new PingService();
 
+    // A fixed 900x700 canvas, and no maximise button: the dashboard is laid out around a 200 px ring
+    // and a footer that must stay centred, so a maximised or resized window is a different design that
+    // nobody drew. setWindowFlag alone would leave the WM's maximise control present but useless —
+    // removing the hint is what actually takes it off the title bar.
     setWindowTitle(QStringLiteral("Muffin"));
-    setMinimumSize(900, 640);
-    setWindowIcon(Theme::icon(QStringLiteral("app"), Theme::accent(), 32));
+    setWindowIcon(QIcon());
+    setWindowFlag(Qt::WindowMaximizeButtonHint, false);
+    setFixedSize(kWindowWidth, kWindowHeight);
 
     buildCentral();
+    updateLanguageButton();
     const bool trayUp = ensureTray();
     if (!trayUp)
         startTrayRetry();
@@ -119,16 +146,16 @@ MainWindow::MainWindow(QWidget *parent)
 
     // A short startup banner: it proves the manager -> log wiring end to end and leaves the panel
     // explaining itself instead of showing an empty box.
-    m_log->appendLine(QStringLiteral("Muffin %1 запущен (бэкенд: %2)")
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("log.startup"))
                           .arg(QApplication::applicationVersion(), m_manager->backendName()),
                       LogPanel::Info);
     if (m_manager->strategyCount() > 0) {
-        m_log->appendLine(QStringLiteral("Найдено стратегий: %1 в %2")
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("log.found_in"))
                               .arg(m_manager->strategyCount())
                               .arg(QDir::toNativeSeparators(m_manager->resolvedRoot())),
                           LogPanel::Info);
     } else {
-        m_log->appendLine(QStringLiteral("Стратегии не найдены — укажите путь к zapret в настройках."),
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("log.no_strategies")),
                           LogPanel::Warn);
     }
 
@@ -136,11 +163,8 @@ MainWindow::MainWindow(QWidget *parent)
     // of letting the user discover it by pressing X with a strategy running.
     if (!trayUp && m_settings->minimizeToTray()) {
         m_trayWarned = true;
-        m_log->appendLine(QStringLiteral(
-                              "Трей недоступен в этой среде: закрытие окна остановит zapret "
-                              "и выйдет из приложения."),
-                          LogPanel::Warn);
-        showTransientMessage(QStringLiteral("Трей недоступен — закрытие окна завершит работу"), 8000);
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("log.tray_no_env")), LogPanel::Warn);
+        showTransientMessage(LanguageManager::tr(QStringLiteral("msg.tray_unavailable")), 8000);
     }
 
     if (m_manager->strategyCount() == 0) {
@@ -187,8 +211,9 @@ void MainWindow::buildCentral()
     setCentralWidget(root);
 }
 
-// The rail: 70 px of glyphs. Brand at the head, the journal above the middle, settings and the version
-// pinned to the foot. No labels anywhere — the whole argument of the mock is that three icons need none.
+// The rail: 70 px of glyphs. Brand at the head, the pages and the two commit controls pinned to the
+// foot under the version. No labels anywhere — the whole argument of the mock is that icons need none,
+// and the tooltip says the words when a pointer arrives.
 QWidget *MainWindow::buildSidebar()
 {
     auto *bar = new QFrame(this);
@@ -207,24 +232,44 @@ QWidget *MainWindow::buildSidebar()
                         .pixmap(kBrandGlyphPx, kBrandGlyphPx));
     box->addWidget(logo);
 
-    box->addStretch(3);
+    box->addStretch(1);
 
-    // The journal. Checkable so it can say "you are looking at it", and a second press puts the
-    // dashboard back — with one glyph on the rail it has to work both ways.
-    m_navLogs = addRailButton(box, QStringLiteral("logs"), QStringLiteral("Логи"));
+    // The bottom group, in the order the design asks for: the catalog, then the journal directly above
+    // settings, then settings, then the language. Both page glyphs are checkable so a second press puts
+    // the dashboard back — with one icon per page it has to work both ways.
+    m_navStrategies = addRailButton(box, QStringLiteral("cards"), QStringLiteral("nav.strategies"));
+    m_navStrategies->setCheckable(true);
+    connect(m_navStrategies, &QPushButton::clicked, this, [this] {
+        setCurrentPage(currentPage() == PageStrategies ? PageDashboard : PageStrategies);
+    });
+
+    m_navLogs = addRailButton(box, QStringLiteral("logs"), QStringLiteral("nav.logs"));
     m_navLogs->setCheckable(true);
     connect(m_navLogs, &QPushButton::clicked, this, [this] {
         setCurrentPage(currentPage() == PageLogs ? PageDashboard : PageLogs);
     });
 
-    box->addStretch(6);
-
-    // Below the fold: settings, then the version. Настройки stays a modal sheet rather than a page — it
-    // is a commit, not a view you glance at, and SettingsDialog::apply() is written as a dialog accept.
+    // Настройки stays a modal sheet rather than a page — it is a commit, not a view you glance at, and
+    // SettingsDialog::apply() is written as a dialog accept.
     QPushButton *navSettings = addRailButton(box, QStringLiteral("settings"),
-                                             QStringLiteral("Настройки"));
-    navSettings->setToolTip(QStringLiteral("Настройки (Ctrl+S)"));
+                                             QStringLiteral("nav.settings"));
+    i18nTip(navSettings, QStringLiteral("nav.settings_tip"));
     connect(navSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
+
+    // The language picker: the current language's flag, opening a menu of the seven. It sits under
+    // settings so the two "change how the app behaves" controls read as one group.
+    m_langButton = new QToolButton(bar);
+    m_langButton->setObjectName(QStringLiteral("langButton"));
+    m_langButton->setCursor(Qt::PointingHandCursor);
+    m_langButton->setAutoRaise(true);
+    m_langButton->setFocusPolicy(Qt::TabFocus);
+    m_langButton->setPopupMode(QToolButton::InstantPopup);
+    m_langButton->setIconSize(QSize(kFlagGlyphPx, kFlagGlyphPx));
+    m_langButton->setFixedSize(46, 30);
+    m_langButton->setToolTip(LanguageManager::tr(QStringLiteral("nav.language")));
+    m_langButton->setAccessibleName(LanguageManager::tr(QStringLiteral("nav.language")));
+    m_langButton->setMenu(buildLanguageMenu());
+    box->addWidget(m_langButton, 0, Qt::AlignHCenter);
 
     auto *version = new QLabel(QStringLiteral("v%1").arg(QApplication::applicationVersion()), bar);
     version->setObjectName(QStringLiteral("railVersion"));
@@ -234,16 +279,57 @@ QWidget *MainWindow::buildSidebar()
     return bar;
 }
 
-QPushButton *MainWindow::addRailButton(QVBoxLayout *box, const QString &glyph, const QString &text)
+// One entry per language the catalog defines, each with its own flag, the native spelling of its name,
+// and a tick on the one currently shown. Picking one writes it through Settings — so the next launch
+// opens in it — and re-languages the running UI in place.
+QMenu *MainWindow::buildLanguageMenu()
+{
+    auto *menu = new QMenu(this);
+    menu->setObjectName(QStringLiteral("languageMenu"));
+
+    for (const QString &code : LanguageManager::codes()) {
+        QAction *act = menu->addAction(LanguageManager::flagIcon(code),
+                                       LanguageManager::nativeName(code));
+        act->setData(code);
+        act->setCheckable(true);
+        act->setChecked(code == LanguageManager::instance().currentCode());
+        connect(act, &QAction::triggered, this, [this, code] {
+            LanguageManager::instance().setCode(code);
+            m_settings->setLanguage(code);
+        });
+    }
+    return menu;
+}
+
+void MainWindow::updateLanguageButton()
+{
+    if (!m_langButton)
+        return;
+    const QString code = LanguageManager::instance().currentCode();
+    m_langButton->setIcon(LanguageManager::flagIcon(code));
+    const QString name = LanguageManager::nativeName(code);
+    m_langButton->setToolTip(LanguageManager::tr(QStringLiteral("nav.language"))
+                             + QStringLiteral(" — ") + name);
+    m_langButton->setAccessibleName(name);
+    // Re-tick the menu: the language can also change from QSettings, not only from this menu.
+    if (QMenu *menu = m_langButton->menu()) {
+        const auto actions = menu->actions();
+        for (QAction *act : actions)
+            act->setChecked(act->data().toString() == code);
+    }
+}
+
+// The rail's icon-only button. `textKey` names a catalog entry rather than a sentence: the button shows
+// a glyph and nothing else, so the key is what the accessible name, the tooltip and a later retranslate
+// all read off the same widget.
+QPushButton *MainWindow::addRailButton(QVBoxLayout *box, const QString &glyph, const QString &textKey)
 {
     auto *b = new QPushButton(m_sidebar);
     b->setObjectName(QStringLiteral("navButton"));
     b->setProperty("glyph", glyph);
     b->setProperty("glyphPx", kRailGlyphPx);
-    // The button shows a glyph and nothing else, so the name it needs for assistive tech — and the one
-    // the tooltip repeats — has to be said out loud rather than read off a label.
-    b->setAccessibleName(text);
-    b->setToolTip(text);
+    i18nAcc(b, textKey);
+    i18nTip(b, textKey);
     b->setCursor(Qt::PointingHandCursor);
     b->setAutoDefault(false);
     b->setDefault(false);
@@ -298,34 +384,28 @@ QWidget *MainWindow::buildHeader()
     auto *title = new QLabel(QStringLiteral("Muffin"), header);
     title->setObjectName(QStringLiteral("appTitle"));
 
-    // The mock's "/ network utility": quiet, monospace, and the only thing that has to say what kind of
-    // program this is.
-    auto *subtitle = new QLabel(QStringLiteral("/ network utility"), header);
-    subtitle->setObjectName(QStringLiteral("appSubtitle"));
-    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    mono.setPixelSize(11);
-    subtitle->setFont(mono);
-
     m_statusDot = new QWidget(header);
     m_statusDot->setObjectName(QStringLiteral("statusDot"));
     m_statusDot->setFixedSize(kStatusDotPx, kStatusDotPx);
     // A bare QWidget paints no stylesheet background of its own; this attribute is what lets #statusDot's
     // border-radius round anything at all.
     m_statusDot->setAttribute(Qt::WA_StyledBackground, true);
-    m_statusDot->setToolTip(QStringLiteral("Состояние подключения"));
+    i18nTip(m_statusDot, QStringLiteral("header.status_tip"));
 
     m_statusLabel = new QLabel(header);
     m_statusLabel->setObjectName(QStringLiteral("statusText"));
     m_statusLabel->setProperty("statusKind", statusKind(IZapretBackend::State::Stopped));
 
     row->addWidget(title);
-    row->addWidget(subtitle);
     row->addStretch(1);
     row->addWidget(m_statusDot, 0, Qt::AlignVCenter);
     row->addWidget(m_statusLabel, 0, Qt::AlignVCenter);
     return header;
 }
 
+// The footer carries the ping cadence and, when something needs saying, a transient message. The zapret
+// path used to sit to its left; the resolved root is a fact the settings dialog owns, and showing it
+// here as well only made the one centred line sit off-centre.
 QWidget *MainWindow::buildFooter()
 {
     auto *foot = new QFrame(m_mainArea);
@@ -336,17 +416,12 @@ QWidget *MainWindow::buildFooter()
     grid->setHorizontalSpacing(16);
     grid->setVerticalSpacing(0);
 
-    m_dirLabel = new QLabel(foot);
-    m_dirLabel->setObjectName(QStringLiteral("dirLabel"));
-    m_dirLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-
     m_footerLabel = new QLabel(foot);
     m_footerLabel->setObjectName(QStringLiteral("footerHint"));
     m_footerLabel->setAlignment(Qt::AlignCenter);
 
-    // Three columns with the outer two weighted equally, so the centred line stays centred however long
-    // the path beside it grows — which a two-column row cannot promise.
-    grid->addWidget(m_dirLabel, 0, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    // Two equal spacers either side of one stretch-free cell: whatever the message is, the line stays
+    // on the window's axis.
     grid->addWidget(m_footerLabel, 0, 1, Qt::AlignCenter);
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 0);
@@ -363,9 +438,10 @@ QWidget *MainWindow::buildFooter()
     return foot;
 }
 
-// The dashboard: a route pill top-left, one enormous button in the middle, and the reachability badges
-// under it. Nothing else — the point of the design is that the common case (run the thing you ran last
-// time) never leaves this screen.
+// The dashboard: one enormous button in the middle and the reachability badges under it. Nothing else —
+// the point of the design is that the common case (run the thing you ran last time) never leaves this
+// screen. The route pill that used to sit in the top-left named the strategy and opened the catalog;
+// both jobs now belong to the rail's cards glyph and to the power button itself.
 QWidget *MainWindow::buildDashboardPage()
 {
     auto *page = new QWidget(m_pages);
@@ -376,19 +452,8 @@ QWidget *MainWindow::buildDashboardPage()
     box->setContentsMargins(28, 22, 28, 22);
     box->setSpacing(0);
 
-    // Where the mock puts its "Smart route" line. The pill names the strategy the power button will run
-    // and opens the list to change it, so "what am I about to run" and "let me pick another" are one
-    // control — which is also what lets the cards keep existing without taking a rail glyph.
-    m_routePill = new QPushButton(page);
-    m_routePill->setObjectName(QStringLiteral("routePill"));
-    m_routePill->setCursor(Qt::PointingHandCursor);
-    m_routePill->setFocusPolicy(Qt::TabFocus);
-    m_routePill->setAutoDefault(false);
-    connect(m_routePill, &QPushButton::clicked, this, [this] { setCurrentPage(PageStrategies); });
-    box->addWidget(m_routePill, 0, Qt::AlignLeft | Qt::AlignTop);
-
-    // Unequal stretches either side of the button: with the badges, the footer and the pill all in the
-    // same column, equal stretches would push the circle visibly above the middle of the canvas.
+    // Unequal stretches either side of the button: with the badges and the footer in the same column,
+    // equal stretches would push the circle visibly above the middle of the canvas.
     box->addStretch(2);
 
     m_power = new PowerButton(page);
@@ -434,30 +499,34 @@ QWidget *MainWindow::buildStrategiesPage()
     head->setContentsMargins(0, 0, 0, 0);
     head->setSpacing(10);
 
-    auto *back = new QPushButton(QStringLiteral("←  Muffin"), page);
+    auto *back = new QPushButton(page);
     back->setObjectName(QStringLiteral("ghostButton"));
     back->setCursor(Qt::PointingHandCursor);
     back->setAutoDefault(false);
-    back->setToolTip(QStringLiteral("Вернуться на главный экран (Esc)"));
+    i18nText(back, QStringLiteral("page.back"));
+    i18nTip(back, QStringLiteral("page.back_tip"));
     connect(back, &QPushButton::clicked, this, &MainWindow::showDashboard);
 
-    auto *title = new QLabel(QStringLiteral("Стратегии"), page);
+    auto *title = new QLabel(page);
     title->setObjectName(QStringLiteral("pageTitle"));
+    i18nText(title, QStringLiteral("nav.strategies"));
 
-    auto *refresh = new QPushButton(Theme::themedIcon(QStringLiteral("refresh"), 16),
-                                    QStringLiteral("Обновить"), page);
+    auto *refresh = new QPushButton(QString(), page);
     refresh->setObjectName(QStringLiteral("ghostButton"));
     refresh->setProperty("glyph", QStringLiteral("refresh"));
     refresh->setProperty("glyphPx", 16);
-    refresh->setToolTip(QStringLiteral("Пересканировать папку zapret (Ctrl+R)"));
+    refresh->setIcon(Theme::themedIcon(QStringLiteral("refresh"), 16));
+    i18nText(refresh, QStringLiteral("action.refresh"));
+    i18nTip(refresh, QStringLiteral("action.refresh_tip"));
     connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshStrategies);
 
-    auto *download = new QPushButton(Theme::themedIcon(QStringLiteral("arrow-down"), 16),
-                                     QStringLiteral("Скачать zapret"), page);
+    auto *download = new QPushButton(QString(), page);
     download->setObjectName(QStringLiteral("ghostButton"));
     download->setProperty("glyph", QStringLiteral("arrow-down"));
     download->setProperty("glyphPx", 16);
-    download->setToolTip(QStringLiteral("Загрузить последнюю версию zapret с GitHub"));
+    download->setIcon(Theme::themedIcon(QStringLiteral("arrow-down"), 16));
+    i18nText(download, QStringLiteral("action.download_zapret"));
+    i18nTip(download, QStringLiteral("action.download_zapret_tip"));
     connect(download, &QPushButton::clicked, this, &MainWindow::downloadZapret);
 
     head->addWidget(back);
@@ -468,9 +537,9 @@ QWidget *MainWindow::buildStrategiesPage()
     head->addWidget(download);
     box->addLayout(head);
 
-    auto *subtitle = new QLabel(QStringLiteral(
-        "Одна стратегия за раз. Правый клик по карточке — скопировать команду."), page);
+    auto *subtitle = new QLabel(page);
     subtitle->setObjectName(QStringLiteral("pageSubtitle"));
+    i18nText(subtitle, QStringLiteral("page.strategies_subtitle"));
     box->addWidget(subtitle);
 
     // m_stack is still what it always was — the cards list or the "nothing found" page.
@@ -494,16 +563,17 @@ QWidget *MainWindow::buildStrategiesPage()
 
     // The placeholder used to be one label ending in "укажите путь в настройках" — instructions for
     // someone who has no zapret and no way to get it from here. Both ways out are now buttons.
-    auto *placeholderText = new QLabel(QStringLiteral(
-        "Стратегии не найдены.\n\n"
-        "Скачайте zapret сами — или укажите папку, которая уже есть на диске."), m_placeholder);
+    auto *placeholderText = new QLabel(m_placeholder);
     placeholderText->setObjectName(QStringLiteral("placeholder"));
     placeholderText->setAlignment(Qt::AlignCenter);
     placeholderText->setWordWrap(true);
+    i18nText(placeholderText, QStringLiteral("placeholder.no_strategies"));
 
-    auto *placeholderDownload = new QPushButton(QStringLiteral("Скачать zapret"), m_placeholder);
+    auto *placeholderDownload = new QPushButton(m_placeholder);
     placeholderDownload->setObjectName(QStringLiteral("primaryButton"));
-    auto *placeholderSettings = new QPushButton(QStringLiteral("Настройки (Ctrl+S)"), m_placeholder);
+    i18nText(placeholderDownload, QStringLiteral("action.download_zapret"));
+    auto *placeholderSettings = new QPushButton(m_placeholder);
+    i18nText(placeholderSettings, QStringLiteral("nav.settings_tip"));
 
     auto *placeholderBox = new QVBoxLayout(m_placeholder);
     placeholderBox->setContentsMargins(24, 24, 24, 24);
@@ -525,7 +595,8 @@ QWidget *MainWindow::buildStrategiesPage()
 }
 
 // The journal gets the whole canvas, which is what a 5000-line ring buffer of aligned timestamps
-// actually wants. Filtering, copying and saving are LogPanel's own.
+// actually wants. Filtering, copying and saving are LogPanel's own; the page adds nothing above them but
+// the way back, because a header naming a box of logs says what the box already shows.
 QWidget *MainWindow::buildLogsPage()
 {
     auto *page = new QWidget(m_pages);
@@ -533,32 +604,17 @@ QWidget *MainWindow::buildLogsPage()
     page->setObjectName(QStringLiteral("logsPage"));
 
     auto *box = new QVBoxLayout(page);
-    box->setContentsMargins(28, 22, 28, 22);
-    box->setSpacing(12);
+    box->setContentsMargins(28, 14, 28, 22);
+    box->setSpacing(10);
 
-    auto *head = new QHBoxLayout;
-    head->setContentsMargins(0, 0, 0, 0);
-    head->setSpacing(10);
-
-    auto *back = new QPushButton(QStringLiteral("←  Muffin"), page);
+    auto *back = new QPushButton(page);
     back->setObjectName(QStringLiteral("ghostButton"));
     back->setCursor(Qt::PointingHandCursor);
     back->setAutoDefault(false);
-    back->setToolTip(QStringLiteral("Вернуться на главный экран (Esc)"));
+    i18nText(back, QStringLiteral("page.back"));
+    i18nTip(back, QStringLiteral("page.back_tip"));
     connect(back, &QPushButton::clicked, this, &MainWindow::showDashboard);
-
-    auto *title = new QLabel(QStringLiteral("Журнал"), page);
-    title->setObjectName(QStringLiteral("pageTitle"));
-    head->addWidget(back);
-    head->addSpacing(6);
-    head->addWidget(title);
-    head->addStretch(1);
-    box->addLayout(head);
-
-    auto *subtitle = new QLabel(QStringLiteral(
-        "Всё, что сообщает бэкенд: уровень, время, строка."), page);
-    subtitle->setObjectName(QStringLiteral("pageSubtitle"));
-    box->addWidget(subtitle);
+    box->addWidget(back, 0, Qt::AlignLeft);
 
     m_log = new LogPanel(page);
     box->addWidget(m_log, 1);
@@ -579,10 +635,12 @@ void MainWindow::setCurrentPage(int page)
                                                   : PageDashboard;
     m_pages->setCurrentIndex(target);
 
-    // The rail's glyph is the only page indicator left, so it has to follow the stack even when the page
-    // was chosen from code — a lit journal icon over the dashboard is worse than no icon at all.
+    // The rail's glyphs are the only page indicator left, so they have to follow the stack even when the
+    // page was chosen from code — a lit journal icon over the dashboard is worse than no icon at all.
     if (m_navLogs)
         m_navLogs->setChecked(target == PageLogs);
+    if (m_navStrategies)
+        m_navStrategies->setChecked(target == PageStrategies);
     // Opening the journal is what acknowledges whatever made it light up.
     if (target == PageLogs)
         setLogAlert(false);
@@ -657,7 +715,7 @@ void MainWindow::onPowerClicked()
         // Nothing to run yet. Saying "no saved strategy" where the user can see the list they have not
         // opened is more useful than a sentence in a footer nobody reads.
         setCurrentPage(PageStrategies);
-        showTransientMessage(QStringLiteral("Выберите стратегию, затем нажмите кнопку"), 5000);
+        showTransientMessage(LanguageManager::tr(QStringLiteral("msg.pick_strategy")), 5000);
         return;
     }
     startStrategy(last, true);
@@ -698,22 +756,22 @@ bool MainWindow::ensureTray()
     m_tray = new QSystemTrayIcon(this);
 
     auto *menu = new QMenu(this);
-    QAction *show = menu->addAction(QStringLiteral("Показать"));
+    QAction *show = i18nText(menu->addAction(QString()), QStringLiteral("tray.show"));
     connect(show, &QAction::triggered, this, [this] {
         showNormal();
         raise();
         activateWindow();
     });
-    QAction *startLast = menu->addAction(QStringLiteral("Запустить последнюю"));
+    QAction *startLast = i18nText(menu->addAction(QString()), QStringLiteral("tray.start_last"));
     connect(startLast, &QAction::triggered, this, [this] {
         const QString last = m_settings->lastStrategyId();
         if (!last.isEmpty())
             startStrategy(last, true);
     });
-    QAction *stop = menu->addAction(QStringLiteral("Остановить"));
+    QAction *stop = i18nText(menu->addAction(QString()), QStringLiteral("tray.stop"));
     connect(stop, &QAction::triggered, this, &MainWindow::onStopRequested);
     menu->addSeparator();
-    QAction *quit = menu->addAction(QStringLiteral("Выход"));
+    QAction *quit = i18nText(menu->addAction(QString()), QStringLiteral("tray.quit"));
     connect(quit, &QAction::triggered, this, &MainWindow::requestQuit);
 
     m_tray->setContextMenu(menu);
@@ -746,7 +804,7 @@ void MainWindow::startTrayRetry()
             m_trayRetry->stop();
             if (m_trayWarned) {
                 m_trayWarned = false;
-                m_log->appendLine(QStringLiteral("Трей доступен — сворачивание при закрытии включено."),
+                m_log->appendLine(LanguageManager::tr(QStringLiteral("log.tray_available")),
                                   LogPanel::Info);
             }
             return;
@@ -771,7 +829,7 @@ void MainWindow::buildShortcuts()
         if (!last.isEmpty())
             startStrategy(last, true);
         else
-            showTransientMessage(QStringLiteral("Нет сохранённой стратегии для запуска"), 3000);
+            showTransientMessage(LanguageManager::tr(QStringLiteral("msg.no_saved_strategy")), 3000);
     });
 
     auto *stop = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+X")), this);
@@ -803,6 +861,12 @@ void MainWindow::wire()
 
     connect(m_settings, &Settings::changed, this, &MainWindow::onSettingsChanged);
     connect(m_ping, &PingService::pingUpdated, this, &MainWindow::onPingUpdated);
+
+    // The language can move while this window is open (the rail's flag button), and nothing else tells
+    // the widgets: one signal, one walk over the tree. updateStatusUi() is part of retranslateUi(), so
+    // the state-derived strings move with it.
+    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this,
+            [this](const QString &) { retranslateUi(); });
 
     if (QStyleHints *hints = QGuiApplication::styleHints()) {
         connect(hints, &QStyleHints::colorSchemeChanged, this, [this] {
@@ -841,17 +905,19 @@ QString MainWindow::statusText(IZapretBackend::State state, const QString &strat
 {
     switch (state) {
     case IZapretBackend::State::Starting:
-        return QStringLiteral("Запуск: %1").arg(strategyName.isEmpty() ? QStringLiteral("…") : strategyName);
+        return LanguageManager::tr(QStringLiteral("status.starting"))
+            .arg(strategyName.isEmpty() ? QStringLiteral("…") : strategyName);
     case IZapretBackend::State::Running:
-        return QStringLiteral("Работает: %1").arg(strategyName.isEmpty() ? QStringLiteral("—") : strategyName);
+        return LanguageManager::tr(QStringLiteral("status.running"))
+            .arg(strategyName.isEmpty() ? QStringLiteral("—") : strategyName);
     case IZapretBackend::State::Stopping:
-        return QStringLiteral("Остановка…");
+        return LanguageManager::tr(QStringLiteral("status.stopping"));
     case IZapretBackend::State::Error:
-        return QStringLiteral("Ошибка");
+        return LanguageManager::tr(QStringLiteral("status.error"));
     case IZapretBackend::State::Stopped:
         break;
     }
-    return QStringLiteral("Остановлено");
+    return LanguageManager::tr(QStringLiteral("status.stopped"));
 }
 
 QString MainWindow::connectionText(IZapretBackend::State state)
@@ -928,12 +994,12 @@ QString MainWindow::blockedReason(IZapretBackend::State state)
 {
     switch (state) {
     case IZapretBackend::State::Starting:
-        return QStringLiteral("Идёт запуск — дождитесь его завершения.");
+        return LanguageManager::tr(QStringLiteral("gate.starting"));
     case IZapretBackend::State::Stopping:
-        return QStringLiteral("Идёт остановка — дождитесь её завершения.");
+        return LanguageManager::tr(QStringLiteral("gate.stopping"));
     case IZapretBackend::State::Running:
         // The missing action here is not another strategy's start but this run's stop.
-        return QStringLiteral("Стратегия уже запущена — сначала остановите её.");
+        return LanguageManager::tr(QStringLiteral("gate.running"));
     case IZapretBackend::State::Stopped:
     case IZapretBackend::State::Error:
         break;
@@ -944,33 +1010,12 @@ QString MainWindow::blockedReason(IZapretBackend::State state)
 void MainWindow::updateStatusUi()
 {
     const IZapretBackend::State state = m_manager->state();
-    const Strategy *active = m_manager->activeStrategy();
-    const QString name = active ? active->name : QString();
 
     if (m_statusLabel) {
         // The chip's word is the plain state, not the sentence the old pill carried: "CONNECTED" beside a
-        // dot, with the strategy's name reserved for the route pill and the window title, which both say
-        // it more precisely.
+        // dot, with the strategy's name reserved for the log and the tray tooltip, which both say it more
+        // precisely. The window title does not carry it either — the design keeps the title bar short.
         setConnectionChip(connectionText(state), statusKind(state));
-    }
-
-    // While the teardown runs the title has to say so rather than keep naming the strategy: alt-tabbing
-    // back to "Muffin — nfqws (portable)" is indistinguishable from a live run, and that ten-second gap
-    // is exactly when the second click used to land.
-    QString titleName = QStringLiteral("остановлено");
-    if (state == IZapretBackend::State::Stopping)
-        titleName = QStringLiteral("остановка…");
-    else if (!name.isEmpty() && state != IZapretBackend::State::Stopped
-             && state != IZapretBackend::State::Error)
-        titleName = name;
-    setWindowTitle(QStringLiteral("Muffin — %1").arg(titleName));
-
-    if (m_dirLabel) {
-        const QString dir = m_manager->resolvedRoot().isEmpty()
-                                ? QStringLiteral("zapret не найден")
-                                : QDir::toNativeSeparators(m_manager->resolvedRoot());
-        m_dirLabel->setText(dir);
-        m_dirLabel->setToolTip(dir);
     }
 
     // "The run this card belongs to" is shown from the moment it is requested until the teardown
@@ -993,21 +1038,8 @@ void MainWindow::updateStatusUi()
             mode = PowerButton::Mode::Busy;
         m_power->setMode(mode);
         m_power->setEnabled(canStart || canStop);
-        m_power->setToolTip(canStop ? kStopActionHint
-                                    : (busy.isEmpty() ? startActionHint : busy));
-    }
-
-    if (m_routePill) {
-        // The pill names what the button will do: the live strategy while one is up, otherwise the one
-        // saved from the last run, otherwise the invitation to go pick one.
-        const QString last = m_settings->lastStrategyId();
-        const Strategy *chosen = activeIsUp ? active : m_manager->findStrategy(last);
-        const QString chosenName = chosen ? chosen->name
-                                          : (last.isEmpty() ? QString() : last);
-        m_routePill->setText(chosenName.isEmpty()
-                                 ? QStringLiteral("Smart route — выбрать стратегию")
-                                 : QStringLiteral("Smart route · %1").arg(chosenName));
-        m_routePill->setToolTip(QStringLiteral("Изменить стратегию"));
+        m_power->setToolTip(canStop ? stopActionHint()
+                                    : (busy.isEmpty() ? startActionHint() : busy));
     }
 
     const QString activeId = m_manager->activeStrategyId();
@@ -1061,23 +1093,86 @@ void MainWindow::applyTheme()
     if (m_power)
         m_power->retheme();
 
-    setWindowIcon(Theme::icon(QStringLiteral("app"), Theme::accent(), 32));
+    // No setWindowIcon() here: the title bar is deliberately iconless, and a theme switch that
+    // re-attached the muffin would put it back the first time anyone changed the colour scheme.
+    updateLanguageButton();
     updateTrayIcon();
+}
+
+// Re-write every string this window owns in the language LanguageManager now holds.
+//
+// Nothing here knows what a widget *is*: it walks the object tree for the i18n* properties the builders
+// left behind (see retranslateUi's declaration), so a new label is translated by setting its property at
+// construction and needs no second list. Cards, the log panel and any dialog parented to this window are
+// descendants and come along in the same walk.
+void MainWindow::retranslateUi()
+{
+    const auto widgets = findChildren<QWidget *>();
+    for (QWidget *w : widgets) {
+        const QString key = w->property("i18nKey").toString();
+        if (!key.isEmpty()) {
+            if (auto *button = qobject_cast<QAbstractButton *>(w))
+                button->setText(LanguageManager::tr(key));
+            else if (auto *label = qobject_cast<QLabel *>(w))
+                label->setText(LanguageManager::tr(key));
+        }
+        const QString tip = w->property("i18nTip").toString();
+        if (!tip.isEmpty())
+            w->setToolTip(LanguageManager::tr(tip));
+        const QString acc = w->property("i18nAcc").toString();
+        if (!acc.isEmpty())
+            w->setAccessibleName(LanguageManager::tr(acc));
+
+        // A combo's entries carry their data (a level int, a theme name) independently of their text, so
+        // the labels can be rewritten in place — indices and the current selection survive.
+        if (auto *combo = qobject_cast<QComboBox *>(w)) {
+            const QStringList keys = w->property("i18nItems").toStringList();
+            for (int i = 0; i < keys.size() && i < combo->count(); ++i)
+                combo->setItemText(i, LanguageManager::tr(keys.at(i)));
+        }
+        if (auto *spin = qobject_cast<QSpinBox *>(w)) {
+            const QString suffixKey = w->property("i18nSuffix").toString();
+            if (!suffixKey.isEmpty())
+                spin->setSuffix(LanguageManager::tr(suffixKey));
+        }
+        // A line edit's placeholder is the one hint the field has: it is not a value, so it rewrites too.
+        if (auto *edit = qobject_cast<QLineEdit *>(w)) {
+            const QString ph = w->property("i18nPlaceholder").toString();
+            if (!ph.isEmpty())
+                edit->setPlaceholderText(LanguageManager::tr(ph));
+        }
+    }
+
+    // Cards compute their summary from the strategy rather than from a key, so they re-derive it; the
+    // action button already carries its own key and needs nothing extra.
+    for (StrategyCard *card : findChildren<StrategyCard *>())
+        card->retranslateText();
+
+    const auto actions = findChildren<QAction *>();
+    for (QAction *action : actions) {
+        const QString key = action->property("i18nKey").toString();
+        if (!key.isEmpty())
+            action->setText(LanguageManager::tr(key));
+    }
+
+    // The rail's flag, the menu tick, and any text the status machine writes rather than the builders.
+    updateLanguageButton();
+    updateStatusUi();
 }
 
 void MainWindow::refreshStrategies()
 {
     const int count = m_manager->reload();
     populateCards();
-    showTransientMessage(QStringLiteral("Найдено стратегий: %1").arg(count), 4000);
-    m_log->appendLine(QStringLiteral("Пересканировано: %1 стратегий в %2")
+    showTransientMessage(LanguageManager::tr(QStringLiteral("msg.found_count")).arg(count), 4000);
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("log.rescanned"))
                           .arg(count)
-                          .arg(m_manager->resolvedRoot().isEmpty() ? QStringLiteral("(не найдено)")
-                                                                   : m_manager->resolvedRoot()),
+                          .arg(m_manager->resolvedRoot().isEmpty()
+                                   ? LanguageManager::tr(QStringLiteral("log.no_dir"))
+                                   : m_manager->resolvedRoot()),
                       LogPanel::Info);
     if (count == 0)
-        m_log->appendLine(QStringLiteral("В этой папке нет стратегий — проверьте путь в настройках."),
-                          LogPanel::Warn);
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("log.empty_dir")), LogPanel::Warn);
 }
 
 void MainWindow::openSettings()
@@ -1104,7 +1199,8 @@ void MainWindow::downloadZapret()
 
 void MainWindow::zapretInstalled(const QString &path)
 {
-    m_log->appendLine(QStringLiteral("Установлен zapret: %1").arg(QDir::toNativeSeparators(path)),
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("log.installed"))
+                          .arg(QDir::toNativeSeparators(path)),
                       LogPanel::Info);
 
     // Exactly one rescan, whichever way the path moves. Writing Settings fires changed(), and
@@ -1133,7 +1229,7 @@ void MainWindow::startStrategy(const QString &id, bool interactive)
 
     const Strategy *strategy = m_manager->findStrategy(id);
     if (!strategy) {
-        const QString msg = QStringLiteral("Стратегия не найдена: %1").arg(id);
+        const QString msg = LanguageManager::tr(QStringLiteral("error.strategy_not_found")).arg(id);
         m_log->appendLine(msg, LogPanel::Error);
         notifyError(msg, interactive);
         return;
@@ -1142,7 +1238,9 @@ void MainWindow::startStrategy(const QString &id, bool interactive)
     m_pendingStartId = id;
     QString error;
     if (!m_manager->start(*strategy, &error)) {
-        const QString msg = error.isEmpty() ? QStringLiteral("Бэкенд отклонил запуск.") : error;
+        const QString msg = error.isEmpty()
+                            ? LanguageManager::tr(QStringLiteral("error.backend_refused"))
+                            : error;
         m_pendingStartId.clear();
         // Every backend rejection path already emitted errorOccurred, and this window logs that — so
         // logging here as well duplicated the line (visible as two identical ERR rows for one click).
@@ -1199,14 +1297,15 @@ void MainWindow::onStateChanged(IZapretBackend::State state)
 
 void MainWindow::onStrategyStarted(const QString &id, const QString &name)
 {
-    m_log->appendLine(QStringLiteral("Запрошен запуск: %1").arg(name), LogPanel::Info);
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("log.start_requested")).arg(name),
+                      LogPanel::Info);
     attachErrorBadge(id, QString());   // a fresh attempt supersedes the previous failure badge
     updateStatusUi();
 }
 
 void MainWindow::onStrategyStopped()
 {
-    m_log->appendLine(QStringLiteral("Стратегия остановлена"), LogPanel::Info);
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("log.strategy_stopped")), LogPanel::Info);
     updateStatusUi();
 }
 
@@ -1331,8 +1430,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         hide();
         event->ignore();
         m_tray->showMessage(QStringLiteral("Muffin"),
-                            QStringLiteral("Окно свёрнуто в трей — zapret продолжает работать.\n"
-                                           "Двойной клик по иконке открывает окно."),
+                            LanguageManager::tr(QStringLiteral("tray.minimized")),
                             Theme::icon(QStringLiteral("tray"), Theme::success(), 22),
                             4000);
         return;
@@ -1341,9 +1439,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
     // The user asked for hide-on-close but this desktop publishes no tray. Say what is about to happen
     // instead of silently quitting — the difference matters when a strategy is running.
     if (!m_quitting && m_settings->minimizeToTray() && !trayUp && m_manager->isRunning()) {
-        m_log->appendLine(QStringLiteral(
-                              "Трей недоступен: закрытие окна останавливает zapret и завершает приложение."),
-                          LogPanel::Warn);
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("log.close_stops")), LogPanel::Warn);
     }
 
     m_quitting = true;
