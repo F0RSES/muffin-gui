@@ -854,6 +854,22 @@ void MainWindow::onPowerClicked()
 }
 
 
+void MainWindow::bringToFront()
+{
+    // showNormal (not show): the window can be hidden — closed to the tray, or launched minimized —
+    // and it can be a normal visible window that happens to sit behind another application. show()
+    // would only be correct for the hidden case, and doing the two separately is a race against
+    // whoever minimized the window between the visibility check and the call. showNormal un-hides
+    // and un-minimizes in one step, and raises.
+    showNormal();
+    raise();
+    // activateWindow is the one that actually pulls keyboard focus back from whatever the user was
+    // typing into before they clicked the tray or launched a second instance. raise alone reorders
+    // the window stack without stealing focus, which reads as the app being unresponsive to the
+    // click — the exact symptom that keeps this trio together.
+    activateWindow();
+}
+
 bool MainWindow::traySupported()
 {
     return QSystemTrayIcon::isSystemTrayAvailable();
@@ -889,11 +905,7 @@ bool MainWindow::ensureTray()
 
     auto *menu = new QMenu(this);
     QAction *show = i18nText(menu->addAction(QString()), QStringLiteral("tray.show"));
-    connect(show, &QAction::triggered, this, [this] {
-        showNormal();
-        raise();
-        activateWindow();
-    });
+    connect(show, &QAction::triggered, this, [this] { bringToFront(); });
     QAction *startLast = i18nText(menu->addAction(QString()), QStringLiteral("tray.start_last"));
     connect(startLast, &QAction::triggered, this, [this] {
         const QString last = m_settings->lastStrategyId();
@@ -907,15 +919,18 @@ bool MainWindow::ensureTray()
     connect(quit, &QAction::triggered, this, &MainWindow::requestQuit);
 
     m_tray->setContextMenu(menu);
+    // Single click and double click both mean "toggle": the icon is the only handle when the window
+    // is hidden, so a click has to bring it back; when it is already the front window the same click
+    // hides it again, which is what an ordinary dock-style icon does. Right-click opens the menu,
+    // and Context (not Trigger) is the reason for it on the platforms that distinguish them, so we
+    // do not have to handle the menu ourselves here.
     connect(m_tray, &QSystemTrayIcon::activated, this,
             [this](QSystemTrayIcon::ActivationReason reason) {
                 if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
                     if (isVisible() && !isMinimized()) {
                         hide();
                     } else {
-                        showNormal();
-                        raise();
-                        activateWindow();
+                        bringToFront();
                     }
                 }
             });

@@ -172,6 +172,14 @@ public:
     // depending on which button opened it is the kind of bug nobody notices until an install fails.
     void downloadZapret();
 
+    // Unhide and focus the window: show + raise + activate, in that order. Three call sites need it —
+    // the tray's "Show" menu entry, a click on the tray icon itself, and main.cpp's single-instance
+    // channel when a second launch reaches the running instance — and hand-copying the sequence into a
+    // lambda at each of them is exactly how they start to disagree (the classic symptom being a tray
+    // click that reveals the window but leaves another application focused). Public because it is the
+    // entry point main.cpp wires into; nothing else in the class needs to reach it.
+    void bringToFront();
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     // The window is frameless (see the constructor), so its own header is the only thing to grab: a press
