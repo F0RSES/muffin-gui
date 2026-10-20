@@ -22,11 +22,11 @@
 
 | Главный экран | Профили |
 | :---: | :---: |
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Profiles](docs/screenshots/profiles.png) |
+| ![Dashboard](docs/screenshots/Dashboard.png) | ![Profiles](docs/screenshots/Profiles.png) |
 
 | Логи | Настройки |
 | :---: | :---: |
-| ![Logs](docs/screenshots/logs.png) | ![Settings](docs/screenshots/settings.png) |
+| ![Logs](docs/screenshots/Logs.png) | ![Settings](docs/screenshots/Settings.png) |
 
 ---
 
