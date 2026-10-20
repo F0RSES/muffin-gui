@@ -421,10 +421,31 @@ jobs:
           # terminating error, so we don't fall through with a half-computed value.
           $ErrorActionPreference = 'Stop'
 
+          # A workflow command is a single line of the log stream, so its data field has three reserved
+          # characters: '%' introduces an escape, and CR/LF would end the command early -- everything
+          # after a stray newline is printed as an ordinary log line and the annotation quietly never
+          # exists. .NET exception messages are multi-line all the time (Invoke-WebRequest's status +
+          # reason phrase, choco's own error block), so every payload goes through here. Order matters:
+          # '%' must be escaped first or it would re-escape the '%' the CR/LF escapes introduce.
+          # Verified against pwsh 7.6: emitting "::error::`n-containing`ntext" produced exactly the
+          # broken two-line command this prevents.
+          function Set-WorkflowText([string]$msg) {
+            $s = $msg -replace '%', '%25'
+            $s = $s -replace "`r", '%0D'
+            $s = $s -replace "`n", '%0A'
+            return $s
+          }
+
           function Fail([string]$msg) {
-            Write-Host "::error::$msg"
+            Write-Host "::error::$(Set-WorkflowText $msg)"
             if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "`n### installer failure`n`n$msg" }
             throw $msg
+          }
+
+          # Non-fatal: records why a fallback is being taken without ending the step.
+          function Warn([string]$msg) {
+            Write-Host "::warning::$(Set-WorkflowText $msg)"
+            Write-Host $msg
           }
 
           # Both majors are candidates. Inno Setup 7 installs beside 6 rather than over it, so a runner
@@ -487,10 +508,10 @@ jobs:
             else { Write-Host "no readable ISCC.exe -- installing via Chocolatey" }
             try {
               & choco upgrade innosetup --yes --no-progress --force
-              if ($LASTEXITCODE -ne 0) { Write-Host "::warning::choco upgrade innosetup returned exit $LASTEXITCODE; falling back to a direct download" }
+              if ($LASTEXITCODE -ne 0) { Warn "choco upgrade innosetup returned exit $LASTEXITCODE; falling back to a direct download" }
               $found = Select-Iscc
             } catch {
-              Write-Host "::warning::choco upgrade threw: $($_.Exception.Message); falling back to a direct download"
+              Warn "choco upgrade threw: $($_.Exception.Message); falling back to a direct download"
             }
           }
 
@@ -504,19 +525,42 @@ jobs:
           # still picks it up, /VERYSILENT + /SUPPRESSMSGBOXES + /NORESTART keeps the run
           # non-interactive. Skipped entirely when the Chocolatey path already produced a compiler
           # that clears the floor.
+          #
+          # The download is retried because this is the one branch that depends on a remote host
+          # answering: a single transient TLS/5xx failure used to end a tag release. Fail() is only
+          # reached after three attempts, and it names the attempt count so a proxy block reads
+          # differently from a dead URL.
           if (-not $found -or $found.Version -lt $min) {
+            $url = 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe'
             $tmp = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
             Write-Host "falling back to a direct download of innosetup-6.7.3.exe from jrsoftware/issrc"
-            try {
-              Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' `
-                                -OutFile $tmp -UseBasicParsing -MaximumRedirection 5
-              Write-Host "downloaded $((Get-Item $tmp).Length) bytes to $tmp"
-              Start-Process -FilePath $tmp `
-                            -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/ALLUSERS' -Wait
-              $found = Select-Iscc
-            } catch {
-              Write-Host "::error::direct-download fallback failed: $($_.Exception.Message)"
+            $dlErr = $null
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -MaximumRedirection 5
+                $dlErr = $null
+                break
+              } catch {
+                $dlErr = $_.Exception.Message
+                Warn "download attempt $attempt/3 failed: $dlErr"
+                if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+              }
             }
+            if ($dlErr) {
+              Fail "could not download $url after 3 attempts; last error: $dlErr"
+            }
+            Write-Host "downloaded $((Get-Item $tmp).Length) bytes to $tmp"
+            # -PassThru is not decorative here. Without it Start-Process reports nothing about the
+            # child, so an installer that aborted (a 1/2/6 exit -- cancelled, invalid parameters,
+            # reboot-required) would look like a clean success and the only clue left behind would be
+            # the later "ISCC.exe not found", which names the wrong thing. The code is a warning, not
+            # a Fail: a nonzero exit can mean "installed, reboot pending", and the version gate below
+            # is what actually decides whether the compiler is usable.
+            $proc = Start-Process -FilePath $tmp `
+                                  -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES','/ALLUSERS' `
+                                  -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { Warn "innosetup-6.7.3.exe exited with $($proc.ExitCode); rescanning anyway" }
+            $found = Select-Iscc
           }
 
           if (-not $found) { Fail "ISCC.exe not found after Chocolatey + direct-download (looked in: $($candidates -join ', '))" }
