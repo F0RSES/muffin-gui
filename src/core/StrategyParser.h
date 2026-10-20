@@ -103,6 +103,26 @@ public:
     // than once. Purely textual, so it works even when run on a non-Windows host.
     static void resolveWindowsCommands(QList<Strategy> &strategies);
 
+    // ---- the list files an argv asks the payload to read ----
+    //
+    // zapret's windows wrappers point several flags at the "-user" files -- list-general-user.txt,
+    // ipset-exclude-user.txt and their siblings -- and a release archive does not contain them:
+    // upstream creates them with zz-make-user-files.bat. This backend execs winws.exe instead of
+    // running the wrapper, so that batch never gets a chance to, and the payload reports that it
+    // cannot access the file. Handing the paths back lets the launcher create exactly the
+    // placeholders the child is about to be told to read, derived from the command line that names
+    // them, so the two cannot drift apart.
+    //
+    // `argv` is the resolved argument vector (the --flag=<path> form, or a bare path) and `root` the
+    // tree the payload lives in. A value is returned only when all of these hold: its file name is
+    // a "-user" placeholder, it resolves under `root`, the file does not already exist, and the
+    // directory it belongs to does. Anything else the command line names is deliberately left alone --
+    // a main list or a hostlist the archive was supposed to ship is a real missing file, and papering
+    // over it with an empty one would turn a loud failure into a silent no-op.
+    //
+    // Pure path arithmetic: nothing is created here, and nothing is read from disk but existence.
+    static QStringList missingUserListFiles(const QStringList &argv, const QString &root);
+
 private:
     StrategyParser() = delete;
 

@@ -1,6 +1,9 @@
 #include "PrivilegeHelper.h"
 
+#include "WindowsArgs.h"
+
 #include <QByteArray>
+#include <QDir>
 #include <QFileInfo>
 #include <QProcess>
 #include <QProcessEnvironment>
@@ -45,19 +48,22 @@ bool PrivilegeHelper::runElevated(const QString &program, const QStringList &arg
 
 #if defined(Q_OS_WIN)
     // ShellExecuteEx with the "runas" verb triggers the UAC consent prompt and, on consent, starts
-    // the process elevated. Arguments are passed as a single space-joined command line (quoted to
-    // survive embedded spaces), exactly like cmd would.
-    QStringList quoted;
-    quoted.reserve(args.size());
-    for (const QString &a : args)
-        quoted.append(a.contains(QLatin1Char(' ')) ? QStringLiteral("\"%1\"").arg(a) : a);
-    const QString params = quoted.join(QLatin1Char(' '));
+    // the process elevated. lpParameters is a bare string that goes straight into the child's command
+    // line with nothing in between: unlike QProcess, Qt is not involved and quotes nothing here, so
+    // this is one of the places where quoting is ours to do. WindowsArgs::winQuoteArg applies the
+    // same rule QProcess applies to its own arguments, which covers the cases the old
+    // "wrap it if it contains a space" test did not: an argument carrying a quote of its own, one
+    // holding a tab, and one ending in a backslash that would otherwise escape the closing quote and
+    // swallow the next argument. A path with a space in it -- a profile folder like
+    // "C:\Users\KDFX Modes" -- is exactly what arrives here when the app relaunches itself elevated.
+    const QString params = winComposeCommandLine(QString(), args);
 
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = L"runas";
-    sei.lpFile = reinterpret_cast<LPCWSTR>(program.toStdWString().c_str());
+    const QString nativeFile = QDir::toNativeSeparators(program);
+    sei.lpFile = reinterpret_cast<LPCWSTR>(nativeFile.toStdWString().c_str());
     sei.lpParameters = reinterpret_cast<LPCWSTR>(params.toStdWString().c_str());
     sei.nShow = SW_HIDE;
 

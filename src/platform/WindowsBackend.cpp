@@ -1,6 +1,9 @@
 #include "WindowsBackend.h"
 
 #include "PrivilegeHelper.h"
+#include "StrategyParser.h"
+#include "WindowsArgs.h"
+#include "ZapretPaths.h"
 
 #include <QFileInfo>
 #include <QProcess>
@@ -113,6 +116,40 @@ bool WindowsBackend::start(const Strategy &s, QString *error)
                     QStringLiteral("Bypass"), QStringLiteral("-File"), s.primaryArg};
     }
 
+    // A tree installed for a user whose profile folder holds a space -- "C:\Users\KDFX Modes\..." --
+    // reaches winws.exe as an *argument*, not as the program, and Qt's own command-line composition
+    // (qt_create_commandline in qprocess_win.cpp) normalizes separators for the program only. The
+    // child would therefore be handed the mixed form QFileInfo produces,
+    // "C:/Users/KDFX Modes/tree\lists\file.txt". Rewrite the path part of every argument to native
+    // separators, which is what the batch file itself would have passed through "%~dp0".
+    //
+    // Deliberately NOT quoted here, and this is the part worth knowing: QProcess already wraps an
+    // argument containing a space in quotes. An argument that arrives already wrapped gets its quotes
+    // escaped instead, the child's parser un-escapes them, and the file name it opens begins with a
+    // literal '"' -- which comes back as "cannot access ipset file" for a path that is perfectly
+    // well formed. So argv stays quote-free from the parser all the way to QProcess, and quoting
+    // lives only where a bare string is handed to the OS: WindowsArgs.h.
+#if defined(Q_OS_WIN)
+    for (QString &a : args)
+        a = winNativePathArg(a);
+#endif
+
+    // Create the "-user" list placeholders the command line names before starting the payload that
+    // reads them. A release archive ships the main lists and none of the user's own: upstream makes
+    // those in zz-make-user-files.bat, and this backend execs winws.exe instead of running the
+    // wrapper, so that batch never gets the chance -- and winws stops on the very first missing one.
+    // The list is derived from the argv about to be launched, so the file created here and the file
+    // the child is told to read cannot be two different paths.
+    const QString treeRoot = s.dirPath.isEmpty() ? s.workingDirectory : s.dirPath;
+    for (const QString &path : StrategyParser::missingUserListFiles(args, treeRoot)) {
+        QString ferr;
+        if (ZapretPaths::createEmptyListFile(path, &ferr))
+            emit logMessage(QStringLiteral("WindowsBackend: created empty list file %1").arg(path), 1);
+        else
+            emit logMessage(QStringLiteral("WindowsBackend: list file is missing and could not be "
+                                           "created: %1").arg(ferr), 1);
+    }
+
     // Synchronous existence check for an explicit path (winws.exe, a full nfqws path). Bare names
     // like "cmd.exe" resolve through PATH and are validated asynchronously by QProcess instead.
     const QFileInfo fi(program);
@@ -142,9 +179,12 @@ bool WindowsBackend::start(const Strategy &s, QString *error)
 
     m_lastError.clear();
     setState(State::Starting);
-    emit logMessage(QStringLiteral("WindowsBackend: launching %1 %2")
-                        .arg(program, args.join(QLatin1Char(' ')))
-                        .trimmed(), 0);
+    // The command line Windows will actually be handed, quotes included: printing the arguments
+    // joined bare made a path with a space in it look like the bug, which is how a missing list file
+    // comes to be reported as a quoting problem. Printed this way the line is both truthful and
+    // copy-pasteable.
+    emit logMessage(QStringLiteral("WindowsBackend: launching %1")
+                        .arg(winComposeCommandLine(program, args)), 0);
 
     // QProcess::start() is non-blocking; a FailedToStart (bad PATH name, etc.) arrives via
     // errorOccurred and moves us to Error asynchronously. start() itself only reports the launch

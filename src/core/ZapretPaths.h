@@ -121,6 +121,20 @@ public:
     // polkit rule to carry the same prefix, so the two cannot drift apart silently.
     static QString systemInstallDir();
 
+    // ---- the list files a payload is told to read ----
+    //
+    // Make one empty list file: the "-user" placeholders (list-general-user.txt,
+    // ipset-exclude-user.txt, ...) that zapret's windows wrappers point winws at but a release
+    // archive does not ship, because upstream creates them with zz-make-user-files.bat. A launcher
+    // that execs the payload directly has to make them itself or the child stops with
+    // "cannot access ipset file" -- a failure that reads as a path problem and is a missing file.
+    //
+    // The file is created empty and, when its directory is absent, that directory is made first:
+    // upstream's own batch does the same for the lists folder. An existing file is left exactly as
+    // it is and reported as success, because the placeholder may already hold the user's entries.
+    // Fills *error only when nothing could be created.
+    static bool createEmptyListFile(const QString &path, QString *error = nullptr);
+
     // ---- Layout detection (no assumptions about which root you pass) ----
     // True if `root` looks like a usable windows distribution (bin/winws.exe + *.bat).
     static bool isWindowsRoot(const QString &root);

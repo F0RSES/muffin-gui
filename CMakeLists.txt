@@ -42,6 +42,7 @@ add_library(zapretcore STATIC
 target_sources(zapretcore PRIVATE
     src/core/Strategy.h
     src/core/IZapretBackend.h
+    src/core/WindowsArgs.h
     src/core/ZapretDownloader.h
     src/core/ZapretManager.h
     src/core/PingService.h

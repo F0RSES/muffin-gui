@@ -26,6 +26,7 @@
 #include "IZapretBackend.h"
 #include "LinuxBackend.h"
 #include "WindowsBackend.h"
+#include "WindowsArgs.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -752,6 +753,129 @@ int main(int argc, char **argv)
         QList<Strategy> one{fake};
         StrategyParser::resolveWindowsCommands(one);
         check(one.at(0).kind == Strategy::Kind::Binary, "explicit winws wrapper resolves");
+    }
+
+    // ---- a tree whose path contains a space -------------------------------------------------
+    //
+    // The failure this section exists for was winws.exe reporting it could not read an ipset list
+    // for a user whose Windows profile folder is "KDFX Modes". Two unrelated things produce that one
+    // sentence -- an argument that reached the child split at the space, and an argument that
+    // arrived intact naming a file that was never there -- and only the first is a quoting problem.
+    // Both are pinned here, because the tempting fix (wrap paths in quotes) cures nothing and breaks
+    // the case that already worked: QProcess quotes the arguments it is given, so an argument that
+    // arrives pre-quoted reaches the child as a file name that literally begins with a quote.
+    out << "\n[paths with spaces]\n";
+    {
+        // winQuoteArg is the rule QProcess applies to its own arguments, written down once so that
+        // the copied command line, the elevated one and the real one cannot disagree.
+        check(winQuoteArg(QStringLiteral("--wf-tcp=80,443")) == QStringLiteral("--wf-tcp=80,443"),
+              "a token with no space is left bare");
+        check(winQuoteArg(QStringLiteral("C:/Users/KDFX Modes/lists/ip.txt"))
+                  == QStringLiteral("\"C:/Users/KDFX Modes/lists/ip.txt\""),
+              "a spaced path is wrapped, and nothing inside it is escaped");
+        check(winQuoteArg(QString()) == QStringLiteral("\"\""),
+              "an empty argument survives as one empty argument");
+        check(winQuoteArg(QStringLiteral("a\tb")) == QStringLiteral("\"a\tb\""),
+              "a tab separates arguments on Windows too");
+        check(winQuoteArg(QStringLiteral("--filter-l7=\"http\""))
+                  == QStringLiteral("\"--filter-l7=\\\"http\\\"\""),
+              "an embedded quote is escaped so it cannot close the token early");
+        check(winQuoteArg(QStringLiteral("C:\\Users\\KDFX Modes\\dir\\"))
+                  == QStringLiteral("\"C:\\Users\\KDFX Modes\\dir\\\\\""),
+              "a trailing backslash is doubled, or the closing quote escapes and swallows the "
+              "argument that followed");
+        check(winComposeCommandLine(QStringLiteral("C:/Program Files/muffin/winws.exe"),
+                                    {QStringLiteral("--ipset=C:/a b/ip.txt"),
+                                     QStringLiteral("--new")})
+                  == QStringLiteral(
+                         "\"C:\\Program Files\\muffin\\winws.exe\" \"--ipset=C:/a b/ip.txt\" --new"),
+              "the composed line is what CreateProcess is handed: program quoted with native "
+              "separators, arguments quoted, bare flags left bare");
+    }
+    {
+        // A wrapper under a directory whose name has a space has to resolve to one argument per
+        // list, carrying the whole path and no quote characters of its own.
+        QTemporaryDir spacedTmp;
+        check(spacedTmp.isValid(), "temporary directory for a spaced tree");
+        const QString sroot = spacedTmp.filePath(QStringLiteral("KDFX Modes/windows"));
+        const QString sep(1, QDir::separator());
+        check(writeFile(sroot + QStringLiteral("/general.bat"), QByteArrayLiteral(
+                  "@echo off\r\n"
+                  "chcp 65001 > nul\r\n"
+                  "set LISTS=%~dp0lists\\\r\n"
+                  "start \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,443 "
+                  "--hostlist=\"%LISTS%list-general.txt\" "
+                  "--ipset-exclude=\"%LISTS%ipset-exclude-user.txt\"\r\n")),
+              "wrote a wrapper under a directory whose name contains a space");
+        check(writeFile(sroot + QStringLiteral("/lists/list-general.txt"),
+                        QByteArrayLiteral("example.com\r\n")),
+              "and the main list that wrapper also names");
+
+        const StrategyParser::WinCommand wc =
+            StrategyParser::parseWindowsCommand(sroot + QStringLiteral("/general.bat"), sroot);
+        check(wc.ok, "a wrapper under a spaced root still resolves");
+        check(wc.argv.contains(QStringLiteral("--hostlist=") + sroot + sep + QStringLiteral("lists")
+                               + sep + QStringLiteral("list-general.txt")),
+              "the spaced list path survives as exactly one argv element");
+        bool anyQuote = false;
+        for (const QString &a : wc.argv)
+            if (a.contains(QLatin1Char('"')))
+                anyQuote = true;
+        check(!anyQuote,
+              "and no argv element carries a quote, because QProcess adds them itself");
+
+        // ---- the "-user" placeholders the command line asks the payload to read ----
+        const QString userFile = sroot + sep + QStringLiteral("lists/")
+                                 + QStringLiteral("ipset-exclude-user.txt");
+        const QStringList argv2 = { QStringLiteral("--wf-tcp=80,443"), QStringLiteral("--new"),
+                                    QStringLiteral("--hostlist=") + sroot
+                                        + QStringLiteral("/lists/list-general.txt"),
+                                    QStringLiteral("--ipset-exclude=") + userFile };
+        const QStringList need = StrategyParser::missingUserListFiles(argv2, sroot);
+        check(need.size() == 1, "exactly the one missing -user placeholder is reported");
+        check(need.value(0) == QFileInfo(userFile).absoluteFilePath(),
+              "and it is the path the argv names, not a guess at where lists live");
+        check(StrategyParser::missingUserListFiles(
+                  {QStringLiteral("--hostlist=") + sroot + QStringLiteral("/lists/no-such.txt")},
+                  sroot).isEmpty(),
+              "a missing main list is not papered over with an empty one");
+        check(StrategyParser::missingUserListFiles(
+                  {QStringLiteral("--ipset-exclude=")
+                   + spacedTmp.filePath(QStringLiteral("elsewhere-user.txt"))},
+                  sroot).isEmpty(),
+              "and a -user path outside the tree is refused: starting a strategy must not write "
+              "wherever its command line happens to point");
+        check(StrategyParser::missingUserListFiles(
+                  {QStringLiteral("--wf-tcp=80,443"), QStringLiteral("--new"),
+                   QStringLiteral("--dpi-desync=fake,split")},
+                  sroot).isEmpty(),
+              "a flag value that is not a path names no file at all");
+        // The guard the header promises: naming a placeholder is not enough, the folder it lives in
+        // has to be part of the tree. Without this a strategy whose path nobody unpacked would grow a
+        // directory inside the install simply by being started.
+        check(StrategyParser::missingUserListFiles(
+                  {QStringLiteral("--ipset-exclude=")
+                   + sroot + QStringLiteral("/never-unpacked/socks-user.txt")},
+                  sroot).isEmpty(),
+              "a -user file in a directory the tree does not have is not offered for creation");
+        check(!QDir(sroot + QStringLiteral("/never-unpacked")).exists(),
+              "and starting at it left no new directory behind");
+
+        QString cerr;
+        check(ZapretPaths::createEmptyListFile(need.value(0), &cerr),
+              "the placeholder is created before the payload would be exec'd");
+        check(QFileInfo(need.value(0)).size() == 0, "empty, so it is a placeholder and not content");
+        check(StrategyParser::missingUserListFiles(argv2, sroot).isEmpty(),
+              "and it is not asked for a second time");
+        check(writeFile(need.value(0), QByteArrayLiteral("example.org\r\n")), "then fill it in");
+        check(ZapretPaths::createEmptyListFile(need.value(0), &cerr),
+              "creating a file that exists reports success");
+        check(readFileOrNull(need.value(0)) == QStringLiteral("example.org\r\n"),
+              "and never truncates a list the user has already written");
+        const QString deep = QFileInfo(sroot + QStringLiteral("/lists/nested/deep-user.txt"))
+                                 .absoluteFilePath();
+        check(ZapretPaths::createEmptyListFile(deep, &cerr), "the directory is made with the file");
+        check(QFileInfo::exists(deep), "and the file lands inside it");
     }
 
     // ---- linux tree parse ----
@@ -1970,8 +2094,17 @@ int main(int argc, char **argv)
     // then the real promotion would run against this machine's /opt, which a test has no business
     // doing.
     {
-        const QString helper =
-            MuffinInstallHelper::findProgram(QCoreApplication::applicationDirPath());
+        // findProgram() answers "which helper would the app promote?", so it prefers the root-owned
+        // installed copy. This section grades the binary THIS build just stamped, so it asks for the
+        // sibling of coretest and nothing else: a machine that still carries an older install must not
+        // be checked against a version string the compile never produced, and when this build did not
+        // leave one beside the test the honest answer is the SKIP below, not a guess at another file.
+        const QString built = QCoreApplication::applicationDirPath() + QLatin1Char('/') +
+                              MuffinInstallHelper::programName();
+        const QFileInfo builtInfo(built);
+        const QString helper = builtInfo.isFile() && builtInfo.isExecutable()
+                                   ? builtInfo.canonicalFilePath()
+                                   : QString();
         if (helper.isEmpty())
         {
             out << "  SKIP  no muffin-install-helper beside coretest to invoke\n";
@@ -1983,6 +2116,11 @@ int main(int argc, char **argv)
         }
         else
         {
+            // Whether the system tree already existed is a fact about this host, not a verdict on the
+            // helper. A developer who really installed Muffin has /opt/muffin/zapret; what must not
+            // happen is a refusal by an unprivileged helper CREATING it.
+            const bool treeBefore = QFileInfo::exists(ZapretPaths::systemInstallDir());
+
             QTemporaryDir tmp;
             const QString src = tmp.filePath(QStringLiteral("payload"));
             check(makeLinuxTree(src, false), "wrote a payload for the unprivileged helper runs");
@@ -2027,7 +2165,10 @@ int main(int argc, char **argv)
                       versionText.contains(QStringLiteral(MUFFIN_VERSION)),
                   "and --version names the program and reports the same version --help does");
 
-            check(!QFileInfo::exists(ZapretPaths::systemInstallDir()),
+            // Either there was no tree and the refusal created none — the case that matters — or there
+            // already was one, which this run cannot have touched because it never got past the check
+            // that it is not root.
+            check(treeBefore || !QFileInfo::exists(ZapretPaths::systemInstallDir()),
                   "and refusing left no system tree behind on this host");
         }
     }
@@ -2319,6 +2460,55 @@ int main(int argc, char **argv)
                   "and, like Linux, does not dress its own kill up as a crash");
             check(!probe->sawState(S::Error),
                   "the requested stop never passes through Error (Qt emits Crashed before finished)");
+        }
+
+        // (6) A tree whose own directory name contains a space -- the shape the reported failure had.
+        //     What is asserted is not that winws runs (that needs Windows) but the two things this
+        //     application controls: the "-user" list it is supposed to create before exec'ing the
+        //     payload that reads it, and the command line it tells the user it ran.
+        {
+            using S = IZapretBackend::State;
+            const QString spaced = tmp.filePath(QStringLiteral("KDFX Modes/windows"));
+            const QString payload = makeScript(spaced + QStringLiteral("/winws-fake.sh"),
+                                               QStringLiteral("echo up\nsleep 3\n"));
+            check(!payload.isEmpty(), "wrote a payload under a directory named with a space");
+
+            Strategy s = fakeDirectStrategy(QStringLiteral("win-spaced"), payload,
+                                            Strategy::Platform::Windows);
+            s.dirPath = spaced;
+            const QString list = QDir(spaced).absoluteFilePath(
+                QStringLiteral("lists/ipset-exclude-user.txt"));
+            // A real unpacked archive ships lists/ with the main lists in it and creates no "-user"
+            // file, so the folder exists and only the placeholder does not. That is the state this
+            // fix is for; a tree with no lists/ at all is a broken unpack that winws will fail on
+            // over the main hostlist too, and inventing one would hide that.
+            const QString lists = QDir(spaced).absoluteFilePath(QStringLiteral("lists"));
+            check(QDir().mkpath(lists), "the spaced tree has its lists folder");
+            check(writeFile(lists + QStringLiteral("/list-general.txt"),
+                            QByteArrayLiteral("example.org\r\n")),
+                  "and the main list the archive does ship");
+            s.argv = { QStringLiteral("--wf-tcp=80,443"),
+                       QStringLiteral("--hostlist=") + lists + QStringLiteral("/list-general.txt"),
+                       QStringLiteral("--ipset-exclude=") + list };
+
+            WindowsBackend wb;
+            BackendProbe *probe = new BackendProbe(&wb);
+            QString err;
+            check(wb.start(s, &err), "a strategy whose paths contain a space starts");
+            check(QFileInfo::exists(list),
+                  "the -user list the argv names is created before the payload is exec'd, under the "
+                  "spaced path and not a de-spaced one");
+            check(readFileOrNull(lists + QStringLiteral("/list-general.txt"))
+                      == QStringLiteral("example.org\r\n"),
+                  "and the main list that already shipped was not touched on the way past");
+            check(probe->sawLog(QStringLiteral("\"--ipset-exclude=")),
+                  "the launch line is logged quoted, the way CreateProcess receives it");
+            check(!probe->sawLog(QStringLiteral("launching ") + payload + QStringLiteral(" --wf-tcp")),
+                  "and not as a bare join, which is what made a correct path read like a split one");
+            wb.stop();
+            check(pumpUntil([&] { return wb.state() == S::Stopped; }, 8000),
+                  "the run ends cleanly");
+            check(probe->errors().isEmpty(), "and creating a placeholder is not an error");
         }
 
         // (5) A program that cannot be exec'd at all: the asynchronous FailedToStart path. A bare name

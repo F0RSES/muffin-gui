@@ -267,6 +267,39 @@ QString ZapretPaths::systemInstallDir()
 #endif
 }
 
+bool ZapretPaths::createEmptyListFile(const QString &path, QString *error)
+{
+    if (path.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("empty path");
+        return false;
+    }
+
+    const QFileInfo fi(path);
+    if (fi.exists())
+        return true;      // a placeholder already holding the user's entries stays exactly as it is
+
+    // The directory first, which is what upstream's own batch does before writing into it. Growing
+    // the tree is the caller's business, not this function's: whoever asked for the file has
+    // already established that the path lies inside the tree being started.
+    const QString dir = fi.absolutePath();
+    if (!dir.isEmpty() && !QDir().mkpath(dir)) {
+        if (error)
+            *error = QStringLiteral("cannot create directory '%1'").arg(dir);
+        return false;
+    }
+
+    QFile f(fi.absoluteFilePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.close();
+        return true;
+    }
+    if (error)
+        *error = QStringLiteral("cannot create '%1': %2")
+                     .arg(fi.absoluteFilePath(), f.errorString());
+    return false;
+}
+
 QString ZapretPaths::nfqwsPath(const QString &root)
 {
     // Preference order: native arch, then the common x86_64 / x86 packaged binaries, then a

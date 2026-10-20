@@ -1,6 +1,7 @@
 #include "StrategyParser.h"
 
 #include "PortableMode.h"
+#include "WindowsArgs.h"
 #include "ZapretPaths.h"
 
 #include <QDir>
@@ -785,6 +786,72 @@ void StrategyParser::resolveWindowsCommands(QList<Strategy> &strategies)
         if (s.description.isEmpty())
             s.description = QStringLiteral("winws.exe (%1 direct)").arg(s.name);
     }
+}
+
+namespace {
+
+// The file path a winws argument names, or empty when it names none. "--flag=<path>" contributes
+// its value; a bare path token contributes itself. Anything that is not a path -- "--new",
+// "80,443", "fake,split" -- yields nothing, which is what keeps a flag value that legitimately
+// holds a comma or a slash from being mistaken for a file.
+QString namedFileOf(const QString &arg)
+{
+    QString value = arg;
+    if (value.startsWith(QLatin1Char('-'))) {
+        const qsizetype eq = value.indexOf(QLatin1Char('='));
+        if (eq < 0)
+            return QString();      // a switch with no value cannot name a file from this token
+        value = value.mid(eq + 1);
+    }
+    return winLooksLikePath(value) ? value : QString();
+}
+
+} // namespace
+
+QStringList StrategyParser::missingUserListFiles(const QStringList &argv, const QString &root)
+{
+    QStringList out;
+    if (root.isEmpty())
+        return out;
+
+    // Compare on absolute, separator-normalized paths. The argv of a resolved wrapper carries the
+    // mixed form Qt produces (a "%~dp0" expansion glued onto a QFileInfo path), and a root passed
+    // in by a caller may be relative; Qt's own QFileInfo always speaks in '/', so both sides have
+    // to be put in that form before anything is written.
+    const QString absRoot = QDir(root).absolutePath();
+
+    for (const QString &arg : argv) {
+        const QString value = namedFileOf(arg);
+        if (value.isEmpty())
+            continue;
+
+        QFileInfo fi(value);
+        if (!fi.isAbsolute())
+            fi = QFileInfo(QDir(absRoot).absoluteFilePath(value));
+        const QString path = fi.absoluteFilePath();
+
+        // Only the editable placeholders, matched on the file name so a directory that happens to
+        // contain "-user." in its name cannot qualify, and only inside the tree the payload lives
+        // in -- a path outside the root is somebody else's file and must never spring into
+        // existence because a strategy happened to be started.
+        if (!fi.fileName().contains(QLatin1String("-user."), Qt::CaseInsensitive))
+            continue;
+        if (!path.startsWith(absRoot + QLatin1Char('/'), Qt::CaseInsensitive))
+            continue;
+        if (fi.exists())
+            continue;                       // shipped by the archive, or already made
+
+        // The directory has to be part of the tree already. A command line gets to name a file the
+        // launcher will create because the payload is about to be told to read it; it does not get to
+        // invent new directories inside the install, which is what a --ipset-exclude= pointing at a
+        // path nobody ever unpacked would otherwise do.
+        if (!QFileInfo(fi.absolutePath()).isDir())
+            continue;
+
+        out << path;
+    }
+    out.removeDuplicates();
+    return out;
 }
 
 } // namespace zapret
