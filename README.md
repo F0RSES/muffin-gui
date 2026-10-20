@@ -35,12 +35,59 @@
 Скачать готовые установочные файлы можно на странице **[Releases](https://github.com/F0RSES/zapret-muffin-gui/releases)**.
 
 ### Windows
+
 1. Скачайте `Muffin-Setup-x.x.x.exe`.
 2. Запустите установщик (потребуются права администратора, так как для работы драйвера WinDivert нужен доступ к сети).
 3. Запустите Muffin из меню «Пуск».
 
 ### Debian / Ubuntu / Kali Linux
+
 1. Скачайте `muffin_x.x.x_amd64.deb`.
 2. Установите через терминал:
+
    ```bash
    sudo apt install ./muffin_x.x.x_amd64.deb
+   ```
+
+### Arch Linux
+
+В репозитории есть готовый `PKGBUILD` (в папке `packaging/arch`).
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+---
+
+## 📚 Источники zapret
+
+Приложение скачивает оригинальные бинарники из официальных репозиториев:
+
+* **Для Windows:** `Flowseal/zapret-discord-youtube`
+* **Для Linux:** `bol-van/zapret`
+
+**Примечание для Linux:** Muffin использует портативный режим `nfqws`. Он не требует установки в систему, а сам управляет правилами `iptables` через `pkexec`. Оригинальные исходники `nfqws` берутся из релизов `bol-van`.
+
+---
+
+## 🛠️ Сборка из исходников (для разработчиков)
+
+### Требования
+
+* Qt 6.6+
+* CMake 3.21+
+* Компилятор (GCC 11+ для Linux / MSVC 2022 для Windows)
+
+### Сборка
+
+```bash
+./scripts/build.sh
+ctest --output-on-failure
+```
+
+---
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией MIT. Подробности в файле `LICENSE`.
