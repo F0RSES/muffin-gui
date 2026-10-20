@@ -11,7 +11,7 @@
 # Qt 6.6 (QPalette::Accent, QStyleHints::colorScheme); Arch's current qt6-base sits well above it, so
 # the system package satisfies find_package(Qt6 ... Test) — Qt6Test ships inside qt6-base.
 pkgname=muffin
-pkgver=0.4.3
+pkgver=0.4.5
 pkgrel=1
 pkgdesc="Graphical front end for launching and managing zapret strategies"
 arch=('x86_64')
