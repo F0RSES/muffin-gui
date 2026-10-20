@@ -78,6 +78,13 @@ public:
     static QColor pingOk();
     static QColor pingFail();
     static QColor pingMuted();
+    // The mark inside a dashboard ring, as opposed to the ring itself. White in the dark sheet, where
+    // it sits inside a glow on a #0B0C10 canvas; near-black in the light one, where the same white
+    // mark lands on a #FFFFFF page and vanishes -- which is what made the Discord, YouTube and Google
+    // glyphs unreadable there. Deliberately not text(): the dark sheet's text is #E7E9F2 and the
+    // light sheet's is #1F2937, while this mark has to be pure white on one and dark on the other, so
+    // no single text token is the right answer for both.
+    static QColor markOnRing();
 
     // Load :/icons/<name>.svg tinted with `color`. `size` is the primary pixel size; the icon also
     // carries 16/24/32 rasterisations so toolbars, menus and HiDPI all get a crisp glyph.

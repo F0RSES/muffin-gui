@@ -1279,6 +1279,12 @@ void MainWindow::applyTheme()
         m_power->retheme();
     for (ProfileCard *card : findChildren<ProfileCard *>())
         card->retheme();
+    // The dashboard's rings bake their mark into a pixmap as well, and that mark is the one glyph in
+    // the window whose colour is decided by the page behind it rather than by the sheet: white on the
+    // dark canvas, near-black on the light one. Left alone it stays white, and on the light sheet's
+    // #FFFFFF page the three service marks are simply invisible.
+    for (PingIndicator *chip : findChildren<PingIndicator *>())
+        chip->retheme();
 
     // No setWindowIcon() here: the title bar is deliberately iconless, and a theme switch that
     // re-attached the muffin would put it back the first time anyone changed the colour scheme.

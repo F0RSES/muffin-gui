@@ -1052,6 +1052,25 @@ static void testTheme(QApplication &app)
     check(!Theme::isDark(), "light mode is active");
     check(app.styleSheet().contains(QStringLiteral("#F3F4F6")), "light background in the sheet");
 
+    // Read one declaration out of one selector's rule. Needed because "does the sheet contain this hex"
+    // is a much weaker question than it looks: #1F2937 is the light sheet's general text colour as well
+    // as its old log colour, so a whole-sheet search stays green after the log rule alone stops
+    // matching the token the code paints with. Scoping to the selector is what makes the check a check.
+    auto ruleProperty = [](const QString &sheet, const QString &selector, const QString &prop) {
+        const int at = sheet.indexOf(selector);
+        const int open = at < 0 ? -1 : sheet.indexOf(QLatin1Char('{'), at);
+        const int close = open < 0 ? -1 : sheet.indexOf(QLatin1Char('}'), open);
+        if (close < 0)
+            return QString();
+        const QStringList decls = sheet.mid(open + 1, close - open - 1).split(QLatin1Char(';'));
+        for (const QString &d : decls) {
+            const int colon = d.indexOf(QLatin1Char(':'));
+            if (colon > 0 && d.left(colon).trimmed().compare(prop, Qt::CaseInsensitive) == 0)
+                return d.mid(colon + 1).trimmed();
+        }
+        return QString();
+    };
+
     // Both sheets must carry the rules the dynamic properties switch on, or a badge/notice would render
     // as unstyled default text.
     for (bool dark : {true, false}) {
@@ -1111,6 +1130,34 @@ static void testTheme(QApplication &app)
         check(sheet.contains(Theme::accent().name(QColor::HexRgb).toUpper()),
               QStringLiteral("%1 sheet carries the accent the code paints with").arg(
                   dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        // The journal's text colour has the accent's two sources too: the sheet paints the
+        // QPlainTextEdit, and every line the log appends is formatted with Theme::logColor(0). A sheet
+        // left on an older hex gives the frame one colour and its contents another, which reads as a
+        // rendering glitch rather than a broken token. Scoped to the rule, not searched sheet-wide —
+        // see ruleProperty above.
+        const QString logHex =
+            ruleProperty(sheet, QStringLiteral("QPlainTextEdit#logView"), QStringLiteral("color"));
+        check(logHex.compare(Theme::logColor(0).name(QColor::HexRgb), Qt::CaseInsensitive) == 0,
+              QStringLiteral("%1 sheet's logView colour (%2) is the colour the code writes log lines "
+                             "in (%3)")
+                  .arg(dark ? QStringLiteral("dark") : QStringLiteral("light"),
+                       logHex.isEmpty() ? QStringLiteral("<none>") : logHex,
+                       Theme::logColor(0).name(QColor::HexRgb)));
+        // The dashboard's service mark is baked into a pixmap by PingIndicator::refreshGlyph(), so no
+        // sheet rule can rescue it once the theme changes — it has to be the right colour at bake time.
+        // The failure this guards is not "slightly low contrast" but the mark vanishing: white on the
+        // light sheet's #FFFFFF page is nothing at all. Distance from the surface it lands on, rather
+        // than mere inequality, is what a glyph actually needs to be seen.
+        const QColor mark = Theme::markOnRing();
+        const int contrast = qAbs(qGray(mark.rgb()) - qGray(Theme::surface().rgb()));
+        check(contrast > 100,
+              QStringLiteral("%1 sheet's ring mark stands off its page by %2 gray levels")
+                  .arg(dark ? QStringLiteral("dark") : QStringLiteral("light"))
+                  .arg(contrast));
+        check(dark ? mark == QColor(Qt::white) : mark.lightness() < 128,
+              QStringLiteral("%1 sheet's ring mark is the white-on-dark / dark-on-white the page "
+                             "behind it requires").arg(dark ? QStringLiteral("dark")
+                                                            : QStringLiteral("light")));
     }
 
     check(Theme::modeFromName(QStringLiteral("light")) == Theme::Mode::Light, "name -> Light");

@@ -4,6 +4,7 @@
 #include "PingIndicator.h"
 #include "StrategyParser.h"
 #include "Theme.h"
+#include "WindowsArgs.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -68,16 +69,6 @@ void applyStatusToken(QWidget *chip, PingIndicator::PingStatus status)
     chip->style()->unpolish(chip);
     chip->style()->polish(chip);
     chip->update();
-}
-
-// Quote a token the way a shell would need it, so a copied command line can be pasted and run.
-QString quoteArg(const QString &token)
-{
-    if (!token.isEmpty() && !token.contains(QLatin1Char(' ')) && !token.contains(QLatin1Char('"')))
-        return token;
-    QString quoted = token;
-    quoted.replace(QLatin1Char('"'), QStringLiteral("\\\""));
-    return QLatin1Char('"') + quoted + QLatin1Char('"');
 }
 
 } // namespace
@@ -211,12 +202,15 @@ QString ProfileCard::commandLine() const
                                 : m_strategy.executablePath;
 
     QStringList parts;
-    parts << quoteArg(program);
+    // winQuoteArg is the rule QProcess applies to the arguments it is about to launch, so the line a
+    // user copies from a profile row is the line the payload really receives. One implementation is
+    // what keeps the two from ever disagreeing.
+    parts << winQuoteArg(program);
     if (!m_strategy.argv.isEmpty()) {
         for (const QString &a : m_strategy.argv)
-            parts << quoteArg(a);
+            parts << winQuoteArg(a);
     } else if (!m_strategy.primaryArg.isEmpty()) {
-        parts << quoteArg(m_strategy.primaryArg);
+        parts << winQuoteArg(m_strategy.primaryArg);
     }
     return parts.join(QLatin1Char(' '));
 }

@@ -35,7 +35,7 @@ QColor faded(const QColor &c, qreal factor)
 // ---- the ring ----
 
 // The badge's circle: a 2 px rim in the status colour, a soft halo outside it, and the service's mark
-// floating in the middle at a fixed white.
+// floating in the middle in the theme's mark colour (Theme::markOnRing()).
 //
 // Painted rather than styled for the same reason as PowerButton: QSS cannot draw a glow that is clipped
 // to a circle, and the "alive" breath has to animate the halo alone — an opacity effect on the whole
@@ -315,7 +315,18 @@ void PingIndicator::setGlyph(const QString &glyph)
 
 void PingIndicator::refreshGlyph()
 {
-    m_ring->setMark(Theme::icon(m_glyph, QColor(Qt::white), kMarkPx).pixmap(kMarkPx, kMarkPx));
+    // The mark takes the theme's mark colour rather than a fixed white: on the light sheet the ring
+    // sits on a #FFFFFF page and a white glyph there is simply not there. See Theme::markOnRing().
+    m_ring->setMark(Theme::icon(m_glyph, Theme::markOnRing(), kMarkPx).pixmap(kMarkPx, kMarkPx));
+}
+
+// A theme switch cannot repaint a baked pixmap the sheet never owned, so the ring's status colour, its
+// mark and the figure beside it are all re-derived here. MainWindow::applyTheme() walks the badges on
+// exactly this signal.
+void PingIndicator::retheme()
+{
+    refreshGlyph();
+    applyStatus(m_status, m_latencyMs);
 }
 
 bool PingIndicator::isPulsing() const

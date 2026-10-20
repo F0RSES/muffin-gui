@@ -15,7 +15,8 @@ class PingRing;
 // glyph above it, the service's mark inside a glowing ring, and its name underneath.
 //
 // The ring is a tiny dedicated widget so the "alive" breath can animate only the halo, and so the ring's
-// colour — which carries the status — stays separate from the mark inside it, which is always white.
+// colour — which carries the status — stays separate from the mark inside it, which carries the service's
+// identity and follows the theme: white on the dark sheet, near-black on the light one.
 class PingIndicator : public QWidget
 {
     Q_OBJECT
@@ -48,6 +49,11 @@ public:
     // picks for the service name, and is re-picked by setServiceName().
     void setGlyph(const QString &glyph);
     QString glyph() const { return m_glyph; }
+
+    // Re-bake everything this badge paints from the theme: the mark's colour, and with it the ring and
+    // the figure. Called when the sheet changes, because a pixmap baked under the old palette cannot be
+    // repainted by a stylesheet.
+    void retheme();
 
     // Map a PingService status int onto the UI enum (0 Waiting, 1 Ok, 2 Fail; anything else Unknown).
     static PingStatus statusFromServiceInt(int status);

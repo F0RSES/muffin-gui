@@ -4,6 +4,7 @@
    Tokens (mirrored by Theme.cpp::tokensFor(false) — change both, they are one palette):
      bg #F3F4F6   rail #E5E7EB   surface #FFFFFF   recessed #F9FAFB
      hairline #D1D5DB   control border #9CA3AF   text #1F2937   muted #6B7280   quiet text #4B5563
+     log text #111827 (Theme::logColor(0))   ring mark #111827 (Theme::markOnRing())
      accent #7C3AED (hover #8B5CF6, pressed #6D28D9, soft fill #EDE9FE, selected fill #F3E8FF, soft edge #DDD6FE)
      accent2 #0891B2   ok #059669   err #DC2626   warn #D97706
      the live green #10B981 and the badge grey #9CA3AF are painted tokens shared with the dark sheet
@@ -246,7 +247,7 @@ QCheckBox::indicator:checked { background-color: #7C3AED; border-color: #7C3AED;
     image: url(:/icons/check.svg); }
 
 QPlainTextEdit#logView {
-    background-color: #FFFFFF; color: #1F2937;
+    background-color: #FFFFFF; color: #111827;
     border: 1px solid #9CA3AF; border-radius: 10px;
     font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
     font-size: 9pt; padding: 6px;
