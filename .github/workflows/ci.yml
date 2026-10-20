@@ -450,9 +450,9 @@ jobs:
 
           # Both majors are candidates. Inno Setup 7 installs beside 6 rather than over it, so a runner
           # holding either is usable, and a list naming only "Inno Setup 6" would report "ISCC.exe not
-          # found" on a machine that has the current release. The newest of them is then chosen by the
-          # compiler's own version, not by the folder it lives in: the number in the directory name is
-          # the product line, which can lag the version stamped on ISCC.exe either way.
+          # found" on a machine that has the current release. Which one to use is decided further down
+          # by probing each of them, never by the number in the folder name: that number is the product
+          # line, and it is not evidence about what the binary inside can do.
           $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
                           "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
                           "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
