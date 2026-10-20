@@ -6,6 +6,10 @@
   NOTE: this block ships inside Muffin.exe verbatim, so it states what the file
   is and not the reasoning behind it. The reasoning lives in app.rc, in the
   WIN32 block of CMakeLists.txt, and in the git log of the commit that added it.
+  packaging/check-win-resources.py parses this document and asserts the level
+  below, the placement it has to sit in, the DPI and Common Controls
+  declarations, and that the XML is well formed at all, because a manifest the
+  loader cannot parse is an asInvoker process with a green build behind it.
 
   (An XML comment may not contain two hyphens in a row, which is why none of
   this text uses the usual dash pair as punctuation.)

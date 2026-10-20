@@ -163,6 +163,11 @@ target_link_libraries(Muffin PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Netwo
 # the two copies answer different questions: the configure_file() copy is what the
 # compiler may read, and OBJECT_DEPENDS on the SOURCE copies is what makes editing the
 # artwork or the manifest in the checkout rebuild the resource.
+#
+# packaging/check-win-resources.py asserts all of the above from the other side, on every push
+# and PR: that both payloads app.rc names are staged here and guarded here, that the RC language
+# is enabled, that OBJECT_DEPENDS covers them, and that /MANIFEST:NO stays confined to MSVC. It
+# reads the file with comments stripped, so mentioning a flag here does not count as setting it.
 if (WIN32)
     enable_language(RC)
     set(MUFFIN_RC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows")

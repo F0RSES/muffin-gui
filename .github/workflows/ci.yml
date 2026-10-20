@@ -75,6 +75,25 @@ jobs:
         # PR; `installer` only exists on a tag, so a branch-level typo would go unnoticed until release.
         run: python3 packaging/check-iss-flags.py packaging/windows_installer.iss
 
+      - name: Check the Windows resources
+        # packaging/windows/app.rc, app.manifest and muffin.ico decide how the exe behaves before
+        # any of its code runs, and no build step inspects what they decide. The one that matters
+        # was measured on this host with the real toolchain: naming the manifest
+        # `CREATEPROCESS_MANIFEST_RESOURCE_ID 24` instead of `1 24` makes windres exit 0 and emit
+        # RT_MANIFEST under the STRING name "CREATEPROCESS_MANIFEST_RESOURCE_ID". CreateProcess
+        # reads the execution level from ordinal 1 only, so the process starts asInvoker,
+        # WindowsBackend::start() refuses every elevated-required strategy, and what the user sees
+        # reads like a WinDivert or driver failure -- from a build that reported success. rc.exe at
+        # least stops with RC2104, but no CI job runs MinGW, and the same silent path applies to a
+        # manifest that is not well-formed XML, to an .ico the shell cannot decode, and to a payload
+        # app.rc names that CMakeLists.txt does not stage into the build directory (that last one
+        # fails on MSVC only, and only after a Windows runner installed Qt and built everything).
+        # Runs here, beside the Inno lint, for the same two reasons: every assertion is about text
+        # and bytes rather than about a built artefact, and `linux` is the job that runs on every
+        # push and PR -- `installer` only exists on a tag, so a regression would be merged first.
+        # Takes ~0.1 s and needs no Qt, no compiler and no Windows.
+        run: python3 packaging/check-win-resources.py
+
       - name: Install Qt6
         uses: jurplel/install-qt-action@v4.4.1
         with:

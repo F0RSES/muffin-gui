@@ -58,6 +58,14 @@
 // ships a broken app on the toolchain the change was not tested on is the thing
 // worth designing out, and plain numbers are read identically by both.
 //
+// packaging/check-win-resources.py is what keeps that true rather than merely intended.
+// It runs on every push and PR (the "Check the Windows resources" step of the linux job in
+// .github/workflows/ci.yml), reads this file the way both compilers do -- comments stripped,
+// so the identifiers named above are not mistaken for statements -- and fails the build
+// before it if either the name or the type of the two statements below stops being an
+// ordinal. It also parses app.manifest, walks muffin.ico's directory, and checks that every
+// payload named here is staged by CMakeLists.txt. Update that script with this file.
+//
 // What each one means:
 //   1 in the icon slot : the shell resolves a file's icon from the icon GROUP
 //                         with the lowest ordinal, so 1 also keeps
