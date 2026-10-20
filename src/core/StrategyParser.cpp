@@ -642,6 +642,28 @@ QString tidyCommas(QString t)
     return t;
 }
 
+// True when an expanded token carries no value at all. Two shapes reach this from a *.bat, both born
+// when a variable the wrapper expects somebody else to have set expands to nothing:
+//
+//   "--filter-tcp=%GameFilterTCP%"   ->  "--filter-tcp="   (the flag kept its name, lost its value)
+//   "%GameFilterTCP%"                ->  ""                (the whole token was the variable)
+//
+// %GameFilterTCP%/UDP% are set by `call service.bat load_game_filter`, which this app does not run,
+// so every wrapper that passes them as a flag value produces the first shape. Handing winws.exe an
+// "--filter-tcp=" with nothing behind it is not ignored by the payload: it quits with
+// "Invalid port filter :", which looks like a broken strategy rather than like an unset variable. An
+// empty argument is equally wrong -- QProcess quotes it as "" and the child gets one more positional.
+//
+// The value is everything after the FIRST '=', so a token whose value merely ends in one ("--x=YWQ==")
+// still has a value and is kept; only a value that is genuinely absent is dropped.
+bool isValuelessArgument(const QString &t)
+{
+    if (t.isEmpty())
+        return true;
+    const qsizetype eq = t.indexOf(QLatin1Char('='));
+    return eq >= 0 && eq == t.size() - 1;
+}
+
 bool isWinwsToken(const QString &t)
 {
     const int sep = std::max(t.lastIndexOf(QLatin1Char('/')), t.lastIndexOf(QLatin1Char('\\')));
@@ -759,8 +781,21 @@ StrategyParser::WinCommand StrategyParser::parseWindowsCommand(const QString &ba
         return r;
     }
 
+    // Everything after the program token is the winws argv. Tokens an unexpanded %VAR% left without a
+    // value are dropped here rather than passed on: see isValuelessArgument -- "--filter-tcp=" makes
+    // winws.exe abort with "Invalid port filter :", and the *.bat that produced it is not the shape
+    // the payload was ever meant to be handed. This is the one place a resolved wrapper's argv is
+    // composed, so resolveWindowsCommands() and anything else built on it inherits the cleanup.
     r.executablePath = expanded.at(progIdx);
-    r.argv = QStringList(expanded.cbegin() + progIdx + 1, expanded.cend());
+    QStringList argv;
+    argv.reserve(expanded.size() - progIdx - 1);
+    for (int i = progIdx + 1; i < expanded.size(); ++i)
+    {
+        if (isValuelessArgument(expanded.at(i)))
+            continue;
+        argv.append(expanded.at(i));
+    }
+    r.argv = argv;
     r.workingDirectory = dirPath;
     r.ok = true;
     return r;

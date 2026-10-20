@@ -85,7 +85,8 @@ public:
     {
         bool ok = false;               // false when no winws.exe command line could be found
         QString executablePath;        // the resolved path to bin/winws.exe
-        QStringList argv;              // winws argument vector (does NOT include the program)
+        QStringList argv;              // winws argument vector (does NOT include the program, and
+                                       // never a token an empty %VAR% left without any value)
         QString workingDirectory;      // the directory the *.bat lives in
         QString error;                 // human-readable reason when !ok
     };
@@ -93,7 +94,10 @@ public:
     // Parse one *.bat into its winws.exe command. Reads the file as text (UTF-8 when the batch
     // selects chcp 65001, otherwise the locale codec), joins `^` continuations, expands %~dp0,
     // %~n0, %BIN%, %LISTS% and treats any other unresolved %VAR% as empty (dropping the comma it
-    // joined). Quote-aware: a `"..."` region is one token and keeps any spaces inside it.
+    // joined). A token that an empty expansion leaves with no value at all ("--filter-tcp=", a
+    // quoted "--hostlist=", a bare "%GameFilterTCP%") is dropped from argv rather than handed to the
+    // payload, which aborts on an empty port list ("Invalid port filter :").
+    // Quote-aware: a `"..."` region is one token and keeps any spaces inside it.
     static WinCommand parseWindowsCommand(const QString &batPath, const QString &batDirPath = QString());
 
     // For every Windows Batch strategy in the list, replace the cmd.exe wrapper form with the

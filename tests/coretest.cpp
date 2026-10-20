@@ -755,6 +755,109 @@ int main(int argc, char **argv)
         check(one.at(0).kind == Strategy::Kind::Binary, "explicit winws wrapper resolves");
     }
 
+    // ---- an unset game-filter variable must never reach winws as a valueless flag -----------
+    //
+    // Shipped wrappers pass the game filter through as a flag value: "--filter-tcp=%GameFilterTCP%"
+    // (and "--wf-tcp=80,443,%GameFilterTCP%", where the dangling comma is already tidyed). That
+    // variable is set by `call service.bat load_game_filter`, which this app never runs, so the token
+    // leaves the expansion as "--filter-tcp=" -- and winws.exe answers an empty port list with
+    // "Invalid port filter :" and quits before it desyncs anything. Nothing between the parser and
+    // QProcess edits an argv afterwards (parseWindowsCommand -> resolveWindowsCommands ->
+    // Strategy.argv -> WindowsBackend), so both levels are pinned for the shape that earned it.
+    out << "\n[empty filter arguments]\n";
+    {
+        QTemporaryDir emptyTmp;
+        check(emptyTmp.isValid(), "temporary directory for the empty-filter tree");
+        const QString eroot = emptyTmp.filePath(QStringLiteral("windows"));
+        const QString ebat = eroot + QStringLiteral("/emptyfilter.bat");
+        check(writeFile(ebat, QByteArrayLiteral(
+                  "@echo off\r\n"
+                  "chcp 65001 > nul\r\n"
+                  "set BIN=%~dp0bin\\\r\n"
+                  "set LISTS=%~dp0lists\\\r\n"
+                  "call service.bat load_game_filter\r\n"
+                  "start \"zapret ef\" /min \"%BIN%winws.exe\" --wf-tcp=%GameFilterTCP% "
+                  "--wf-udp=443,%GameFilterUDP% --new ^\r\n"
+                  " --filter-tcp=%GameFilterTCP% --filter-udp=%GameFilterUDP% "
+                  "%GameFilterTCP% --dpi-desync=fake ^\r\n"
+                  " --hostlist=\"%GameFilterUDP%\" --filter-l7=http= "
+                  "--ipset=\"%LISTS%ip4-active-user.txt\"\r\n"
+                  "pause\r\n")),
+              "wrote a wrapper whose port filters expand to nothing");
+        check(writeFile(eroot + QStringLiteral("/bin/winws.exe"), QByteArrayLiteral("MZ fixture\r\n")),
+              "and the payload its command names");
+
+        const StrategyParser::WinCommand ec = StrategyParser::parseWindowsCommand(ebat, eroot);
+        check(ec.ok, "the empty-filter wrapper still resolves to a winws.exe command");
+        if (!ec.ok)
+            out << "    error: " << ec.error << "\n";
+
+        // The four flags the report named, each one reduced to its own name by the empty expansion.
+        const QStringList valueless = {QStringLiteral("--filter-tcp="),
+                                       QStringLiteral("--filter-udp="),
+                                       QStringLiteral("--wf-tcp="),
+                                       QStringLiteral("--wf-udp=")};
+        for (const QString &v : valueless)
+            check(ec.ok && !ec.argv.contains(v),
+                  QStringLiteral("%1 is not handed to winws").arg(v));
+
+        // And the general rule those four are one instance of: no empty argument, and no argument
+        // naming a value that is not there -- which is also what a "--hostlist=" left without a path
+        // by an unset variable looks like.
+        bool noEmpty = true, noEmptyValue = true;
+        for (const QString &a : ec.argv)
+        {
+            if (a.isEmpty())
+                noEmpty = false;
+            const qsizetype eq = a.indexOf(QLatin1Char('='));
+            if (eq >= 0 && eq == a.size() - 1)
+                noEmptyValue = false;
+        }
+        check(ec.ok && noEmpty, "a token that was nothing but %GameFilterTCP% is dropped as well");
+        check(ec.ok && noEmptyValue, "nor is any other flag left naming an empty value");
+        check(ec.ok && !ec.argv.contains(QStringLiteral("--hostlist")),
+              "a quoted empty --hostlist= goes, rather than naming the current directory");
+
+        // Nothing nearby was collateral damage: a list that keeps its value, the bare switches and
+        // the paths that do expand all arrive. "--filter-l7=http=" pins how narrow the rule is -- the
+        // value is everything after the FIRST '=', so a value that merely ends in one is a value.
+        check(ec.argv.contains(QStringLiteral("--wf-udp=443")),
+              "a port list that keeps its value survives the tidied comma");
+        check(ec.argv.contains(QStringLiteral("--new"))
+                  && ec.argv.contains(QStringLiteral("--dpi-desync=fake")),
+              "the switches around a dropped flag are untouched");
+        check(ec.argv.contains(QStringLiteral("--filter-l7=http=")),
+              "a value that ends in '=' but is not empty is kept");
+        bool anyIpset = false;
+        for (const QString &a : ec.argv)
+            if (a.startsWith(QStringLiteral("--ipset="))
+                && a.contains(QStringLiteral("ip4-active-user.txt")))
+                anyIpset = true;
+        check(anyIpset, "%LISTS% still expands into the ipset path");
+
+        out << "  argv (" << ec.argv.size() << " args): " << ec.argv.join(' ') << "\n";
+
+        // The same wrapper through the pass whose result the backend execs: a Batch strategy resolved
+        // into a direct winws run must carry the cleaned argv, not the one that aborts the payload.
+        Strategy ef;
+        ef.name = QStringLiteral("emptyfilter");
+        ef.kind = Strategy::Kind::Batch;
+        ef.platform = Strategy::Platform::Windows;
+        ef.filePath = ebat;
+        ef.dirPath = eroot;
+        ef.executablePath = QStringLiteral("cmd.exe");
+        ef.primaryArg = ef.filePath;
+        QList<Strategy> efs{ef};
+        StrategyParser::resolveWindowsCommands(efs);
+        check(efs.at(0).kind == Strategy::Kind::Binary,
+              "the empty-filter wrapper still resolves to a direct winws run");
+        check(!efs.at(0).argv.isEmpty(), "and keeps the arguments that do have a value");
+        check(efs.at(0).argv == ec.argv, "resolved Strategy.argv is the same cleaned vector");
+        for (const QString &v : valueless)
+            check(!efs.at(0).argv.contains(v),
+                  QStringLiteral("resolveWindowsCommands drops %1 from Strategy.argv").arg(v));
+    }
+
     // ---- a tree whose path contains a space -------------------------------------------------
     //
     // The failure this section exists for was winws.exe reporting it could not read an ipset list
