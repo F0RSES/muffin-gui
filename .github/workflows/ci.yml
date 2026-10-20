@@ -764,6 +764,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # ЭТА СТРОКА УДАЛЯЕТ СТАРЫЙ РЕЛИЗ, ЕСЛИ ОН ЗАВИС (флаг -y подтверждает удаление, || true игнорирует ошибку, если релиза нет)
+          gh release delete "$GITHUB_REF_NAME" -y || true
+
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
             --generate-notes \
