@@ -460,42 +460,91 @@ jobs:
 
           # WizardStyle's appearance modes -- the `dark` packaging/windows_installer.iss asks for --
           # arrived in Inno Setup 6.6.0, and an older compiler refuses the value and fails the build.
-          # This is the version floor the whole step works against; naming it once keeps the gate and
-          # the error message agreeing with each other.
+          # This is the version floor the step reports against.
           $min = [version] '6.6'
 
-          # Return the newest compiler among the candidates, or $null when none is present or none
-          # carries a readable version. Read the number out of the file rather than out of `choco`,
-          # which did not necessarily install it. ProductVersion is what Inno Setup fills in, but it is
-          # the short "6.6" while FileVersion is the full "6.6.0.0"; taking the higher of the two lets
-          # the gate judge the compiler's real capability however this particular build stamped it, so
-          # a runner that only populates one of the fields is still read correctly instead of guessing.
-          # Emits one line per candidate so a version-info format that stops matching the regex on a
-          # future runner is visible in the log rather than silently shrinking the pool to nothing.
-          function Select-Iscc {
-            $best = $null
-            foreach ($c in $candidates) {
-              if (-not (Test-Path $c)) { Write-Host "candidate absent: $c"; continue }
-              $info = (Get-Item $c).VersionInfo
-              $rawP = "$($info.ProductVersion)"
-              $rawF = "$($info.FileVersion)"
-              $ver = $null
-              foreach ($raw in @($rawP, $rawF)) {
-                if ($raw -match '^\d+(\.\d+){1,3}') {
-                  $v = [version] $Matches[0]
-                  if (-not $ver -or $v -gt $ver) { $ver = $v }
-                }
-              }
-              Write-Host "candidate present: $c (Product='$rawP' File='$rawF' parsed=$ver)"
-              if ($ver -and (-not $best -or $ver -gt $best.Version)) {
-                $best = [pscustomobject] @{ Path = $c; Version = $ver }
-              }
-            }
-            return $best
+          # Why the version comes out of the compiler and never out of its PE version resource: every
+          # binary in the shipped 6.7.3 package reports FileVersion AND ProductVersion as 0.0.0.0.
+          # Verified by extracting app/ISCC.exe, Compil32.exe, ISCmplr.dll and ISPP.dll out of
+          # innosetup-6.7.3.exe with innoextract and reading them with exiftool -- jrsoftware does not
+          # stamp them. A gate built on VersionInfo therefore cannot pass even against a current
+          # compiler, which is how a healthy runner produced the annotation
+          # "ISCC 0.0.0.0 ... is still older than 6.6" while the real file was 6.7.3.
+          #
+          # ISCC is its own authority. Projects/ISCC.dpr prints
+          #   'Compiler engine version: ' + Ver.Title + ' ' + Ver.Version
+          # to stdout on any run that is not /Q-quiet, so compiling names the version. Passing /O-
+          # ('/O' with the value '-' sets Output := no') validates an entire script without writing an
+          # installer, so the same invocation doubles as a capability probe: exit 0 means this
+          # compiler really does take WizardStyle=modern dark, and a script error exits 2 (a bad
+          # option or an exception exits 1). Asking the compiler to perform the thing we depend on
+          # cannot be fooled by a build that stamps its resources differently, in either direction.
+          $probeDir = Join-Path $env:RUNNER_TEMP 'iscc-probe'
+          New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+
+          # Assembled from an array rather than a here-string on purpose: a here-string's closing "@
+          # must sit in column 0, and a column-0 line would end this step's YAML block scalar.
+          #
+          # Every directive except the one under test has existed since Inno Setup 6.0, so a refusal
+          # points at WizardStyle rather than at an unrelated newer keyword. [Files] ships the probe
+          # script itself, which always exists, so the compile cannot fail for want of a source, and
+          # deleteafterinstall stops it mattering where it lands. ASCII because ISCC is not fed a BOM.
+          $probeIss = Join-Path $probeDir 'probe.iss'
+          @(
+            '[Setup]'
+            'AppName=MuffinProbe'
+            'AppVersion=1.0'
+            'DefaultDirName={autopf}\MuffinProbe'
+            'DisableProgramGroupPage=yes'
+            "OutputDir=$probeDir"
+            'OutputBaseFilename=probe'
+            'WizardStyle=modern dark'
+            ''
+            '[Files]'
+            ('Source: "{0}"; DestDir: "{{tmp}}"; Flags: deleteafterinstall' -f $probeIss)
+          ) | Set-Content -Path $probeIss -Encoding ascii
+
+          # Describe one ISCC.exe: the version it reports for itself, plus whether the probe compiled.
+          # $Version stays $null when the banner does not match, so an unrecognised format is reported
+          # as unknown rather than guessed at.
+          #
+          # The preference is dropped to Continue around the native call on purpose. With 'Stop', a
+          # PowerShell that promotes redirected native stderr into a terminating error would raise on
+          # a compiler that merely printed a warning, and $LASTEXITCODE -- the actual verdict -- would
+          # never be read. The exit code is the gate, so it has to survive the call.
+          function Read-Iscc([string]$path) {
+            $saved = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+              $out = & $path '/O-' $probeIss 2>&1
+              $code = $LASTEXITCODE
+            } finally { $ErrorActionPreference = $saved }
+            $txt = ($out | Out-String)
+            $v = $null
+            if ($txt -match 'Compiler engine version:.*?(\d+\.\d+(?:\.\d+)*)') { $v = [version] $Matches[1] }
+            [pscustomobject] @{ Path = $path; Version = $v; Capable = ($code -eq 0); Exit = $code; Output = $txt }
           }
 
-          # "An ISCC.exe exists" is NOT "an ISCC.exe is new enough". Fetch a current release whenever
-          # the newest compiler is missing or below the floor, then rescan. `upgrade` installs when
+          # Probe every candidate and return the highest version among those the probe ACCEPTED.
+          # Failing probes are echoed rather than swallowed: a compiler that refuses modern dark, with
+          # its own words attached, is the most useful line in this log and names the reason directly.
+          function Select-Iscc {
+            $seen = @()
+            foreach ($c in $candidates) {
+              if (-not (Test-Path $c)) { Write-Host "candidate absent: $c"; continue }
+              $r = Read-Iscc $c
+              $seen += $r
+              Write-Host "candidate probed: $c (version=$($r.Version) probe_exit=$($r.Exit) capable=$($r.Capable))"
+              if (-not $r.Capable) { Write-Host "--- probe output from $c ---`n$($r.Output)--- end of probe output ---" }
+            }
+            $ok = @($seen | Where-Object { $_.Capable -and $_.Version })
+            if ($ok.Count -eq 0) { return $null }
+            return ($ok | Sort-Object -Property Version -Descending | Select-Object -First 1)
+          }
+
+          # "An ISCC.exe exists" is NOT "an ISCC.exe can build this installer": Select-Iscc only
+          # returns a compiler that actually compiled the modern-dark probe. Fetch a current release
+          # whenever nothing usable came back, then rescan. `upgrade` installs when
           # choco has no record of it and brings it to latest when it does; --force re-runs the
           # installer even if choco already reports the latest, so the on-disk ISCC.exe is really
           # overwritten rather than left at the pre-installed old copy. Wrapped in try/catch because
@@ -504,8 +553,8 @@ jobs:
           # the direct-download fallback below rather than dying inside this block.
           $found = Select-Iscc
           if (-not $found -or $found.Version -lt $min) {
-            if ($found) { Write-Host "existing ISCC $($found.Version) at $($found.Path) is below $min -- upgrading via Chocolatey" }
-            else { Write-Host "no readable ISCC.exe -- installing via Chocolatey" }
+            if ($found) { Write-Host "ISCC $($found.Version) at $($found.Path) is below $min -- upgrading via Chocolatey" }
+            else { Write-Host "no ISCC.exe that compiles WizardStyle=modern dark -- installing via Chocolatey" }
             try {
               & choco upgrade innosetup --yes --no-progress --force
               if ($LASTEXITCODE -ne 0) { Warn "choco upgrade innosetup returned exit $LASTEXITCODE; falling back to a direct download" }
@@ -563,9 +612,19 @@ jobs:
             $found = Select-Iscc
           }
 
-          if (-not $found) { Fail "ISCC.exe not found after Chocolatey + direct-download (looked in: $($candidates -join ', '))" }
+          # Both fallbacks ran and nothing usable appeared. Two distinct outcomes, kept distinct: a
+          # compiler that is absent is not the same complaint as one that is present but refuses the
+          # directive, and the second is the one that names WizardStyle as the blocker.
+          if (-not $found) {
+            Fail "no ISCC.exe among the candidates compiles WizardStyle=modern dark after Chocolatey + direct-download (looked in: $($candidates -join ', ')). Either none is installed, or every installed one predates the 6.6 appearance modes -- see the probe output above."
+          }
+          # The probe, not the number, is the gate: a compiler that compiled "WizardStyle=modern dark"
+          # can build the release regardless of what it labels itself. Reaching here with a version
+          # below $min therefore means the banner and the behaviour disagree -- worth an annotation,
+          # but not worth failing a release over, because the thing the floor existed to guarantee
+          # (6.6 appearance modes) has just been demonstrated rather than inferred.
           if ($found.Version -lt $min) {
-            Fail "ISCC $($found.Version) at $($found.Path) is still older than $min after Chocolatey + direct-download. WizardStyle=modern dark needs the appearance modes added in 6.6.0."
+            Warn "ISCC at $($found.Path) reports $($found.Version), below the $min floor, yet compiled the modern-dark probe. Building with it; check why the banner and the behaviour disagree."
           }
 
           # $isccVer is deliberately not called $ver: the $ver two lines below is the release tag, and
@@ -574,26 +633,65 @@ jobs:
           $isccVer = $found.Version
           Write-Host "compiler: $iscc (version $isccVer)"
 
+          # Not fatal, but it belongs in the run record rather than in a log nobody reads: the .iss was
+          # authored and hand-checked against the 6.x line, and the majors are not interchangeable in
+          # every respect (Inno Setup 7 documents ArchitecturesAllowed=x64 as excluding Arm64 systems
+          # and recommends x64compatible, and it restates that a 32-bit installer is the default). The
+          # probe proves this compiler accepts what the script asks for, so the build proceeds and the
+          # difference is stated out loud.
+          if ($found.Version.Major -ne 6) {
+            Warn "building with Inno Setup $isccVer (major $($found.Version.Major)); packaging/windows_installer.iss was authored against the 6.x line. modern dark compiled, so this is allowed to ship, but compare the installer appearance before announcing the release."
+          }
+
           $ver = $env:GITHUB_REF_NAME -replace '^v', ''
           New-Item -ItemType Directory -Force -Path pkg | Out-Null
           # Re-declared, not inherited: $rel came from the previous step and step scope is not shared.
           $rel = 'win\build\Release'
           $staging = (Resolve-Path $rel).Path
           $out = (Resolve-Path 'pkg').Path
-          # Tee ISCC's own output to the log AND to a variable so we can quote the tail in the failure
-          # annotation. ISCC writes fatal compile errors to stdout, and returns 2 for a script error
-          # / 3 for an internal error; both previously looked identical from the outside because the
-          # pwsh wrapper only reported the numeric exit code. The `::error::` command payload must be
-          # one line (newlines break the workflow-command parser), so the annotation carries only the
-          # exit code; the full output is already above it in the log and below it in the summary.
-          $isccOut = & $iscc "/DAppVersion=$ver" "/DStagingDir=$staging" "/DOutputDir=$out" `
-                              "packaging\windows_installer.iss" 2>&1
+          # Tee ISCC's own output to the log AND to a variable so the failure path can quote it.
+          # ISCC writes fatal compile errors to stdout, and its exit codes separate the kinds of
+          # failure: Projects/ISCC.dpr sets ExitCode := 2 for a script error and := 1 for an
+          # exception or a bad option, then Halts with it. Before the code was read here, a broken
+          # script and a broken toolchain were indistinguishable -- both were "exit code 1".
+          #
+          # ErrorActionPreference is relaxed for the same reason it is inside Read-Iscc: the verdict
+          # lives in $LASTEXITCODE, and a PowerShell that promotes redirected native stderr into a
+          # terminating error would throw before that variable is read, taking ISCC's actual
+          # complaint with it and leaving only a wrapper-level exit code behind.
+          $saved = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            $isccOut = & $iscc "/DAppVersion=$ver" "/DStagingDir=$staging" "/DOutputDir=$out" `
+                                "packaging\windows_installer.iss" 2>&1
+            $isccCode = $LASTEXITCODE
+          } finally { $ErrorActionPreference = $saved }
           $isccOut | ForEach-Object { Write-Host $_ }
-          if ($LASTEXITCODE -ne 0) {
-            Fail "ISCC exited with $LASTEXITCODE (see the last lines of its output above)."
+          if ($isccCode -ne 0) {
+            if ($env:GITHUB_STEP_SUMMARY) {
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("`n### ISCC failed (exit $isccCode)`n`n" + ($isccOut | Out-String))
+            }
+            # One line for the annotation: the code plus the compiler's last words. The whole output
+            # is above it in the log and in the summary.
+            $tail = ($isccOut | Select-Object -Last 6) -join ' / '
+            Fail "ISCC exited with $isccCode; last output: $tail"
           }
-          Get-ChildItem pkg -Filter '*.exe' |
-            ForEach-Object { Write-Host "built: $($_.Name) ($([math]::Round($_.Length / 1MB, 1)) MiB)" }
+
+          # A zero exit code with nothing on disk is its own failure mode (a wrong /DOutputDir, an
+          # OutputBaseFilename change), and it would otherwise be caught only by upload-artifact's
+          # if-no-files-found, several steps and one lost run later.
+          $built = @(Get-ChildItem pkg -Filter '*.exe')
+          if ($built.Count -eq 0) {
+            Fail "ISCC exited 0 but left no .exe in $out; expected Muffin-Setup-$ver.exe"
+          }
+          $built | ForEach-Object { Write-Host "built: $($_.Name) ($([math]::Round($_.Length / 1MB, 1)) MiB)" }
+          # Success is recorded too, with the compiler that produced it: the version the probe read
+          # is the fact a later "why does this installer look different" question needs, and today it
+          # only exists in a log that expires.
+          if ($env:GITHUB_STEP_SUMMARY) {
+            $rows = ($built | ForEach-Object { "- $($_.Name) - $([math]::Round($_.Length / 1MB, 1)) MiB" }) -join "`n"
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "`n### Installer built`n`nCompiler: $iscc (version $isccVer), accepted WizardStyle=modern dark`nVersion from tag: $ver`n`n$rows"
+          }
 
       - name: Upload the installer
         uses: actions/upload-artifact@v4.4.3

@@ -89,8 +89,10 @@ SolidCompression=yes
 ; stellar windows11 zircon ...", and its own examples include `modern dark`.
 ;
 ; Appearance modes are new in Inno Setup 6.6; an older compiler rejects the value outright. The
-; `installer` job therefore asserts the ISCC version before compiling rather than finding out on a
-; tag build, and it also looks for Inno Setup 7, which installs beside 6 rather than over it.
+; `installer` job therefore probes the compiler for this exact directive before building the real
+; script -- reading ISCC's version resource would not work, because jrsoftware ships 6.7.3 with
+; FileVersion and ProductVersion both stamped 0.0.0.0 -- and it also looks for Inno Setup 7, which
+; installs beside 6 rather than over it.
 ;
 ; `dark` is not decorative here: the application's own sheet is a dark one (#0B0C10 canvas, neon
 ; accents), and a bright grey wizard was the one place in the release where the product did not look
