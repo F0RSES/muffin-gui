@@ -11,7 +11,7 @@
 # Qt 6.6 (QPalette::Accent, QStyleHints::colorScheme); Arch's current qt6-base sits well above it, so
 # the system package satisfies find_package(Qt6 ... Test) — Qt6Test ships inside qt6-base.
 pkgname=muffin
-pkgver=0.4.2
+pkgver=0.4.3
 pkgrel=1
 pkgdesc="Graphical front end for launching and managing zapret strategies"
 arch=('x86_64')
@@ -31,7 +31,7 @@ makedepends=('cmake' 'ninja' 'gcc')
 _github="F0RSES/zapret-muffin-gui"
 _realname="zapret-muffin-gui"
 source=("${_realname}-${pkgver}.tar.gz::https://github.com/${_github}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('ce0cca49b8b806e0c2c65710518de9c2ee7959ecd78ab5161b1d4e94c34c36a2')
+sha256sums=('SKIP')
 
 # !debug: pacman >= 6.0 would split every ELF with unstripped symbols into a separate
 # muffin-debug-0.4.2-1-x86_64.pkg.tar.zst, so the CI artifact check ("exactly one

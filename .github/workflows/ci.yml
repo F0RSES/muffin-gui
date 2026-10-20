@@ -714,16 +714,12 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-22.04
-    needs: [linux, installer]
+    # 1. ДОБАВЛЕНА ДЖОБА arch
+    needs: [linux, installer, arch] 
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
-      contents: write      # `gh release create` uploads release assets; the default token is read-only.
+      contents: write
     steps:
-      # Checkout is required here, not just for convenience: `gh release create` resolves the
-      # target repository by walking up to a .git directory, so on a bare runner it dies with
-      # "fatal: not a git repository". The download-artifact steps below write files but never
-      # create a repo. `--verify-tag` is answered from the API rather than local refs, so the
-      # default shallow checkout is enough — no fetch-depth/fetch-tags needed.
       - uses: actions/checkout@v5.1.0
 
       - name: Fetch the .deb
@@ -738,22 +734,33 @@ jobs:
           name: Muffin-setup-x64
           path: rel
 
+      # 2. ДОБАВЛЕН ШАГ СКАЧИВАНИЯ ARCH ПАКЕТА
+      - name: Fetch the Arch package
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: Muffin-pkg-x64
+          path: rel
+
       - name: Check the payload
-        # Exactly one .deb and one .exe: the release should fail loudly rather than silently
-        # publish a broken set. `gh release create --verify-tag` also catches tag drift, but the
-        # upstream jobs already gate on `refs/tags/v`, so this is a fast no-remote sanity pass.
         run: |
           set -euo pipefail
           mapfile -t debs < <(find rel -maxdepth 2 -name '*.deb' -type f)
           mapfile -t exes < <(find rel -maxdepth 2 -name '*.exe' -type f)
+          # 3. ДОБАВЛЕН ПОИСК ARCH ПАКЕТА
+          mapfile -t pkgs < <(find rel -maxdepth 2 -name '*.pkg.tar.zst' -type f)
+          
           echo "debs: ${debs[*]:-<none>}"
           echo "exes: ${exes[*]:-<none>}"
+          echo "pkgs: ${pkgs[*]:-<none>}"
+          
           (( ${#debs[@]} == 1 )) || { echo "expected exactly one .deb"; exit 1; }
           (( ${#exes[@]} == 1 )) || { echo "expected exactly one .exe"; exit 1; }
-          # Move to a flat dir so `gh` uploads with a clean file name (download-artifact preserves
-          # the workspace-relative path it was handed, so paths arrive as rel/build/*.deb, rel/pkg/*.exe).
+          # 3.1 ДОБАВЛЕНА ПРОВЕРКА ARCH ПАКЕТА
+          (( ${#pkgs[@]} == 1 )) || { echo "expected exactly one .pkg.tar.zst"; exit 1; }
+
           mkdir -p out
-          mv "${debs[0]}" "${exes[0]}" out/
+          # 3.2 ДОБАВЛЕНО ПЕРЕМЕЩЕНИЕ ARCH ПАКЕТА
+          mv "${debs[0]}" "${exes[0]}" "${pkgs[0]}" out/
           ls -la out
 
       - name: Create the release
@@ -765,9 +772,9 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "Muffin $GITHUB_REF_NAME" \
-            out/*.deb out/*.exe
+            # 4. ДОБАВЛЕН ARCH ПАКЕТ В КОМАНДУ СОЗДАНИЯ РЕЛИЗА
+            out/*.deb out/*.exe out/*.pkg.tar.zst
           echo "published: $(gh release view "$GITHUB_REF_NAME" --json url -q .url)"
-
   # Arch Linux packaging, in its own job. Two reasons it is not folded into `linux`: the build
   # environment is genuinely different (makepkg compiles against the DISTRO Qt in qt6-base, whereas
   # the `linux` job compiles against an aqt-installed Qt 6.7.3 on Ubuntu), and a clean Arch container
