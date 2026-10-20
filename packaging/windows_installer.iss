@@ -2,7 +2,7 @@
 ; Muffin — Windows installer (Inno Setup 6).
 ;
 ; Compiled by the `installer` job in .github/workflows/ci.yml:
-;   ISCC.exe /DAppVersion=0.2.1 /DStagingDir=C:\...\win\build\Release packaging\windows_installer.iss
+;   ISCC.exe /DAppVersion=0.4.1 /DStagingDir=C:\...\win\build\Release packaging\windows_installer.iss
 ; and by hand from a normal Visual Studio build tree (windeployqt must have run first, see README):
 ;   & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows_installer.iss
 ;
@@ -29,7 +29,7 @@
 ; entry and VersionInfoVersion from the value read here, so if the two drift apart the version the
 ; user sees in Windows and the version the GUI reports at runtime disagree. Bump them together.
 #ifndef AppVersion
-  #define AppVersion "0.2.1"
+  #define AppVersion "0.4.1"
 #endif
 
 ; VersionInfoVersion wants a dotted version; a bare tag usually carries three parts, so pad here
@@ -85,6 +85,12 @@ WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppName}.exe
 UninstallDisplayName={#AppName}
 
+; The setup program's own icon. Without this the .exe everyone downloads is Inno's
+; default blue-arrow wizard icon, which is the one place the brand was missing even
+; before the application itself had one. Same .ico app.rc compiles into Muffin.exe, so
+; there is one artwork file to keep in sync, not two.
+SetupIconFile={#RepoDir}\packaging\windows\muffin.ico
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -108,19 +114,33 @@ Source: "{#StagingDir}\Qt6*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifs
 Source: "{#StagingDir}\iconengines\*"; DestDir: "{app}\iconengines"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#StagingDir}\networkinformation\*"; DestDir: "{app}\networkinformation"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#StagingDir}\tls\*"; DestDir: "{app}\tls"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; The icon, installed beside the executable. The shortcuts below do not need it — they
+; bind to Muffin.exe, which carries the same image compiled in by packaging/windows/app.rc —
+; but a user who pins the app or builds a shortcut from Explorer resolves the icon from a
+; file, and this is the copy the .iss and the .rc both point at.
+Source: "{#RepoDir}\packaging\windows\muffin.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "{#RepoDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppName}.exe"
+; The icon these shortcuts show is the icon group embedded in Muffin.exe by
+; packaging/windows/app.rc — that is what fixes the blank Start-menu / desktop / taskbar
+; icon, and no .ico file has to travel with the shortcut for it to work. IconFilename is
+; still spelled out rather than left to the implicit "use the target's icon" fallback: the
+; fallback is exactly what rendered blank while the executable carried no icon group, and
+; naming it pins the shortcut to entry 0 of the exe instead of to a loose file in {app}.
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; IconFilename: "{app}\{#AppName}.exe"; IconIndex: 0
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; IconFilename: "{app}\{#AppName}.exe"; IconIndex: 0; Tasks: desktopicon
 
 [Run]
 ; Offered but unchecked: right after a fresh install the app has no zapret tree yet, and opening it is
 ; not a prerequisite for finishing the setup. skipifsilent is the silent-install half of the same
 ; reasoning: an unattended /SILENT or /VERYSILENT run must not end with a GUI popping up over it.
-; (postinstall alone already implies the original, non-elevated user token, which is what the app
-; wants -- it escalates itself through PrivilegeHelper when it actually needs to.)
+; postinstall starts the program with the original, non-elevated user token, and since 0.4.1
+; Muffin.exe's own manifest asks Windows for requireAdministrator -- so ticking this box costs the user
+; one UAC consent. That is the intended shape of it: the elevation belongs to the application (see
+; packaging/windows/app.manifest), and launching it from here with runascurrentuser would only hide
+; that same prompt behind the setup's own consent, with the app inheriting the installer's token.
 Filename: "{app}\{#AppName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall unchecked skipifsilent
 

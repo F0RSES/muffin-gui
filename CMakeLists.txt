@@ -8,7 +8,7 @@ project(Muffin LANGUAGES CXX)
 # which is what keeps muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in
 # agreement. The default is the current release line, so local `cmake`/`cpack` runs still produce
 # sensibly named files and a helper that reports a real version.
-set(MUFFIN_VERSION "0.2.1" CACHE STRING "Version stamped into the generated packages")
+set(MUFFIN_VERSION "0.4.1" CACHE STRING "Version stamped into the generated packages")
 
 # ---- Qt6 -------------------------------------------------------------------
 # Core logic depends on QtCore (QString/QDir/QProcess); the reachability prober adds QtNetwork, and
@@ -138,6 +138,58 @@ qt_add_executable(Muffin WIN32
 
 target_include_directories(Muffin PRIVATE src/ui)
 target_link_libraries(Muffin PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Network)
+
+# ---- Windows resources: icon + elevation manifest ---------------------------
+# Everything a Windows executable has to expose before its code runs lives in
+# packaging/windows/app.rc: the icon group the shell reads for the file (Start menu,
+# desktop, taskbar and every shortcut that does not name an icon of its own), and the
+# RT_MANIFEST that carries requireAdministrator. Neither can come from the .qrc — Qt
+# resources are invisible to Explorer and to CreateProcess, which is why the icon was
+# missing in exactly those three places and why "run as administrator" was still a
+# thing the user had to remember: WindowsBackend::start() refuses an elevated-required
+# strategy unless the token it already holds is elevated, and up to now nothing but the
+# user's right-click guaranteed that.
+#
+# app.rc names its two payloads by relative path and the tools disagree about what
+# that means. Measured here: windres resolves them against the directory holding the
+# .rc itself, so it compiles from any working directory; rc.exe documents the current
+# directory instead, which for a CMake build is the binary dir rather than the source
+# dir. Staging copies there is two lines and makes the same script compile under
+# either rule — from an IDE, from `cmake --build`, or by hand inside
+# packaging/windows/. It is also self-correcting: configure_file() re-stages whenever
+# CMake re-runs, so a build-tree copy that drifts is repaired before anything reads
+# it (verified by hand-corrupting build/app.manifest — the exe still embedded the
+# source's requireAdministrator). The payload is then named twice on purpose, because
+# the two copies answer different questions: the configure_file() copy is what the
+# compiler may read, and OBJECT_DEPENDS on the SOURCE copies is what makes editing the
+# artwork or the manifest in the checkout rebuild the resource.
+if (WIN32)
+    enable_language(RC)
+    set(MUFFIN_RC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows")
+    foreach (muffin_rc_file IN ITEMS app.rc app.manifest muffin.ico)
+        # Missing here means shipping an exe that either has no brand or runs unelevated,
+        # and both look like a working build until a user hits it. Fail at configure.
+        if (NOT EXISTS "${MUFFIN_RC_DIR}/${muffin_rc_file}")
+            message(FATAL_ERROR "packaging/windows/${muffin_rc_file} is missing")
+        endif()
+    endforeach()
+
+    configure_file("${MUFFIN_RC_DIR}/muffin.ico"   "${CMAKE_CURRENT_BINARY_DIR}/muffin.ico"   COPYONLY)
+    configure_file("${MUFFIN_RC_DIR}/app.manifest" "${CMAKE_CURRENT_BINARY_DIR}/app.manifest" COPYONLY)
+    set_source_files_properties("${MUFFIN_RC_DIR}/app.rc" PROPERTIES
+        OBJECT_DEPENDS "${MUFFIN_RC_DIR}/muffin.ico;${MUFFIN_RC_DIR}/app.manifest")
+
+    target_sources(Muffin PRIVATE "${MUFFIN_RC_DIR}/app.rc")
+
+    # MSVC only. CMake's VS generator maps "/MANIFEST:NO" to <GenerateManifest>false</>
+    # (Templates/MSBuild/FlagTables/v143_Link.json), which stops link.exe from emitting its
+    # own manifest and mt.exe from embedding it over ours — an mt embed replaces resource
+    # #1/RT_MANIFEST and would quietly put the level back to asInvoker. MinGW has no
+    # manifest step to suppress and does not understand the flag, so it stays out of there.
+    if (MSVC)
+        set_target_properties(Muffin PROPERTIES LINK_FLAGS "/MANIFEST:NO")
+    endif()
+endif()
 
 # ---- tests ------------------------------------------------------------------
 # coretest: QtCore-only console verifier for the parser/locator/manager/backends.

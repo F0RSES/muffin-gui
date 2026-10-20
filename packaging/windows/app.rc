@@ -1,0 +1,78 @@
+// ---------------------------------------------------------------------------
+// Muffin -- Windows resources, compiled into Muffin.exe by rc.exe (MSVC) or
+// windres (MinGW). Added to the target in CMakeLists.txt under if (WIN32).
+//
+// This file carries the two things the Windows shell and loader need and that
+// a Qt resource (.qrc) can never provide, because both are read from the
+// executable image itself, before any of our code runs:
+//
+//   * the icon Explorer, the Start menu, the taskbar and Inno Setup's shortcuts
+//     show for the application, and
+//   * the UAC execution level, which has to be known at CreateProcess time.
+//
+// Paths below are relative, and the two compilers do not read that the same way.
+// Measured here: windres resolves them against the directory holding this script, so
+// it compiles from anywhere; rc.exe documents the current directory instead, which in
+// a CMake build is the binary dir. CMakeLists.txt therefore stages copies of both
+// payloads into the build directory, so the names resolve whichever rule the
+// toolchain follows.
+//
+// muffin.ico carries five frames -- 256 as PNG plus 64/48/32/16 as 32-bit DIBs -- of
+// the same cupcake glyph packaging/muffin.svg draws for the Linux side, so keep the
+// two in sync when the artwork changes. No generator for it is committed: the file
+// came out of a hand-run ImageMagick invocation, necessary because this SVG's strokes
+// do not survive the internal MSVG coder, so the frames were redrawn from the same
+// path data with MVG primitives rather than converted. Regenerating it is a manual
+// step, and the result should be checked (five entries, those sizes and bit depths,
+// ordinal 1 in the group slot) before it is committed.
+// ---------------------------------------------------------------------------
+
+// Both resources are named by ORDINAL and no header is included, and that is a
+// choice rather than an oversight. The manifest's two symbolic aliases really
+// are reachable: winuser.h defines RT_MANIFEST as 24 and
+// CREATEPROCESS_MANIFEST_RESOURCE_ID as 1 inside an "#ifdef RC_INVOKED" (and as
+// MAKEINTRESOURCE(24)/MAKEINTRESOURCE(1) otherwise), and windres does define
+// RC_INVOKED when it runs its preprocessor, so "#include <winres.h>" -- the
+// header whose entire purpose is being includable from a .rc -- resolves both of
+// them here. The icon name would not. `IDI_ICON1` appears nowhere in the MinGW
+// include tree; it is only whatever Visual Studio happens to write into a
+// wizard-generated app.rc, which compiles there because the IDE emits a matching
+// resource.h beside it. Lift the name without the header and the script contains
+// an identifier neither compiler was ever told about -- and the two tools react
+// to that in opposite ways, which is the whole reason for using numbers:
+//
+//   rc.exe  stops the build. "error RC2104: undefined keyword or key name"
+//           (documented behaviour, and the reason a mistake here is loud on the
+//           toolchain CI actually uses; there is no MSVC on this host to run).
+//   windres takes it silently, as a *string* resource name. Measured here with
+//           exactly this pair of payloads left symbolic: the image comes out as
+//           RT_GROUP_ICON "IDI_ICON1" plus RT_MANIFEST
+//           "CREATEPROCESS_MANIFEST_RESOURCE_ID", and windres, the link and the
+//           build all report success.
+//
+// The manifest is the one that hurts. CreateProcess reads the execution level
+// out of ordinal 1 and nothing else, so a string-named manifest is bytes in an
+// image that nobody consults: the process starts asInvoker,
+// WindowsBackend::start() then refuses every elevated-required strategy, and the
+// user sees a failure that reads like a driver problem. A build that passes and
+// ships a broken app on the toolchain the change was not tested on is the thing
+// worth designing out, and plain numbers are read identically by both.
+//
+// What each one means:
+//   1 in the icon slot : the shell resolves a file's icon from the icon GROUP
+//                         with the lowest ordinal, so 1 also keeps
+//                         ExtractIconEx(id=0)/Inno's IconIndex: 0 pointing here.
+//   24                  : RT_MANIFEST.
+//   1 in the manifest slot : CREATEPROCESS_MANIFEST_RESOURCE_ID -- the only
+//                         manifest id CreateProcess looks at. An ordinal-2 or a
+//                         string-named manifest is present in the image and
+//                         ignored by the loader.
+1 ICON DISCARDABLE "muffin.ico"
+
+// The level asked for is requireAdministrator; see the header of app.manifest
+// for why, and for the /MANIFEST:NO that keeps CMake's generated manifest from
+// overwriting this resource at link time.
+// No DISCARDABLE here on purpose: that flag is a fault-in hint the loader may
+// honour for a resource it can re-read from the image, and the elevation level
+// has to be there before anything else about the process is decided.
+1 24 "app.manifest"

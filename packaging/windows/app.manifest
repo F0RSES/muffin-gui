@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Muffin's application manifest, embedded as RT_MANIFEST resource 1
+  (CREATEPROCESS_MANIFEST_RESOURCE_ID) by packaging/windows/app.rc.
+
+  NOTE: this block ships inside Muffin.exe verbatim, so it states what the file
+  is and not the reasoning behind it. The reasoning lives in app.rc, in the
+  WIN32 block of CMakeLists.txt, and in the git log of the commit that added it.
+
+  (An XML comment may not contain two hyphens in a row, which is why none of
+  this text uses the usual dash pair as punctuation.)
+
+  requireAdministrator is the reason this file exists. zapret's winws.exe loads
+  the WinDivert driver and installs firewall/DNS changes, so
+  WindowsBackend::start() refuses an elevated-required strategy unless
+  PrivilegeHelper::isElevated() already holds. Asking Windows at CreateProcess
+  time is what makes that check pass by default: UAC consents once at launch and
+  every child process inherits the elevated token, instead of the user having to
+  remember to right-click -> "Run as administrator" and the app having to explain
+  afterwards that it was started without one.
+
+  The Common-Controls dependency and the DPI settings are the declarations
+  link.exe used to generate on its own; CMake's linker manifest is switched off
+  for the target so that it cannot replace this resource, and they are restated
+  here rather than lost. Without the dependency the native file dialogs Qt borrows
+  from comdlg32 fall back to the classic Win32 look; without dpiAwareness the
+  process starts DPI-unaware, so on a scaled monitor the window renders blurry
+  because Qt's per-monitor-v2 handling never engages. "permonitorv2,permonitor" is
+  the value Qt 6's own Windows backend asks for.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="F0RSES.Muffin" type="win32"/>
+
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 share this id. -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
+      <!-- Windows Server 2008 -->
+      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/>
+    </application>
+  </compatibility>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
