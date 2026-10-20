@@ -767,3 +767,81 @@ jobs:
             --title "Muffin $GITHUB_REF_NAME" \
             out/*.deb out/*.exe
           echo "published: $(gh release view "$GITHUB_REF_NAME" --json url -q .url)"
+
+  # Arch Linux packaging, in its own job. Two reasons it is not folded into `linux`: the build
+  # environment is genuinely different (makepkg compiles against the DISTRO Qt in qt6-base, whereas
+  # the `linux` job compiles against an aqt-installed Qt 6.7.3 on Ubuntu), and a clean Arch container
+  # is the only place that exercises the PKGBUILD a user would actually run -- a broken recipe fails
+  # here instead of on someone's machine.
+  #
+  # It deliberately does NOT feed the `release` job: that job asserts exactly one .deb and one .exe,
+  # so wiring arch into its `needs` would add a gate it was never designed to satisfy. The .pkg.tar.zst
+  # is published as a standalone artifact on every run (including PRs), which is what keeps the recipe
+  # honest against the tree under test rather than only at tag time.
+  #
+  # The official archlinux image runs every step as root, but makepkg refuses to run as root by design
+  # (a rogue PKGBUILD could clobber the system). Hence the split: pacman installs dependencies as root,
+  # then the build drops to an unprivileged `builder` account that owns the checkout so makepkg may
+  # write src/, pkg/ and the artifact in place.
+  arch:
+    name: Build the Arch package
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v5.1.0
+
+      - name: Install the build and runtime dependencies
+        run: |
+          set -euo pipefail
+          # -Syu before -S: the image's package database is baked at build time and lags the mirrors,
+          # so installing straight against that stale index can fail on inter-package version skew.
+          # All depends/makedepends are installed here so the later `makepkg -s` finds them already
+          # satisfied and never needs sudo (builder cannot call pacman).
+          pacman -Syu --noconfirm base-devel cmake ninja gcc qt6-base qt6-svg polkit
+
+      - name: Build the package as an unprivileged user
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          # makepkg writes src/ (the fetched source), pkg/ (the install staging root) and the final
+          # .pkg.tar.zst inside the PKGBUILD's own directory, so builder must own the checkout tree.
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          # runuser switches the effective user while keeping the job's environment (PATH and
+          # GITHUB_WORKSPACE), but HOME would otherwise stay /root and break makepkg's download cache
+          # (~/.cache/makepkg) -- so HOME is redirected into builder's home. Deps are already present,
+          # so `-s` resolves without a network/sudo step.
+          runuser -u builder -- env HOME=/home/builder \
+            sh -c 'cd "$GITHUB_WORKSPACE/packaging/arch" && makepkg -s --noconfirm'
+
+      - name: Verify the package payload
+        run: |
+          set -euo pipefail
+          # Exactly one package, and every path the app's runtime actually depends on present in it:
+          # the lowercase binary, the privilege helper at its hardcoded path, the hicolor icon, the
+          # desktop entry, and the license. tar member names may or may not carry a leading "./"
+          # depending on bsdtar, so each pattern is anchored only at the end. nullglob makes an absent
+          # package expand to nothing (count 0 -> the guard below fires with a clear message) instead of
+          # leaving the literal pattern in place, which would read as exactly one match.
+          shopt -s nullglob
+          pkgs=( "$GITHUB_WORKSPACE"/packaging/arch/muffin-*.pkg.tar.zst )
+          (( ${#pkgs[@]} == 1 )) || { echo "expected exactly one .pkg.tar.zst, found ${#pkgs[@]}: ${pkgs[*]}"; exit 1; }
+          echo "package: ${pkgs[0]##*/}"
+          tar -tf "${pkgs[0]}" | tee /tmp/pkg-list
+          for path in \
+            usr/bin/muffin \
+            usr/lib/muffin/muffin-install-helper \
+            usr/share/icons/hicolor/scalable/apps/muffin.svg \
+            usr/share/applications/muffin.desktop \
+            usr/share/licenses/muffin/LICENSE; do
+            grep -q "$path\$" /tmp/pkg-list \
+              || { echo "the package is missing $path"; exit 1; }
+          done
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Muffin-pkg-x64
+          path: packaging/arch/muffin-*.pkg.tar.zst
+          if-no-files-found: error
+

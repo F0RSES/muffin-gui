@@ -1,0 +1,91 @@
+# Maintainer: F0RSES <https://github.com/F0RSES/zapret-muffin-gui>
+#
+# Arch Linux package recipe for Muffin, the graphical front end for zapret.
+#
+# Pinned release tarball, not a git checkout: a system/AUR package must build from a fixed source
+# whose integrity is guaranteed by a hash, not from whatever HEAD happens to be at install time. The
+# tarball below is GitHub's snapshot of the v0.4.2 tag and sha256sums is that gate. (A -VCS recipe
+# would drop the hash and set pkgver() from `git describe` instead.)
+#
+# Qt comes from the DISTRO, not an aqt download like the Ubuntu CI job. The project's real floor is
+# Qt 6.6 (QPalette::Accent, QStyleHints::colorScheme); Arch's current qt6-base sits well above it, so
+# the system package satisfies find_package(Qt6 ... Test) — Qt6Test ships inside qt6-base.
+pkgname=muffin
+pkgver=0.4.2
+pkgrel=1
+pkgdesc="Graphical front end for launching and managing zapret strategies"
+arch=('x86_64')
+url="https://github.com/F0RSES/zapret-muffin-gui"
+license=('MIT')
+
+# Runtime. qt6-base for the Core/Gui/Network/Widgets it links; qt6-svg because the toolbar/tray glyphs
+# and the hicolor icon are SVG and are rasterised by the qsvg plugin at run time — it is NOT a
+# build-time component (CMakeLists never calls find_package(Qt6Svg)), so it belongs here rather than
+# in makedepends; polkit because every privileged action shells out to /usr/bin/pkexec.
+depends=('qt6-base' 'qt6-svg' 'polkit')
+
+# Build-time only. base-devel (make, binutils, fakeroot, patch, ...) is assumed present per the Arch
+# packaging guidelines, so it is deliberately not repeated here.
+makedepends=('cmake' 'ninja' 'gcc')
+
+_github="F0RSES/zapret-muffin-gui"
+_realname="zapret-muffin-gui"
+source=("${_realname}-${pkgver}.tar.gz::https://github.com/${_github}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('ce0cca49b8b806e0c2c65710518de9c2ee7959ecd78ab5161b1d4e94c34c36a2')
+
+build() {
+  cd "$srcdir/$_realname-$pkgver"
+
+  # CMAKE_BUILD_TYPE=Release is not optional: an unset type builds a Qt Widgets app at -O0 with
+  # assertions, which is not what ships. The prefix is /usr so the desktop-entry paths and the
+  # compiled-in helper location agree with what the code expects.
+  #
+  # -DMUFFIN_VERSION is load-bearing. CMakeLists defaults MUFFIN_VERSION to the *previous* release
+  # line, so without this override the GUI and `muffin-install-helper --version` would report the
+  # wrong version even though the package name and every path say pkgver. Pinning it to pkgver keeps
+  # all three — file names, the binary's self-report, and the tag — in agreement.
+  cmake -G Ninja \
+    -S . -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DMUFFIN_VERSION="$pkgver"
+
+  cmake --build build
+}
+
+package() {
+  local _src="$srcdir/$_realname-$pkgver"
+
+  # The binary is installed lowercase (/usr/bin/muffin) — the Arch/Filesystem-Hierarchy convention for
+  # executables — even though the CMake target is `Muffin`. Two consequences are handled below: the
+  # desktop entry's Exec/TryExec are rewritten to the name that actually exists, and StartupWMClass is
+  # left as `Muffin` because Qt derives that WM_CLASS field from QApplication::applicationName()
+  # ("Muffin", set in src/main.cpp), not from argv[0], so it still matches and the taskbar groups right.
+  install -Dm755 "$_src/build/Muffin" "$pkgdir/usr/bin/muffin"
+
+  # The privilege helper. src/core/MuffinInstallHelper.cpp hardcodes where it looks for this binary
+  # (/usr/lib/muffin/muffin-install-helper) and findProgram() refuses a group/world-writable copy, so
+  # it must land at exactly that path with mode 0755 or the "install into the system tree" feature
+  # silently stops running. It is part of the tested DEB payload too — leaving it out would make the
+  # Arch package a strictly weaker install than the one the project already ships and verifies.
+  install -Dm755 "$_src/build/muffin-install-helper" "$pkgdir/usr/lib/muffin/muffin-install-helper"
+
+  # Desktop icon: packaging/muffin.svg, the copy carrying explicit paints. NOT
+  # src/resources/icons/app.svg, which uses currentColor and only looks right when Qt recolours it on
+  # load — the desktop environment's own SVG loader has no such step, so it would render black.
+  # Installed under the name the .desktop entry's Icon=muffin key resolves to.
+  install -Dm644 "$_src/packaging/muffin.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/muffin.svg"
+
+  # The launcher entry, with Exec/TryExec pointed at the lowercase binary installed above. GNU sed's
+  # \b keeps "Muffin" from matching a longer word; the rest of each line ("  %U") is preserved.
+  install -Dm644 "$_src/packaging/muffin.desktop" \
+    "$pkgdir/usr/share/applications/muffin.desktop"
+  sed -e 's#^Exec=Muffin\b#Exec=muffin#' \
+      -e 's#^TryExec=Muffin\b#TryExec=muffin#' \
+      -i "$pkgdir/usr/share/applications/muffin.desktop"
+
+  # CMake installs no license file, so the Arch license-directory convention is applied here by hand.
+  # It goes under $pkgname (muffin), which is where pacman's license check looks.
+  install -Dm644 "$_src/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
