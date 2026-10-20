@@ -5,7 +5,7 @@ Validates the files that decide how Muffin.exe behaves before any of its own cod
 packaging/windows/app.rc, packaging/windows/app.manifest, packaging/windows/muffin.ico --
 and the WIN32 block of CMakeLists.txt that feeds them to the resource compiler.
 
-It exists because none of the five failure modes it catches is reported by a build. A
+It exists because none of the six failure modes it catches is reported by a build. A
 resource compiler embeds bytes; it does not ask what the shell or the loader will make of
 them, and link.exe does not look inside a manifest either:
 
@@ -29,18 +29,28 @@ them, and link.exe does not look inside a manifest either:
      dir. The same script therefore builds on MinGW and fails on MSVC -- the reverse of the
      usual cross-platform order, and late: after a Windows runner has installed Qt and
      compiled everything else.
+  6. The installer's own assets. packaging/windows_installer.iss asks Inno for a dark wizard
+     and for two bitmaps, and ISCC resolves all three at compile time: a missing or renamed
+     banner is a failed build, and a palettised, truncated or wrong-shaped one is a wizard
+     quietly drawing its own art instead. Both land on the `installer` job, which runs only on
+     a tag -- the last place anyone wants to discover that a picture was deleted from a
+     repository.
 
-Everything here is checked in about 0.1 s on any host with Python, with no Windows, no Qt
-and no compiler, which is what makes it worth running before those runners are booked.
+Everything here is checked in about 1.5 s on any host with Python, with no Windows, no Qt and
+no compiler, which is what makes it worth running before those runners are booked. Nearly all
+of that is the wizard bitmaps being re-rendered and compared byte for byte; the text and byte
+inspection of everything else takes about 0.1 s.
 
 Usage: python3 packaging/check-win-resources.py [repo-root]
        (default root: the parent of this script's directory)
 Exit status: 0 when every check passes, 1 when at least one problem is printed.
 """
+import importlib.util
 import os
 import re
 import struct
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 # winuser.h: RT_MANIFEST is 24, and CREATEPROCESS_MANIFEST_RESOURCE_ID -- the only id
@@ -723,6 +733,196 @@ def check_cmake(path, found):
 
 
 
+def strip_iss_comments(text):
+    """The script's lines with whole-line comments dropped.
+
+    The reason is the one that makes CMakeLists.txt get read comment-free too: a pattern matches
+    text whether or not the compiler will act on it, and a `;WizardStyle=modern dark` left in the
+    file as a note is not a setting.
+    """
+    return [line for line in text.splitlines() if not line.lstrip().startswith(";")]
+
+
+def setup_directives(text):
+    """{lowercased name: value} for the [Setup] section; a later repeat of a name wins, as in Inno."""
+    vals = {}
+    in_setup = False
+    for line in strip_iss_comments(text):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_setup = s.lower() == "[setup]"
+            continue
+        if not in_setup or "=" not in s:
+            continue
+        key, value = s.split("=", 1)
+        vals[key.strip().lower()] = value.strip()
+    return vals
+
+
+def check_bmp(path, want_w, want_h, what):
+    """A plain 24-bit bottom-up BMP of exactly `want_w` x `want_h`, and self-consistent.
+
+    ISCC embeds whatever bytes it is handed, and only the running wizard discovers that the
+    "bitmap" is palettised, truncated or the wrong shape. The header is therefore checked against
+    the file rather than trusted -- the same stance muffin.ico's directory is read with.
+    """
+    problems = []
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    if len(blob) < 54:
+        return [f"{path}: {len(blob)} bytes is too short to hold a BMP header ({what})"]
+    if blob[:2] != b"BM":
+        problems.append(f"{path}: starts with {blob[:2]!r}, not b'BM' ({what})")
+    declared = struct.unpack("<I", blob[2:6])[0]
+    if declared != len(blob):
+        problems.append(f"{path}: header declares {declared} bytes, the file is {len(blob)} "
+                        f"({what})")
+    off_bits = struct.unpack("<I", blob[10:14])[0]
+    if off_bits != 54:
+        problems.append(f"{path}: pixel data starts at {off_bits}, not at the 54-byte header-only "
+                        f"layout ({what})")
+    hdr = struct.unpack("<I", blob[14:18])[0]
+    if hdr != 40:
+        problems.append(f"{path}: BITMAPINFOHEADER is {hdr} bytes; a plain DIB uses 40 ({what})")
+    w, h, planes, bpp, comp = struct.unpack("<iiHHI", blob[18:34])
+    if (w, h) != (want_w, want_h):
+        problems.append(f"{path}: is {w}x{h}; Inno's image area for {what} at 100% DPI is "
+                        f"{want_w}x{want_h}")
+    if h <= 0:
+        problems.append(f"{path}: height {h} means a top-down BMP; the generator writes bottom-up")
+    if planes != 1:
+        problems.append(f"{path}: {planes} colour planes, expected 1")
+    if bpp != 24:
+        problems.append(f"{path}: {bpp} bits per pixel; 24 is what Inno is handed here")
+    if comp != 0:
+        problems.append(f"{path}: compression {comp} is set; the checked-in bitmaps are uncompressed")
+    row = ((w * 3) + 3) // 4 * 4
+    need = off_bits + row * abs(h)
+    if len(blob) < need:
+        problems.append(f"{path}: {len(blob)} bytes cannot hold {abs(h)} padded rows of {row} "
+                        f"bytes from offset {off_bits} ({need} needed)")
+    return problems
+
+
+def load_wizard_generator():
+    """Import packaging/make-wizard-images.py despite the dashes in its file name.
+
+    The expected names and sizes come out of the generator rather than from constants repeated here,
+    for the same reason the payload names are read out of app.rc: a rename on one side is only a
+    valid build if the other side moved with it, and a checker carrying its own copy of the answer
+    would fail the pair that moved together and pass the pair that did not.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make-wizard-images.py")
+    spec = importlib.util.spec_from_file_location("muffin_make_wizard_images", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_installer(root):
+    """The wizard look the [Setup] section asks for, and the two bitmaps it names.
+
+    Worth an automated answer for the same reason the rest of this file does: ISCC resolves
+    WizardImageFile at compile time and stops when the file is not there, and the `installer` job
+    only runs on a tag -- so a banner that goes missing, is renamed on one side only, or is edited
+    into something that is no longer a plain BMP fails a release after everything else has gone
+    green. Neither the .iss nor the .bmp is inspected by any other step.
+    """
+    problems, done = [], []
+    iss_path = os.path.join(root, "packaging", "windows_installer.iss")
+    if not os.path.isfile(iss_path):
+        return [f"{iss_path}: not found"], done
+
+    with open(iss_path, encoding="utf-8") as fh:
+        vals = setup_directives(fh.read())
+
+    # A base style and an appearance mode live in one WizardStyle value, space separated. Losing the
+    # second word is silent -- the wizard simply comes out light -- so both halves are asked for.
+    style = vals.get("wizardstyle", "").lower().split()
+    if not style:
+        problems.append(f"{iss_path}: no WizardStyle, so Inno draws its default wizard next to an "
+                        "application whose own sheet is dark")
+    else:
+        if "modern" not in style:
+            problems.append(f"{iss_path}: WizardStyle={vals.get('wizardstyle')} does not name the "
+                            "modern base style")
+        if "dark" not in style:
+            problems.append(f"{iss_path}: WizardStyle={vals.get('wizardstyle')} names no appearance "
+                            "mode, so the wizard renders light over a dark application")
+        if "light" in style:
+            problems.append(f"{iss_path}: WizardStyle={vals.get('wizardstyle')} names both light "
+                            "and dark; which one wins is not worth leaving to the compiler")
+        else:
+            done.append(f"WizardStyle={' '.join(style)}")
+
+    try:
+        gen = load_wizard_generator()
+    except Exception as exc:                        # any import failure is a report, not a traceback
+        problems.append(f"packaging/make-wizard-images.py: cannot be loaded, so the wizard bitmaps "
+                        f"cannot be checked against it: {exc}")
+        return problems, done
+
+    # The image area each directive fills, at 100% DPI, per the [Setup] reference -- and the reference
+    # adds for both that an image *larger* than that is recommended, because a smaller one is enlarged
+    # and reads as a blur on any display. This is the one property of the two assets that no other
+    # check here can see: the files are valid BMPs and byte-identical to their generator either way, and
+    # a resize of BANNER_SIZE back down to the old 164x314 would pass every other assertion in this
+    # function while making the installer look soft on the machine of anyone not at 100% scaling.
+    area = {"wizardimagefile": (202, 386), "wizardsmallimagefile": (58, 58)}
+    wanted = [("wizardimagefile", gen.BANNER_NAME, gen.BANNER_SIZE, "the tall side panel"),
+              ("wizardsmallimagefile", gen.SMALL_NAME, gen.SMALL_SIZE, "the corner thumbnail")]
+    for directive, name, size, what in wanted:
+        value = vals.get(directive, "")
+        if not value:
+            problems.append(f"{iss_path}: no {directive}, so Inno's own built-in art is shown where "
+                            f"{what} should carry the application's mark")
+            continue
+        # The script anchors both paths to {#SourcePath} -- the directory holding the .iss, which is
+        # this one. Anything after the last '}' is the file name either way, and Inno resolves a
+        # relative path against that same directory, so this is the file it will open.
+        tail = value.rsplit("}", 1)[-1].strip()
+        path = os.path.join(root, "packaging", os.path.basename(tail))
+        if not os.path.isfile(path):
+            problems.append(f"{iss_path}: {directive}={value} names {path}, which does not exist "
+                            "-- ISCC treats that as an error, on a tag build, with nothing else "
+                            "having run first")
+            continue
+        found = check_bmp(path, size[0], size[1], what)
+        problems += found
+        if not found:
+            done.append(f"{os.path.basename(path)}: {size[0]}x{size[1]} 24-bit BMP, {what}")
+        min_w, min_h = area[directive]
+        if size[0] < min_w or size[1] < min_h:
+            problems.append(f"packaging/{os.path.basename(path)}: {size[0]}x{size[1]} is smaller than "
+                            f"the {min_w}x{min_h} image area Inno measures for {what} at 100% DPI, so "
+                            "Setup enlarges it and the banner is blurry on every display above that "
+                            "scaling (the reference recommends an image larger than the area)")
+        else:
+            done.append(f"{os.path.basename(path)}: {size[0]}x{size[1]} is at least the "
+                        f"{min_w}x{min_h} of {what}'s area at 100% DPI")
+
+    # That the committed bytes are what the generator renders. An asset edited by hand is invisible
+    # in a diff of the .py and unreadable in a diff of the .bmp, so regenerating into a temporary
+    # directory and comparing bytes is the only review that survives contact with either file.
+    with tempfile.TemporaryDirectory(prefix="muffin-wizard-") as tmp:
+        for name, job in ((gen.BANNER_NAME, gen.JOB_BANNER), (gen.SMALL_NAME, gen.JOB_SMALL)):
+            committed = os.path.join(root, "packaging", name)
+            if not os.path.isfile(committed):
+                continue                            # the existence check above already said so
+            w, h, pix = gen.build(job)
+            fresh = os.path.join(tmp, name)
+            gen.write_bmp(fresh, w, h, pix)
+            with open(fresh, "rb") as a, open(committed, "rb") as b:
+                same = a.read() == b.read()
+            if not same:
+                problems.append(f"packaging/{name}: is not what packaging/make-wizard-images.py "
+                                "renders now -- regenerate it with "
+                                "`python3 packaging/make-wizard-images.py` and commit the result")
+            else:
+                done.append(f"{name}: byte-identical to its generator")
+    return problems, done
+
+
 def main(argv):
     root = argv[0] if argv else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     windows_dir = os.path.join(root, "packaging", "windows")
@@ -759,6 +959,8 @@ def main(argv):
     cmake_problems, wired = check_cmake(cmake_path, found)
     problems += cmake_problems
 
+    iss_problems, wizard = check_installer(root)
+    problems += iss_problems
 
     for problem in problems:
         print(f"FAIL  {problem}")
@@ -778,6 +980,8 @@ def main(argv):
 
     print(f"OK    {os.path.relpath(cmake_path, root)}: "
           f"{len(wired)} resource-wiring assertions met")
+    for line in wizard:
+        print(f"OK    installer: {line}")
 
     print("\nWINDOWS RESOURCES OK")
     return 0

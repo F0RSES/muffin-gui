@@ -411,7 +411,14 @@ jobs:
           # why this is a Windows job rather than a step in `release`. The image may already carry Inno
           # Setup; install it only when it does not. One step because step scope is not shared -- a path
           # resolved here would not survive into a later step.
-          $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          #
+          # Both majors are candidates. Inno Setup 7 installs beside 6 rather than over it, so a runner
+          # holding either is usable, and a list naming only "Inno Setup 6" would report "ISCC.exe not
+          # found" on a machine that has the current release. Newest first, because the script asks for
+          # a feature the 6 line only gained late.
+          $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+                          "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
+                          "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
                           "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")
           $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) {
@@ -419,7 +426,24 @@ jobs:
             $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           }
           if (-not $iscc) { throw "ISCC.exe not found (looked in: $($candidates -join ', '))" }
-          Write-Output "compiler: $iscc"
+
+          # WizardStyle's appearance modes -- the `dark` packaging/windows_installer.iss asks for --
+          # arrived in Inno Setup 6.6.0, and an older compiler refuses the value and fails the build.
+          # Saying so here names the version and the fix; ISCC's own error names a directive and leaves
+          # the reader to work out which of the two is stale. Read the number out of the file rather
+          # than out of `choco`, which did not necessarily install it.
+          #
+          # $isccVer is deliberately not called $ver: the $ver two lines below is the release tag, and
+          # a gate that compares the tag against 6.6 would pass on every runner and mean nothing.
+          $raw = (Get-Item $iscc).VersionInfo.ProductVersion
+          if (-not ($raw -match '^\d+(\.\d+){1,3}')) {
+            throw "cannot read a version out of ISCC at ${iscc}: '$raw'"
+          }
+          $isccVer = [version]$Matches[0]
+          if ($isccVer -lt [version]'6.6') {
+            throw "ISCC $isccVer at $iscc is older than 6.6. WizardStyle=modern dark needs the appearance modes added in 6.6.0; install a newer Inno Setup."
+          }
+          Write-Output "compiler: $iscc (version $isccVer)"
 
           $ver = $env:GITHUB_REF_NAME -replace '^v', ''
           New-Item -ItemType Directory -Force -Path pkg | Out-Null

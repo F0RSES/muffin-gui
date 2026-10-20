@@ -81,7 +81,54 @@ OutputDir={#OutputDir}
 OutputBaseFilename={#AppName}-Setup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
-WizardStyle=modern
+
+; The wizard's look. `modern` is a base style (white page content, and the bevel between the top
+; panel and the page content is hidden) and `dark` is an appearance mode layered on it, which is why
+; they are two space-separated words in one value: the WizardStyle topic gives its valid values as
+; "one or more of the following, separated by spaces: classic modern light dark dynamic polar slate
+; stellar windows11 zircon ...", and its own examples include `modern dark`.
+;
+; Appearance modes are new in Inno Setup 6.6; an older compiler rejects the value outright. The
+; `installer` job therefore asserts the ISCC version before compiling rather than finding out on a
+; tag build, and it also looks for Inno Setup 7, which installs beside 6 rather than over it.
+;
+; `dark` is not decorative here: the application's own sheet is a dark one (#0B0C10 canvas, neon
+; accents), and a bright grey wizard was the one place in the release where the product did not look
+; like the product. Forced dark also decides which image directive is read: WizardImageFileDynamicDark
+; is documented as overriding WizardImageFile "when using WizardStyle with dynamic mode and Windows is
+; in dark mode. Ignored otherwise", so with a forced mode the plain names below are what take effect
+; and only one image each is needed.
+WizardStyle=modern dark
+
+; The two banners, both rendered by packaging/make-wizard-images.py from the same coordinates as
+; src/resources/icons/app.svg, so the installer shows the application's mark rather than a picture of
+; it. The sizes are that script's BANNER_SIZE and SMALL_SIZE, chosen from the [Setup] reference: the
+; tall image's area keeps a 164:314 aspect ratio and measures 202x386 at 100% DPI, with "an image
+; larger than 202x386 ... recommended to avoid the image looking blurry on higher-DPI systems" and
+; Inno's built-in art at 240x459 -- so 240x459. The small image's area is square, 58x58 at 100% DPI,
+; and Inno's built-in is 147x147, which is what is shipped here.
+;
+; BMP because that is what the directives take; .png is accepted too but a BMP has no decoder to
+; agree with, and these files are checked as bytes by packaging/check-win-resources.py, which also
+; regenerates them and fails if the committed bytes are not what the script produces. Both paths are
+; anchored to {#SourcePath} like every other file here: ISCC resolves a relative WizardImageFile
+; against the directory of the script, and a missing file is a compile error -- which, with the
+; `installer` job gated on a tag, would otherwise be the first anyone ever learned.
+WizardImageFile={#SourcePath}wizard_image.bmp
+WizardSmallImageFile={#SourcePath}wizard_small.bmp
+; The colour used to fill any space around the image that the bitmap does not cover. Both images match
+; their areas closely but not exactly (240:459 against an area of 202:386), and the tall one is a
+; fraction off, so a sliver can show at some DPI settings. Inno's own default for a forced dark mode
+; is #2e3a3f -- already dark, not the light halo it would have been under the old light default -- but
+; the application's canvas is #0B0C10, so that is what both fills are set to: the banner should be
+; unable to disagree with the window it is standing in for. WizardImageBackColor covers the tall image
+; and WizardSmallImageBackColor the square one; they are separate directives.
+WizardImageBackColor=#0B0C10
+WizardSmallImageBackColor=#0B0C10
+; Stretched or shrunk to fit, which is Inno's default (WizardImageStretch=yes) and is stated so that
+; the reason the banners can be one fixed size is written down next to them.
+WizardImageStretch=yes
+
 UninstallDisplayIcon={app}\{#AppName}.exe
 UninstallDisplayName={#AppName}
 
