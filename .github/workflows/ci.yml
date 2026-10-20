@@ -409,40 +409,74 @@ jobs:
         run: |
           # Inno Setup's compiler is Delphi/Windows-only and Ubuntu ships no innosetup package, which is
           # why this is a Windows job rather than a step in `release`. The image may already carry Inno
-          # Setup; install it only when it does not. One step because step scope is not shared -- a path
-          # resolved here would not survive into a later step.
+          # Setup. One step because step scope is not shared -- a path resolved here would not survive
+          # into a later step.
           #
           # Both majors are candidates. Inno Setup 7 installs beside 6 rather than over it, so a runner
           # holding either is usable, and a list naming only "Inno Setup 6" would report "ISCC.exe not
-          # found" on a machine that has the current release. Newest first, because the script asks for
-          # a feature the 6 line only gained late.
+          # found" on a machine that has the current release. The newest of them is then chosen by the
+          # compiler's own version, not by the folder it lives in: the number in the directory name is
+          # the product line, which can lag the version stamped on ISCC.exe either way.
           $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
                           "${env:ProgramFiles}\Inno Setup 7\ISCC.exe",
                           "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
                           "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")
-          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $iscc) {
-            choco install innosetup --yes --no-progress
-            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if (-not $iscc) { throw "ISCC.exe not found (looked in: $($candidates -join ', '))" }
 
           # WizardStyle's appearance modes -- the `dark` packaging/windows_installer.iss asks for --
           # arrived in Inno Setup 6.6.0, and an older compiler refuses the value and fails the build.
-          # Saying so here names the version and the fix; ISCC's own error names a directive and leaves
-          # the reader to work out which of the two is stale. Read the number out of the file rather
-          # than out of `choco`, which did not necessarily install it.
-          #
+          # This is the version floor the whole step works against; naming it once keeps the gate and
+          # the error message agreeing with each other.
+          $min = [version] '6.6'
+
+          # Return the newest compiler among the candidates, or $null when none is present or none
+          # carries a readable version. Read the number out of the file rather than out of `choco`,
+          # which did not necessarily install it. ProductVersion is what Inno Setup fills in, but it is
+          # the short "6.6" while FileVersion is the full "6.6.0.0"; taking the higher of the two lets
+          # the gate judge the compiler's real capability however this particular build stamped it, so
+          # a runner that only populates one of the fields is still read correctly instead of guessing.
+          function Select-Iscc {
+            $best = $null
+            foreach ($c in $candidates) {
+              if (-not (Test-Path $c)) { continue }
+              $info = (Get-Item $c).VersionInfo
+              $ver = $null
+              foreach ($raw in @($info.ProductVersion, $info.FileVersion)) {
+                if ($raw -match '^\d+(\.\d+){1,3}') {
+                  $v = [version] $Matches[0]
+                  if (-not $ver -or $v -gt $ver) { $ver = $v }
+                }
+              }
+              if ($ver -and (-not $best -or $ver -gt $best.Version)) {
+                $best = [pscustomobject] @{ Path = $c; Version = $ver }
+              }
+            }
+            return $best
+          }
+
+          # "An ISCC.exe exists" is NOT "an ISCC.exe is new enough": windows-2022 ships an Inno Setup 6.x
+          # that predates 6.6, so the previous gate -- which only reached for Chocolatey when *nothing*
+          # was found -- fell straight through to the throw on exactly the machine that needed the
+          # upgrade. Fetch a current release whenever the newest compiler is missing or below the floor,
+          # then rescan. `upgrade` installs the package when choco has no record of it (the image can
+          # pre-install Inno Setup outside choco) and brings it to latest when it does; --force re-runs
+          # the installer even if choco already reports the latest, so the on-disk ISCC.exe is really
+          # overwritten rather than left at the pre-installed old copy.
+          $found = Select-Iscc
+          if (-not $found -or $found.Version -lt $min) {
+            if ($found) { Write-Output "existing ISCC $($found.Version) at $($found.Path) is below $min -- upgrading via Chocolatey" }
+            choco upgrade innosetup --yes --no-progress --force
+            $found = Select-Iscc
+          }
+
+          if (-not $found) { throw "ISCC.exe not found (looked in: $($candidates -join ', '))" }
+          if ($found.Version -lt $min) {
+            throw "ISCC $($found.Version) at $($found.Path) is still older than $min after a Chocolatey upgrade. WizardStyle=modern dark needs the appearance modes added in 6.6.0; the choco innosetup package must be bumped."
+          }
+
           # $isccVer is deliberately not called $ver: the $ver two lines below is the release tag, and
           # a gate that compares the tag against 6.6 would pass on every runner and mean nothing.
-          $raw = (Get-Item $iscc).VersionInfo.ProductVersion
-          if (-not ($raw -match '^\d+(\.\d+){1,3}')) {
-            throw "cannot read a version out of ISCC at ${iscc}: '$raw'"
-          }
-          $isccVer = [version]$Matches[0]
-          if ($isccVer -lt [version]'6.6') {
-            throw "ISCC $isccVer at $iscc is older than 6.6. WizardStyle=modern dark needs the appearance modes added in 6.6.0; install a newer Inno Setup."
-          }
+          $iscc = $found.Path
+          $isccVer = $found.Version
           Write-Output "compiler: $iscc (version $isccVer)"
 
           $ver = $env:GITHUB_REF_NAME -replace '^v', ''
