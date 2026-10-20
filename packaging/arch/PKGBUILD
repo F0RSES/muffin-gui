@@ -33,6 +33,13 @@ _realname="zapret-muffin-gui"
 source=("${_realname}-${pkgver}.tar.gz::https://github.com/${_github}/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('ce0cca49b8b806e0c2c65710518de9c2ee7959ecd78ab5161b1d4e94c34c36a2')
 
+# !debug: pacman >= 6.0 would split every ELF with unstripped symbols into a separate
+# muffin-debug-0.4.2-1-x86_64.pkg.tar.zst, so the CI artifact check ("exactly one
+# .pkg.tar.zst") would fail on a perfectly good build. We ship no debug intent, so suppress it.
+# !strip keeps the binaries byte-identical to the build output instead of half-stripping them
+# now that no debug package is being produced from the removed symbols.
+options=('!debug' '!strip')
+
 build() {
   cd "$srcdir/$_realname-$pkgver"
 
