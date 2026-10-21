@@ -158,13 +158,23 @@ QString portableFirewallBlurb(int qnum, bool apply)
 // may never arrive at all — and state() stays Stopping while MainWindow greys the stop button out,
 // leaving the user with no way out. Hence: no wait without a deadline.
 //
-//   kTerminateGraceMs        — SIGTERM alone, before SIGKILL plus a name-based sweep.
+//   kTerminateGraceMs        — how long the exit that a SIGTERM may produce is waited for before the
+//                             run is taken down by force. It is NOT a courtesy period in which the
+//                             payload is invited to shut itself down: on the elevated path the payload
+//                             never hears the signal at all, so every millisecond of this wait is
+//                             dead time spent sitting in the GUI thread with the Stop button pressed
+//                             and nothing on screen moving. Three seconds of it bought nothing but a
+//                             slow button. What the deadline is for is the opposite shape — a run this
+//                             backend genuinely owns (an already-root GUI, or a plain direct payload),
+//                             where SIGTERM lands and the exit arrives in milliseconds; waitForFinished
+//                             returns the moment it does, so the polite path costs what it costs and
+//                             is never padded. The number only bounds the case where no exit is coming.
 //   kPrivilegedStepTimeoutMs — how long a privileged cleanup command may take before the GUI is
 //                             released anyway. It is a deadline for WAITING, not for the command: an
 //                             in-flight iptables script is left running (see goDeaf) rather than
 //                             aborted halfway, because a half-run rule set is the one state the GUI
 //                             genuinely cannot describe.
-constexpr int kTerminateGraceMs = 3000;
+constexpr int kTerminateGraceMs = 500;
 constexpr int kPrivilegedStepTimeoutMs = 5000;
 
 // A payload name reduced to characters that are safe to interpolate into a privileged shell script.
@@ -859,9 +869,10 @@ void LinuxBackend::stopPortable()
         if (child->waitForFinished(kTerminateGraceMs) && m_phase != PortablePhase::Payload)
             return;      // finished() already ran, and the teardown with it
 
-        // Still silent after its grace period. terminate() reached the pkexec wrapper and nobody
-        // passed the word on; the surviving payload is also what keeps the pipes open, so the exit
-        // notification a normal stop is sequenced on may never arrive at all. Do not wait for it.
+        // Still silent after the shortest wait that a run this backend truly owns needs. terminate()
+        // reached the pkexec wrapper and nobody passed the word on; the surviving payload is also what
+        // keeps the pipes open, so the exit notification a normal stop is sequenced on may never arrive
+        // at all. Waiting longer cannot change that — it only holds this thread, and the button, still.
         forceStop(QStringLiteral("LinuxBackend: nfqws did not report an exit within %1 ms of SIGTERM; "
                                  "forcing it down and cleaning up behind it")
                       .arg(kTerminateGraceMs));

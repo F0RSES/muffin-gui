@@ -3159,13 +3159,14 @@ int main(int argc, char **argv)
         // state() sits in Stopping with the stop button greyed out and no way out.
         //
         // What this fixture reproduces is the observable half of that: a child that answers SIGTERM
-        // with nothing. Measured on this host, `terminate()` leaves QProcess still Running with
-        // `waitForFinished(3000)` returning false, which is exactly the moment the old code used to
-        // hand the stop over to a notification that may never come. The TERM trap is installed before
-        // the background job forks, so the job inherits the ignored disposition too (a signal nobody
-        // can catch cannot be forwarded), and it keeps running — holding the pipes — after the process
-        // QProcess owns has been SIGKILLed. Both loops end by themselves in about a dozen seconds so
-        // no orphan outlives the test run.
+        // with nothing. Measured on this host, `terminate()` leaves QProcess still Running and
+        // `waitForFinished()` returns false only when its deadline expires, which is exactly the moment
+        // the old code used to hand the stop over to a notification that may never come — and the moment
+        // the deadline decides how long the user waits for it. The TERM trap is installed before the
+        // background job forks, so the job inherits the ignored disposition too (a signal nobody can
+        // catch cannot be forwarded), and it keeps running — holding the pipes — after the process
+        // QProcess owns has been SIGKILLed. Both loops end by themselves in about a dozen seconds so no
+        // orphan outlives the test run.
         {
             using S = IZapretBackend::State;
             const QString fwLog = tmp.filePath(QStringLiteral("firewall-stubborn.log"));
@@ -3196,14 +3197,23 @@ int main(int argc, char **argv)
             check(pumpUntil([&] { return probe->sawLog(QStringLiteral("stubborn-fake up")); }, 3000),
                   "stubborn: the payload is up and ignoring SIGTERM");
 
+            // The wait a stop is allowed to hold the GUI thread for, measured rather than asserted
+            // from a constant: the reported symptom was a Stop button that sat still for seconds, and
+            // the fix is that it no longer does. The deadline itself is 500 ms; the extra room is for
+            // the spawn of the rescue command, which a loaded CI host can be slow to reap.
+            QElapsedTimer stopClock;
+            stopClock.start();
             lb.stop();
-            // Three seconds of terminate grace, then a rescue the stand-in answers at once. Anything
-            // much longer than that means the stop is waiting on a notification again — the bug.
+            const qint64 blockedMs = stopClock.elapsed();
             check(pumpUntil([&] { return lb.state() == S::Stopped; }, 9000),
                   "stubborn: the run is released even though the payload ignored SIGTERM");
             check(lb.state() == S::Stopped, "stubborn: and it ends Stopped, not Stopping");
-            check(probe->sawLog(QStringLiteral("did not report an exit within")),
-                  "stubborn: the log says the graceful exit never arrived");
+            check(blockedMs < 1500,
+                  QStringLiteral("stubborn: the stop held this thread for %1 ms, not a grace period "
+                                 "nothing can answer").arg(blockedMs));
+            check(probe->sawLog(QStringLiteral("did not report an exit within 500 ms")),
+                  "stubborn: the log says the graceful exit never arrived, and names the short "
+                  "deadline it gave up on rather than the three seconds this used to sit out");
             check(probe->sawLog(QStringLiteral("sending SIGKILL to the stalled payload wrapper")),
                   "stubborn: the wrapper this backend owns is killed outright");
             check(probe->sawLog(QStringLiteral("sweeping 'fake-stubborn.sh' by name")),

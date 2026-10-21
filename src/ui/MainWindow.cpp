@@ -1123,6 +1123,25 @@ QString MainWindow::statusKind(IZapretBackend::State state)
     return QStringLiteral("stopped");
 }
 
+PowerButton::Mode MainWindow::powerMode(IZapretBackend::State state)
+{
+    switch (state) {
+    case IZapretBackend::State::Running:
+        return PowerButton::Mode::Active;
+    // Both in-flight states wear the breathing ring. A teardown is a transition like a launch, and the
+    // one look the window has for "something is happening, press will not help" has to cover both —
+    // otherwise the Stop press and the stateChanged that follows it draw two different buttons for one
+    // state, which is exactly the drift the statics in this class exist to prevent.
+    case IZapretBackend::State::Starting:
+    case IZapretBackend::State::Stopping:
+        return PowerButton::Mode::Busy;
+    case IZapretBackend::State::Stopped:
+    case IZapretBackend::State::Error:
+        break;
+    }
+    return PowerButton::Mode::Idle;
+}
+
 bool MainWindow::canStartFrom(IZapretBackend::State state)
 {
     switch (state) {
@@ -1157,9 +1176,9 @@ bool MainWindow::canStopFrom(IZapretBackend::State state)
     case IZapretBackend::State::Stopping:
         break;
     }
-    // Stopping is not a second stop waiting to happen: re-issuing one re-ran "terminating nfqws" ten
-    // seconds after the first, and in the direct-payload path it blocks the GUI in
-    // waitForFinished(3000) for a death that is already under way.
+    // Stopping is not a second stop waiting to happen: re-issuing one ran "terminating nfqws" a second
+    // time while the first was still in flight, and in the direct-payload path it blocks the GUI inside
+    // waitForFinished() for a death that is already under way.
     return false;
 }
 
@@ -1205,8 +1224,18 @@ bool MainWindow::rowFollowsCycle(bool manualRound, bool rowIsActive)
 
 void MainWindow::updateStatusUi()
 {
-    const IZapretBackend::State state = m_manager->state();
+    renderStatus(m_manager->state());
+    updateTrayIcon();
+}
 
+// Draw the two status controls for one backend state.
+//
+// Split out of updateStatusUi() because the Stop press has to draw a state the backend has not reported
+// yet — see showStoppingFeedback() — and a second copy of this mapping is how a chip and a button start
+// telling two stories about one run. The tray icon is deliberately NOT drawn here: it reads the
+// manager's live state and has no part in what the window itself shows.
+void MainWindow::renderStatus(IZapretBackend::State state)
+{
     if (m_statusLabel) {
         // The chip's word is the plain state, not the sentence the old pill carried: "CONNECTED" beside a
         // dot, with the strategy's name reserved for the log and the tray tooltip, which both say it more
@@ -1228,12 +1257,7 @@ void MainWindow::updateStatusUi()
     // the rail's power glyph used to share lands here: which look it wears, and what it says it is waiting
     // for when a press would be refused.
     if (m_power) {
-        PowerButton::Mode mode = PowerButton::Mode::Idle;
-        if (state == IZapretBackend::State::Running)
-            mode = PowerButton::Mode::Active;
-        else if (state == IZapretBackend::State::Starting || state == IZapretBackend::State::Stopping)
-            mode = PowerButton::Mode::Busy;
-        m_power->setMode(mode);
+        m_power->setMode(powerMode(state));
         m_power->setEnabled(canStart || canStop);
         m_power->setToolTip(canStop ? stopActionHint()
                                     : (busy.isEmpty() ? startActionHint() : busy));
@@ -1241,8 +1265,33 @@ void MainWindow::updateStatusUi()
 
     for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it)
         it.value()->setSelected(it.key() == m_selectedId);
+}
 
-    updateTrayIcon();
+// Answer a Stop press on screen before the teardown it asked for has begun.
+//
+// This is not a courtesy. The stop runs in this thread, and the backend waits inside it — a bounded
+// wait, but a wait: waitForFinished() on the payload, then the privileged cleanup commands, each with
+// its own deadline. While a slot is executing the event loop is not, so the repaint that
+// stateChanged(Stopping) would normally cause cannot happen until the teardown is over. That is what
+// the report was: a button pressed, and nothing at all moving on screen for seconds.
+//
+// So the stopping look is applied here, from the state the teardown is about to enter, and painted
+// synchronously — repaint(), not update(), because update() only queues the paint for a loop that is
+// about to be busy. Once the backend does report, updateStatusUi() redraws from the real state, which
+// is why the look drawn here has to come from the same table the signal draws from, and not a second
+// one invented for the press.
+void MainWindow::showStoppingFeedback()
+{
+    renderStatus(IZapretBackend::State::Stopping);
+
+    // A window that is hidden — stopped from the tray or from the shortcut — has nothing to paint, and
+    // repainting a hidden widget is work thrown away.
+    if (m_power && m_power->isVisible())
+        m_power->repaint();
+    if (m_statusLabel && m_statusLabel->isVisible())
+        m_statusLabel->repaint();
+    if (m_statusDot && m_statusDot->isVisible())
+        m_statusDot->repaint();
 }
 
 void MainWindow::updateTrayIcon()
@@ -1445,7 +1494,18 @@ void MainWindow::onStopRequested()
     // running — the second "terminating nfqws" ten seconds after the first.
     if (!canStopFrom(m_manager->state()))
         return;
+
+    // Before the stop, not after it: the teardown blocks this thread, so a look applied afterwards is a
+    // look the user sees only when the waiting is already over.
+    showStoppingFeedback();
+
     m_manager->stop();
+
+    // Reconcile with what the backend actually did. A stop it refused, or one that had nothing to do,
+    // left the window claiming a teardown that never started; a stop that ran to completion in the call
+    // above has already reported Stopping or Stopped through onStateChanged, and this redraws the same
+    // thing it drawn there. One mapping, two callers, no window that can lie about a run.
+    updateStatusUi();
 }
 
 // A row was pressed. The window decides what selection means: this is now the profile the power button

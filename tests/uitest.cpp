@@ -837,6 +837,31 @@ static void testWindowPolicy()
     check(MainWindow::blockedReason(S::Running).contains(QStringLiteral("остановите")),
           "while a run is up, the missing action is named as the stop");
 
+    // ---- what a Stop press has to look like, before the backend can say so ----
+    //
+    // The teardown runs on the GUI thread and waits inside it, so the repaint stateChanged(Stopping)
+    // would normally cause cannot land until the wait is over. The window therefore draws the stopping
+    // look itself, ahead of the signal — and the look it draws has to be the same one the signal draws,
+    // or a press shows a button the run then contradicts. These are the two halves of that: a look that
+    // exists for a teardown, and one that differs from the live run it replaced.
+    check(MainWindow::powerMode(S::Running) == PowerButton::Mode::Active,
+          "a live run wears the green button whose press means stop");
+    check(MainWindow::powerMode(S::Stopping) == PowerButton::Mode::Busy,
+          "a teardown in flight is the busy look — the breathing ring the press can paint early");
+    check(MainWindow::powerMode(S::Stopping) == MainWindow::powerMode(S::Starting),
+          "both in-flight states draw one look, so the press and the signal cannot disagree");
+    check(MainWindow::powerMode(S::Stopping) != MainWindow::powerMode(S::Running),
+          "and pressing Stop visibly changes the button rather than leaving it as it was");
+    for (const S s : {S::Stopped, S::Starting, S::Running, S::Stopping, S::Error}) {
+        // One table for both controls: the chip goes busy over precisely the states the button does.
+        check((MainWindow::powerMode(s) == PowerButton::Mode::Busy)
+                  == (MainWindow::statusKind(s) == QStringLiteral("starting")),
+              "the button's busy look and the chip's busy colour cover the same states");
+    }
+    check(MainWindow::powerMode(S::Stopped) == PowerButton::Mode::Idle
+              && MainWindow::powerMode(S::Error) == PowerButton::Mode::Idle,
+          "nothing running and nothing in flight is the plain idle button, failure included");
+
     // Which card a backend failure belongs to. A pending start owns the answer while the attempt is
     // unresolved; otherwise the live run does; otherwise the window's memory of the last live run —
     // which is exactly what a deferred portable error needs, because the manager has forgotten the

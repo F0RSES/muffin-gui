@@ -2,6 +2,7 @@
 
 #include "IZapretBackend.h"
 #include "PingIndicator.h"   // PingStatus is stored per host for seeding new rows mid-cycle
+#include "PowerButton.h"     // PowerButton::Mode is the return type of the state -> look mapping
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -32,7 +33,6 @@ namespace zapret {
 class LogPanel;
 class PingIndicator;
 class PingService;
-class PowerButton;
 class ProfileCard;
 class Settings;
 class SettingsPage;
@@ -69,6 +69,12 @@ public:
     static QString connectionText(IZapretBackend::State state);
     // QSS dynamic-property value for [statusKind="..."].
     static QString statusKind(IZapretBackend::State state);
+
+    // The power button's look for a backend state: green to act on a live run, purple and breathing
+    // while a transition is in flight, plain when there is nothing to stop. Static because two call
+    // sites draw this button — the state-changed path, and the Stop press that answers ahead of the
+    // backend (see showStoppingFeedback) — and one state must not be able to mean two looks.
+    static PowerButton::Mode powerMode(IZapretBackend::State state);
 
     // ---- action gating: pure predicates again, so the whole matrix is checkable without a process ----
     //
@@ -261,6 +267,14 @@ private:
     void beginPingTest();
     void endPingTest();
     void updateStatusUi();
+    // Draw the chip and the power button for one state, with no reference to what the manager says it
+    // is in. updateStatusUi() calls it with the real state; the Stop press calls the feedback below,
+    // which uses the state the teardown is about to enter. Kept apart from the tray so a look can be
+    // painted before a signal exists.
+    void renderStatus(IZapretBackend::State state);
+    // Paint the stopping look at once, synchronously, before the stop that blocks this thread starts —
+    // a queued repaint would not land until the teardown was over, which is the delay this answers.
+    void showStoppingFeedback();
     void updateTrayIcon();
     void applyTheme();
     void requestQuit();

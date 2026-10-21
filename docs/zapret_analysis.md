@@ -95,10 +95,12 @@ otherwise wait forever:
    to the `nfqws` it spawned; the surviving grandchild also holds the write end of the stdout/stderr
    pipes `QProcess` reads, and Qt withholds `finished()` until those reach EOF. A stop sequenced on
    that notification can therefore wait forever with the GUI stuck in `Stopping` and its stop button
-   disabled. So every wait on the stop path has a deadline — 3 s of terminate grace, then 5 s for
-   whichever privileged cleanup step is in flight — and when a deadline expires the run is released
+   disabled. So every wait on the stop path has a deadline — 0.5 s of terminate grace (a courtesy period
+   the payload by design cannot hear, so it is a bound on the wait, not a chance to shut down), then 5 s
+   for whichever privileged cleanup step is in flight — and when a deadline expires the run is released
    anyway, with the log naming the commands to check by hand. A released GUI plus a warning beats a
-   frozen one.
+   frozen one. The window also paints the stopping look *before* calling `stop()`, since the teardown
+   blocks the very event loop that would otherwise deliver it (see `MainWindow::showStoppingFeedback`).
 
 Four properties are load-bearing, and `coretest` asserts each one on the generated text:
 
