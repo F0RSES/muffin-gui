@@ -87,9 +87,15 @@ otherwise wait forever:
 3. **FirewallDown** — the same batch, deleting (`stop()`, a payload that exits by itself, a payload
    that fails to exec, and a `stop()` queued during phase 1 all reach it).
 4. **Rescue** — only when a stop is not coming back: `SIGKILL` the child this backend owns, abandon it
-   without destroying it, and run one bounded privileged command that sweeps the payload by name
-   (`pkill -9 -f '[n]fqws'`, bracketed so the sweep cannot match the command line carrying it) and,
+   without destroying it, and run one bounded privileged command that sweeps the payload by exact
+   process name (`pkill -9 -x nfqws`, clamped to the kernel's 15-character `comm` limit) and,
    when the rules are installed, deletes them in a subshell whose failure cannot undo the sweep.
+
+   `-x` and not `-f` is the load-bearing part: `-f` matches the whole command line of every process on
+   the host, so a wrapper launched as `muffin-cli --preset "nfqws (portable)"` — whose argv mentions
+   the word without being the payload — was swept away mid-stop by its own cleanup ("zsh: killed", no
+   JSON, rules left installed). The bracketed pattern (`'[n]fqws'`) this used instead only hid the
+   literal from the one command line carrying it; it protected nobody else's argv.
 
    It exists because the process `QProcess` controls is `pkexec`, and `pkexec` does not forward SIGTERM
    to the `nfqws` it spawned; the surviving grandchild also holds the write end of the stdout/stderr

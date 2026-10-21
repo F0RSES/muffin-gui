@@ -183,7 +183,9 @@ private:
     // The command now running is a rescue command, not part of the ordinary phase machine: its exit
     // (or its silence) releases the GUI, and nothing else may read it as a payload or firewall result.
     bool m_forcedStop = false;
-    // The payload's own binary name, recorded when it is launched — what `pkill -f` sweeps on stop.
+    // The payload's own binary name, recorded when it is launched — what the rescue sweeps on stop,
+    // by exact process name (`pkill -x`). Never `-f`: a command line that only mentions the name can
+    // belong to the GUI or CLI that asked for this very cleanup, and sweeping it kills the caller.
     QString m_payloadName;
     // Whether that payload was handed to pkexec. The rescue inherits exactly this: an ordinary user's
     // pkill cannot signal a root payload, and asking polkit to authorise killing a process the user

@@ -38,6 +38,7 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTextStream>
 #include <QVector>
@@ -3221,11 +3222,23 @@ int main(int argc, char **argv)
             check(probe->errors().isEmpty(), "stubborn: a forced stop is not reported as a failure");
             check(!lb.isRunning(), "stubborn: nothing is managed afterwards");
 
-            // One command does both jobs, in the order that cannot be undone, and the pattern is
-            // bracketed so the sweep cannot match the command line carrying it and kill its own shell.
+            // One command does both jobs, in the order that cannot be undone — and the sweep matches
+            // the payload's process NAME. The command line is where the caller that asked for this
+            // cleanup lives: (8l) runs that difference against real processes.
             const QString txt = readFileText(fwLog);
-            check(txt.contains(QStringLiteral("pkill -9 -f '[f]ake-stubborn.sh'")),
-                  "stubborn: the sweep brackets its own pattern instead of matching itself");
+            check(txt.contains(QStringLiteral("pkill -9 -x 'fake-stubborn\\.s'")),
+                  "stubborn: the sweep matches the payload by exact process name");
+            check(!txt.contains(QStringLiteral("pkill -9 -x 'fake-stubborn\\.sh'")),
+                  "stubborn: matched by the name the kernel can show, not the one it truncates away");
+            check(!txt.contains(QStringLiteral("pkill -9 -f")),
+                  "stubborn: nothing is swept by command line, where the caller's own argv lives");
+            check(!txt.contains(QStringLiteral("[f]ake-stubborn")),
+                  "stubborn: the bracketed -f pattern is gone, not merely added to");
+            int sweeps = 0;
+            for (int at = txt.indexOf(QStringLiteral("pkill -9")); at != -1;
+                 at = txt.indexOf(QStringLiteral("pkill -9"), at + 1))
+                ++sweeps;
+            check(sweeps == 1, "stubborn: one sweep, not a stack of patterns that cannot match");
             check(txt.contains(QStringLiteral("remove nfqueue rules")),
                   "stubborn: the same command takes the NFQUEUE rules back out");
             check(txt.indexOf(QStringLiteral("force-stop the payload")) <
@@ -3286,6 +3299,130 @@ int main(int argc, char **argv)
                   "hanged: the teardown was tried, then attempted again inside the rescue command");
             qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
             pumpFor(300);
+        }
+
+        // (8l) The sweep must spare the process that asked for it.
+        //
+        // The production bug, run end to end rather than read out of a recorded script: the rescue
+        // swept with `pkill -9 -f '[n]fqws'`, and `-f` matches the command line of EVERY process on
+        // the host. A wrapper started as `muffin-cli --preset "nfqws (portable)"` carries the
+        // payload's name in its argv without being the payload, so the cleanup SIGKILLed the very
+        // process waiting for it — "zsh: killed", no JSON on stdout, the rules left installed.
+        // Bracketing the pattern hid it from the one command line carrying it; only exact name
+        // matching (`-x`) keeps every other argv out of the match. Both halves are proven here: an
+        // unmanaged process actually named for the payload dies, and a process that only mentions
+        // that name survives. Fixtures are named `nfqws-fixture`, never `nfqws`, so this sweep can
+        // never reach a payload the developer is really running.
+        {
+            using S = IZapretBackend::State;
+            if (QStandardPaths::findExecutable(QStringLiteral("pkill")).isEmpty()) {
+                out << "  SKIP  sweep targeting needs a host with pkill\n";
+            } else {
+                const QString fwLog = tmp.filePath(QStringLiteral("firewall-sweep.log"));
+                QFile::remove(fwLog);
+                // Records the rule phases, then EXECUTES the rescue: here the sweep itself is what is
+                // under test, so it has to really run. The iptables half is still only recorded —
+                // this host's kernel is not a test fixture.
+                const QString runner = makeScript(
+                    tmp.filePath(QStringLiteral("fake-firewall-sweep.sh")), QStringLiteral(
+                        "printf '%s\\n' \"$3\" >> '%1'\n"
+                        "case \"$3\" in *'force-stop the payload'*) exec /bin/sh -c \"$3\";; esac\n"
+                        "exit 0\n").arg(fwLog));
+                check(!runner.isEmpty(), "sweep: a firewall stand-in that runs the rescue is written");
+                qputenv("ZAPRET_GUI_FIREWALL_PROG", runner.toLocal8Bit());
+
+                // The payload: ignores SIGTERM, so the stop is forced and the rescue is left holding
+                // the job. Its name is 13 characters, which is what the kernel puts in
+                // /proc/<pid>/comm — the only field `pkill -x` compares against.
+                const QString payload = makeScript(tmp.filePath(QStringLiteral("nfqws-fixture")),
+                    QStringLiteral("trap '' TERM INT\n"
+                                   "echo \"nfqws-fixture up: $*\"\n"
+                                   "i=0\n"
+                                   "while [ \"$i\" -lt 12 ]; do sleep 1; i=$((i+1)); done\n"));
+                check(!payload.isEmpty(), "sweep: payload fixture written");
+
+                // A process that only MENTIONS that name in its argv, exactly like the CLI's
+                // `--preset "nfqws-fixture (portable)"`. Under `-f` this is the one that died.
+                const QString holder = makeScript(tmp.filePath(QStringLiteral("fake-cli-holder.sh")),
+                    QStringLiteral("echo \"holder up: $*\"\n"
+                                   "i=0\n"
+                                   "while [ \"$i\" -lt 20 ]; do sleep 1; i=$((i+1)); done\n"));
+                check(!holder.isEmpty(), "sweep: holder fixture written");
+                QProcess mentioner;
+                mentioner.start(holder, {QStringLiteral("nfqws-fixture (portable)"),
+                                         QStringLiteral("--test"), QStringLiteral("discord.com")});
+                check(mentioner.waitForStarted(5000),
+                      "sweep: the process whose argv mentions the name is up");
+
+                // An unmanaged orphan carrying the payload's name — the shape the rescue exists for,
+                // because terminate() reaches only the child QProcess owns. It is started through a
+                // short-lived shell so it outlives that shell and nothing here waits on it.
+                const QString pidFile = tmp.filePath(QStringLiteral("orphan.pid"));
+                QFile::remove(pidFile);
+                QProcess spawn;
+                spawn.setProgram(QStringLiteral("/bin/sh"));
+                spawn.setArguments({QStringLiteral("-c"),
+                                    QStringLiteral("'%1' --qnum=9101 >/dev/null 2>&1 & echo $! > '%2'")
+                                        .arg(payload, pidFile)});
+                spawn.start();
+                spawn.waitForFinished(5000);
+                qint64 orphanPid = 0;
+                check(pumpUntil([&] {
+                    QFile p(pidFile);
+                    if (!p.open(QIODevice::ReadOnly))
+                        return false;
+                    orphanPid = QString::fromUtf8(p.readAll()).trimmed().toLongLong();
+                    return orphanPid > 0;
+                }, 5000), "sweep: the unmanaged payload orphan is up");
+
+                // A pid is known before the exec has landed, so comm still names the parent for a
+                // moment. Wait for the kernel to call it `nfqws-fixture` rather than assuming the
+                // fixture's file name is what the sweep will see.
+                const QString commPath = QStringLiteral("/proc/%1/comm").arg(orphanPid);
+                check(pumpUntil([&] {
+                    QFile c(commPath);
+                    return c.open(QIODevice::ReadOnly)
+                        && QString::fromUtf8(c.readAll()).trimmed()
+                               == QLatin1String("nfqws-fixture");
+                }, 5000),
+                      "sweep: and the orphan is named for the payload, which is what -x reads");
+
+                LinuxBackend lb;
+                BackendProbe *probe = new BackendProbe(&lb);
+                QString err;
+                check(lb.start(portableStrategy(QStringLiteral("portable-sweep"), payload, false), &err),
+                      QStringLiteral("sweep: start accepted (%1)").arg(err));
+                check(pumpUntil([&] { return lb.state() == S::Running; }, 8000),
+                      "sweep: the run comes up");
+                check(pumpUntil([&] { return probe->sawLog(QStringLiteral("nfqws-fixture up")); }, 4000),
+                      "sweep: and the payload is up, ignoring SIGTERM");
+
+                lb.stop();
+                check(pumpUntil([&] { return lb.state() == S::Stopped; }, 12000),
+                      "sweep: the forced stop is released");
+                check(probe->sawLog(QStringLiteral("sweeping 'nfqws-fixture' by name")),
+                      "sweep: the rescue announces the name it sweeps");
+                check(probe->sawLog(QStringLiteral("LinuxBackend: killed 'nfqws-fixture'")),
+                      "sweep: the rescue's own report comes back through the log");
+
+                // The orphan this backend never owned is gone. Nothing else could have killed it: the
+                // fixture ignores TERM, and its loop outlasts this block by design.
+                check(pumpUntil([&] {
+                    return !QFileInfo::exists(QStringLiteral("/proc/%1").arg(orphanPid));
+                }, 5000), "sweep: the unmanaged orphan was swept by name");
+
+                // ...and the process that merely mentioned the name is still alive. This is the whole
+                // regression: under `pkill -9 -f` this is where the CLI died instead of printing JSON.
+                check(mentioner.state() == QProcess::Running,
+                      "sweep: an argv that only mentions the payload name survives the cleanup");
+                check(QFileInfo::exists(QStringLiteral("/proc/%1").arg(mentioner.processId())),
+                      "sweep: and the caller that asked for the sweep lives to report it");
+
+                mentioner.kill();
+                mentioner.waitForFinished(3000);
+                qunsetenv("ZAPRET_GUI_FIREWALL_PROG");
+                pumpFor(200);
+            }
         }
     }
 #else

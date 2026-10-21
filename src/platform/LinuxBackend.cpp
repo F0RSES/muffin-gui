@@ -196,21 +196,56 @@ QString portableProcessName(const QString &raw)
     return clean;
 }
 
-// The `pkill -f` pattern for a payload name: the first character in brackets.
+// /proc/<pid>/comm — the field `pkill -x` compares against — holds the basename of the exec'd file
+// and the kernel caps it at 15 characters (TASK_COMM_LEN - 1, one for the NUL).
+constexpr int kCommNameMax = 15;
+
+// The `pkill -x` pattern for a payload name: every ERE metacharacter the sanitizer allows, escaped.
 //
-// The bracket is the whole trick. The pattern still matches the payload's own argv, but it can no
-// longer match the command line that CARRIES it — `pkexec /bin/sh -c pkill -9 -f '[n]fqws'` contains
-// no literal "nfqws" — so the sweep cannot kill the very shell that is running it, and cannot match
-// itself either.
-QString portableProcessPattern(const QString &name)
+// pkill reads its argument as an extended regular expression even in exact-match mode, and
+// portableProcessName() admits '.' and '+'. Left bare, "nfqws.old" would also match "nfqwsXold";
+// escaping keeps the sweep to the name it was handed.
+QString portableProcessRegex(const QString &name)
 {
-    return QStringLiteral("[%1]%2").arg(name.left(1), name.mid(1));
+    QString escaped;
+    for (const QChar c : name)
+    {
+        if (c == QLatin1Char('.') || c == QLatin1Char('+'))
+            escaped.append(QLatin1Char('\\'));
+        escaped.append(c);
+    }
+    return escaped;
 }
 
-// The whole force-stop command: sweep the payload by name, then take its nfqueue rules back out.
+// The process name a sweep for `name` can actually match.
 //
-// Two properties decide the layout.
+// `pkill -x` compares against /proc/<pid>/comm, and the kernel caps that field at 15 characters
+// (TASK_COMM_LEN - 1). The cap is the kernel's, not pkill's, so no implementation can ever show
+// more: asking for a longer name is a sweep that is guaranteed to match nothing, and procps says as
+// much on stderr ("pattern that searches for process name longer than 15 characters will result in
+// zero matches"). Sweeping the truncated form is therefore not a fallback bolted onto the full name
+// — it is the only name that was ever there to match, and the full name when it fits.
+QString portableSweepName(const QString &name)
+{
+    return name.left(kCommNameMax);
+}
+
+// The whole force-stop command: sweep the payload by process name, then take its nfqueue rules back
+// out.
 //
+// Three properties decide the layout.
+//
+//   * The sweep matches the process NAME (`pkill -x`), never the command line (`pkill -f`), because
+//     the command line is not the payload's private information: `-f` hits every process on the host
+//     whose argv merely mentions the word — the GUI or muffin-cli that asked for this cleanup among
+//     them, because a preset named "nfqws (portable)" puts exactly that string into the caller's argv
+//     (`muffin-cli --preset "nfqws (portable)" --test …`). The rescue then SIGKILLs the very process
+//     waiting for it: the wrapper dies with "zsh: killed", the rules stay installed, and the console
+//     never prints its JSON. An abandoned rescue does the same to whichever run comes next. Exact
+//     name matching cannot make that mistake — the carrying shell is `sh`, the wrapper is `pkexec`,
+//     the caller is the GUI or muffin-cli, and none of them is named `nfqws`. It is also why the
+//     bracketed pattern (`'[n]fqws'`) is gone: hiding the literal from the one command line carrying
+//     it was a workaround for `-f`, and never protected anybody else's argv.
 //   * The payload dies FIRST and unconditionally, because nothing else here can reach it.
 //     terminate()/kill() only ever acts on the process QProcess owns, which is the pkexec wrapper;
 //     the payload is that wrapper's child, orphaned the moment the wrapper dies. `-9` because a
@@ -226,14 +261,13 @@ QString portableProcessPattern(const QString &name)
 QString forceStopScript(const QString &rawName, bool removeRules, int qnum)
 {
     const QString name = portableProcessName(rawName);
-    const QString pat = portableProcessPattern(name);
 
     QString s;
-    s += QStringLiteral("# zapret GUI: force-stop the payload '%1' by name\n").arg(name);
+    s += QStringLiteral("# zapret GUI: force-stop the payload '%1' by process name\n").arg(name);
     s += QStringLiteral("if command -v pkill >/dev/null 2>&1; then\n");
-    s += QStringLiteral("  if pkill -9 -f '%1'; then echo \"LinuxBackend: killed '%2'\"\n"
+    s += QStringLiteral("  if pkill -9 -x '%1'; then echo \"LinuxBackend: killed '%2'\"\n"
                         "  else echo \"LinuxBackend: no surviving '%2' process found\"; fi\n")
-               .arg(pat, name);
+               .arg(portableProcessRegex(portableSweepName(name)), name);
     s += QStringLiteral("else\n");
     s += QStringLiteral("  echo \"LinuxBackend: pkill is unavailable on this host; '%1' may still be "
                         "running\"\n").arg(name);
