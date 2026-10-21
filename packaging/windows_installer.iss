@@ -29,7 +29,7 @@
 ; entry and VersionInfoVersion from the value read here, so if the two drift apart the version the
 ; user sees in Windows and the version the GUI reports at runtime disagree. Bump them together.
 #ifndef AppVersion
-  #define AppVersion "0.4.8"
+  #define AppVersion "0.4.9"
 #endif
 
 ; VersionInfoVersion wants a dotted version; a bare tag usually carries three parts, so pad here
