@@ -57,6 +57,10 @@ public:
     // The watchdog's cadence, in the same shape as the ping interval above — and exposed for the same
     // reason: the range is a promise too, and it is the one this page has to keep with the model.
     QSpinBox *watchdogIntervalField() const { return m_watchdogSpin; }
+    // The motion switch. Exposed because a checkbox that is drawn but never read, or read but never
+    // written, looks exactly like a checkbox that works — and because unticking it is the only way to
+    // reach the policy from outside, which is what the whole feature is for.
+    QCheckBox *animationsField() const { return m_animationsCheck; }
 
     // True when `dir` is a zapret root, or a base that contains a windows/ or linux/ root.
     static bool pathLooksValid(const QString &dir);
@@ -91,6 +95,7 @@ private:
 
     QCheckBox *m_startLastCheck = nullptr;
     QCheckBox *m_trayCheck = nullptr;
+    QCheckBox *m_animationsCheck = nullptr;   // the motion switch, written through Motion
     QLabel *m_trayNote = nullptr;    // shown only when this desktop has no tray host at all
     QComboBox *m_themeBox = nullptr;
     QSpinBox *m_pingSpin = nullptr;

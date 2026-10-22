@@ -86,6 +86,10 @@ void SettingsPage::build()
 
     i18nText(m_startLastCheck = new QCheckBox(this), QStringLiteral("settings.start_last"));
     i18nText(m_trayCheck = new QCheckBox(this), QStringLiteral("settings.tray"));
+    // Motion joins the two switches rather than the themed fields below them because it is the same kind
+    // of answer: one tick that changes what the application does, not what it looks like.
+    i18nText(m_animationsCheck = new QCheckBox(this), QStringLiteral("settings.animations"));
+    i18nTip(m_animationsCheck, QStringLiteral("settings.animations_tip"));
 
     // A ticked box that cannot be honoured is worse than an explanation. Sessions without a StatusNotifier
     // host (bare GNOME, a plain Wayland compositor) report no tray at all, so spell out what closing the
@@ -161,6 +165,7 @@ void SettingsPage::build()
     form->addRow(QString(), m_startLastCheck);
     form->addRow(QString(), m_trayCheck);
     form->addRow(QString(), m_trayNote);
+    form->addRow(QString(), m_animationsCheck);
     form->addRow(themeRowLabel, themeField);
     form->addRow(pingRowLabel, pingField);
     // Right under the ping interval, because that is what it is: a second cadence, measured in minutes
@@ -212,6 +217,7 @@ void SettingsPage::loadFromSettings()
     m_pathEdit->setText(path);
     m_startLastCheck->setChecked(m_settings.startLastOnLaunch());
     m_trayCheck->setChecked(m_settings.minimizeToTray());
+    m_animationsCheck->setChecked(m_settings.animationsEnabled());
     m_pingSpin->setValue(m_settings.pingIntervalSec());
     m_watchdogSpin->setValue(m_settings.watchdogIntervalMin());
     m_trayNote->setVisible(!QSystemTrayIcon::isSystemTrayAvailable());
@@ -232,6 +238,9 @@ void SettingsPage::apply()
     m_settings.setZapretPath(m_pathEdit->text().trimmed());
     m_settings.setStartLastOnLaunch(m_startLastCheck->isChecked());
     m_settings.setMinimizeToTray(m_trayCheck->isChecked());
+    // One write, and Motion reads it in answer to Settings::changed() — the page does not touch the
+    // policy itself, so a Save from anywhere (the tray, a script editing the store) moves it the same way.
+    m_settings.setAnimationsEnabled(m_animationsCheck->isChecked());
     m_settings.setPingIntervalSec(m_pingSpin->value());
     m_settings.setWatchdogIntervalMin(m_watchdogSpin->value());
     m_settings.setTheme(m_themeBox->currentData().toString());

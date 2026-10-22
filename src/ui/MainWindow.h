@@ -194,10 +194,22 @@ public:
     HistoryPage *historyPage() const { return m_historyPage; }
     // The card a failure was pinned to ("" when none). Test hook for the inline error badge.
     QString errorCardId() const;
+    // The power button. A hook for the same reason as cardCount(): the pulse is the window's claim about
+    // a backend state, and a suite cannot check a claim it has no way to look at.
+    PowerButton *powerButton() const { return m_power; }
+    // Draw the chip and the button for one state, without a manager ever having been in it. The same
+    // entry point showStoppingFeedback() uses — and for the same reason: a teardown is a state the
+    // backend will not sit still for, so the only way to check what the window draws for it is to ask
+    // for that drawing directly.
+    void renderStatusFor(IZapretBackend::State state) { renderStatus(state); }
     // The watchdog's live cadence, and whether it is armed. Hooks for the same reason as cardCount():
     // a timer the suite cannot look at is a timer it cannot prove was re-armed when the setting moved.
     int watchdogTimerInterval() const;
     bool watchdogTimerActive() const;
+    // The profile rows in the order the list draws them, which is not the order the hash holds them in.
+    // The entrance cascade needs that order — the third row has to rise third — and a test that wants to
+    // prove a row finished where the layout put it needs the same list to walk.
+    QList<ProfileCard *> cardRows() const;
 
     // ---- rail navigation ------------------------------------------------------------
     // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
@@ -219,6 +231,10 @@ public:
     };
     int currentPage() const;
     void setCurrentPage(int page);
+    // The page the stack is showing, as a widget. currentPage() names which one; this is the handle the
+    // motion checks need, because a fade is a fact about a widget and not about an index. Defined out of
+    // line for the same reason currentPage() is: the stack itself is only forward-declared here.
+    QWidget *currentPageWidget() const;
     // The page to fall back to when a full-screen view is closed: always the dashboard, never whichever
     // page happened to be up before.
     Q_INVOKABLE void showDashboard();
@@ -361,6 +377,11 @@ private:
     void wire();
 
     void populateCards();
+    // The entrance cascade for the profile rows: the first kCardRiseRows rows rise into their layout
+    // slots one step behind the last, the rest simply appear. Called when the page is opened and when
+    // the list is rebuilt while it is the page being looked at — the two moments a row arrives in front
+    // of somebody — and a no-op when motion is off.
+    void animateCardEntrance();
     // Open and close the manual ping round: the button's own wording is the only place the state is
     // visible, so both halves go through here and the round cannot be left running by an early return.
     // The watchdog is not pessimism: the service bails out of a cycle without a word when it is

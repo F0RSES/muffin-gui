@@ -6,6 +6,7 @@
 #include "HistoryStore.h"
 #include "LanguageManager.h"
 #include "LogPanel.h"
+#include "Motion.h"
 #include "PingIndicator.h"
 #include "PingService.h"
 #include "PowerButton.h"
@@ -135,6 +136,10 @@ MainWindow::MainWindow(QWidget *parent)
 {
     m_errorClock.start();
     m_settings = new Settings(this);
+    // The motion policy is read before a single widget exists. A page that fades in on a machine that
+    // was told not to move is the exact thing the settings box exists to prevent, and the only way to be
+    // sure nothing moved first is to settle that before anything can.
+    Motion::setEnabled(m_settings->animationsEnabled());
     m_manager = new ZapretManager(this);
     // Parentless by design: PingService lives on its own thread, and parenting it here would move it
     // back to the GUI thread. It is deleted explicitly in the destructor.
@@ -879,6 +884,11 @@ int MainWindow::currentPage() const
     return m_pages ? m_pages->currentIndex() : PageDashboard;
 }
 
+QWidget *MainWindow::currentPageWidget() const
+{
+    return m_pages ? m_pages->currentWidget() : nullptr;
+}
+
 void MainWindow::setCurrentPage(int page)
 {
     if (!m_pages)
@@ -888,7 +898,21 @@ void MainWindow::setCurrentPage(int page)
                        : (page == PageProfiles) ? PageProfiles
                        : (page == PageSettings) ? PageSettings
                                                 : PageDashboard;
+    const int previous = m_pages->currentIndex();
     m_pages->setCurrentIndex(target);
+
+    // The new page appears rather than arriving. One hook covers every way a page is chosen — the four
+    // rail glyphs, the way back, Ctrl+S, and the startup "no strategies yet" prompt — because they all
+    // come through here, and navigation that animates from the rail but snaps from the keyboard is
+    // exactly the inconsistency a second call site would create.
+    //
+    // Nothing is animated when the stack did not move: re-selecting the page that is already up is a
+    // no-op for the user, and a fade would make it one.
+    if (target != previous) {
+        Motion::fadeIn(m_pages->currentWidget());
+        if (target == PageProfiles)
+            animateCardEntrance();
+    }
 
     // The rail's glyphs are the only page indicator left, so they have to follow the stack even when the
     // page was chosen from code — a lit journal icon over the dashboard is worse than no icon at all. The
@@ -1291,6 +1315,47 @@ void MainWindow::populateCards()
             m_selectedId = list.first().id.isEmpty() ? list.first().filePath : list.first().id;
     }
     updateStatusUi();
+
+    // The other moment a row appears in front of somebody: the list was rebuilt while its page was up —
+    // a rescan, a delete, a folder that moved. Rows the user is not looking at are not worth animating,
+    // which is what the page check is for; opening the page is the other half, in setCurrentPage().
+    if (currentPage() == PageProfiles)
+        animateCardEntrance();
+}
+
+QList<ProfileCard *> MainWindow::cardRows() const
+{
+    QList<ProfileCard *> rows;
+    if (!m_cardLayout)
+        return rows;
+    // The layout, not the hash: m_cards is keyed by strategy id and iterates in whatever order its
+    // buckets give, and a cascade that rose in hash order would arrive in a different order every run.
+    for (int i = 0; i < m_cardLayout->count(); ++i) {
+        if (ProfileCard *card = qobject_cast<ProfileCard *>(m_cardLayout->itemAt(i)->widget()))
+            rows.append(card);
+    }
+    return rows;
+}
+
+void MainWindow::animateCardEntrance()
+{
+    if (!Motion::enabled() || !m_cardLayout)
+        return;
+    // Nothing to cascade while the list itself is not what the page is showing: a folder that yielded no
+    // presets draws the placeholder, and animating the rows behind it would be motion on a widget the
+    // user has already been told is not there.
+    if (!m_stack || m_stack->currentWidget() != m_scroll)
+        return;
+
+    // The layout has to have said where each row goes before any of them is moved off that place: the
+    // entrance both starts and ends on the layout's own answer, and read too early it would be (0, 0) —
+    // every row rising from and back to the top-left corner of the host.
+    m_cardLayout->activate();
+
+    const QList<ProfileCard *> rows = cardRows();
+    const int limit = qMin(rows.size(), Motion::kCardRiseRows);
+    for (int i = 0; i < limit; ++i)
+        Motion::riseIn(rows.at(i), i * Motion::kCardStepMs);
 }
 
 QString MainWindow::statusText(IZapretBackend::State state, const QString &strategyName)
@@ -1477,6 +1542,12 @@ void MainWindow::renderStatus(IZapretBackend::State state)
     // for when a press would be refused.
     if (m_power) {
         m_power->setMode(powerMode(state));
+        // The breath says "this run is live, or is being taken down" — the two states in which something
+        // is actually running in the path. A launch in flight is not one of them: it has no run to be
+        // alive yet, and the ring already breathes for it (see powerMode). Driven off the state rather
+        // than off the mode because the mode cannot tell those two apart.
+        m_power->setPulsing(state == IZapretBackend::State::Running
+                            || state == IZapretBackend::State::Stopping);
         m_power->setEnabled(canStart || canStop);
         m_power->setToolTip(canStop ? stopActionHint()
                                     : (busy.isEmpty() ? startActionHint() : busy));
@@ -2432,6 +2503,11 @@ void MainWindow::onSettingsChanged()
         m_manager->setZapretDir(path);   // reload() -> onStrategiesLoaded -> populateCards()
 
     applyTheme();
+    // The motion switch, and the one channel that carries it. Setting it before the widgets below are
+    // re-read is what makes an untick take effect on a pulse that is running right now rather than on
+    // the next state change: Motion::setEnabled lands everything in flight, and updateStatusUi() at the
+    // end of this function re-decides what should be running.
+    Motion::setEnabled(m_settings->animationsEnabled());
     m_ping->setIntervalSec(m_settings->pingIntervalSec());
     // The watchdog's cadence is the other number the page can move, and this is the only channel that
     // tells the window about it. startWatchdog() ignores a write that did not change the interval, so

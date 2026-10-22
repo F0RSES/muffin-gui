@@ -642,6 +642,22 @@ const QVector<Row> &catalog()
             "Ocultar en la bandeja al cerrar", "Beim Schließen in den Tray minimieren",
             "关闭窗口时缩到托盘", "Masquer dans la barre système à la fermeture",
             "बंद करते समय ट्रे में छिपाएँ"),
+        // The motion switch. Named for what it turns on rather than for the machines it exists for:
+        // a user who never heard of "weak PCs" still has to recognise the word for the movement.
+        ROW("settings.animations", "Включить анимации", "Enable animations",
+            "Activar animaciones", "Animationen aktivieren", "启用动画",
+            "Activer les animations", "एनिमेशन सक्षम करें"),
+        ROW("settings.animations_tip",
+            "Плавная смена страниц, появление карточек и пульсация кнопки. Выключите на слабом ПК.",
+            "Smooth page changes, card entrances and the power button's pulse. Turn off on a slow PC.",
+            "Cambios de página, entrada de tarjetas y pulso del botón suaves. "
+            "Desactívelo en un equipo lento.",
+            "Weiche Seitenwechsel, Karten-Einblendung und Puls der Power-Taste. "
+            "Auf schwachen PCs deaktivieren.",
+            "页面切换、卡片出现与电源按钮脉冲更平滑。在低配电脑上可关闭。",
+            "Changements de page, apparition des cartes et pulsation du bouton fluides. "
+            "Désactivez sur un PC peu puissant.",
+            "पेज बदलने, कार्ड दिखने और पावर बटन की धड़कन के एनिमेशन। कमजोर पीसी पर इन्हें बंद करें।"),
         ROW("settings.tray_note",
             "В этой среде нет области уведомлений: закрытие окна остановит zapret и выйдет из приложения.\n"
             "Настройка сохранена — если панель запустится позже, трей появится сам.",

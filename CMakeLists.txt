@@ -108,6 +108,7 @@ set(ZAPRET_UI_SOURCES
     src/ui/Theme.cpp
     src/ui/LanguageManager.cpp
     src/ui/Settings.cpp
+    src/ui/Motion.cpp
     src/ui/PingIndicator.cpp
     src/ui/PowerButton.cpp
     src/ui/ProfileCard.cpp
@@ -124,6 +125,7 @@ set(ZAPRET_UI_HEADERS
     src/ui/Theme.h
     src/ui/LanguageManager.h
     src/ui/Settings.h
+    src/ui/Motion.h
     src/ui/PingIndicator.h
     src/ui/PowerButton.h
     src/ui/ProfileCard.h

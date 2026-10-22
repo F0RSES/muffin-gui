@@ -11,9 +11,10 @@
 //
 // A constructed MainWindow is covered in exactly one place — the watchdog section, which needs the real
 // catalog and journal to prove that a dead bypass turns into an offer. It is built without a window
-// manager (offscreen), never shown, and its three seams that would need a desktop, a network or a root
-// prompt are overridden; the store it reads is the redirected test identity, and that section skips
-// itself when the harness has not redirected it.
+// manager (offscreen) and its three seams that would need a desktop, a network or a root prompt are
+// overridden; the store it reads is the redirected test identity, and that section skips itself when the
+// harness has not redirected it. Motion is the one thing in the suite that has to put it on screen: a
+// page behind another page has nothing to appear on, so a fade can only be watched on a visible window.
 
 #include "BlockcheckEngine.h"
 #include "IZapretBackend.h"
@@ -23,6 +24,7 @@
 #include "LanguageManager.h"
 #include "LogPanel.h"
 #include "MainWindow.h"
+#include "Motion.h"
 #include "PingIndicator.h"
 #include "PingService.h"
 #include "PowerButton.h"
@@ -35,15 +37,17 @@
 #include "ZapretPaths.h"
 
 #include <QApplication>
-#include <QClipboard>
-#include <QColor>
-#include <QAbstractItemModel>
 #include <QBrush>
+#include <QCheckBox>
+#include <QClipboard>
+#include <QAbstractItemModel>
+#include <QColor>
 #include <QComboBox>
 #include <QDate>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
@@ -66,6 +70,7 @@
 #include <QTextLayout>
 #include <QToolButton>
 #include <QVariant>
+#include <QVBoxLayout>
 #include <QWidget>
 
 #include <QtTest/QTest>
@@ -121,6 +126,7 @@ static void testSettings()
         check(s.lastStrategyId().isEmpty(), "default lastStrategyId is empty");
         check(s.startLastOnLaunch() == false, "default startLastOnLaunch is false");
         check(s.minimizeToTray() == true, "default minimizeToTray is true");
+        check(s.animationsEnabled() == true, "default animationsEnabled is true");
         check(s.pingIntervalSec() == 5, "default ping interval is 5s");
         check(s.watchdogIntervalMin() == 5, "default watchdog interval is 5 min");
         check(Settings::kWatchdogDefaultIntervalMin == 5,
@@ -135,9 +141,10 @@ static void testSettings()
         s.setLastStrategyId(QStringLiteral("general"));
         s.setStartLastOnLaunch(true);
         s.setMinimizeToTray(false);
+        s.setAnimationsEnabled(false);
         s.setWatchdogIntervalMin(15);
         s.setTheme(QStringLiteral("system"));
-        check(changed.count() == 6, "each setter emits changed()");
+        check(changed.count() == 7, "each setter emits changed()");
 
         // The spinbox range is also enforced in the model, so a bad value cannot be persisted.
         s.setPingIntervalSec(900);
@@ -164,6 +171,7 @@ static void testSettings()
         check(reopened.lastStrategyId() == QLatin1String("general"), "lastStrategyId round-trip");
         check(reopened.startLastOnLaunch() == true, "startLastOnLaunch round-trip");
         check(reopened.minimizeToTray() == false, "minimizeToTray round-trip");
+        check(reopened.animationsEnabled() == false, "animationsEnabled round-trip");
         check(reopened.theme() == QLatin1String("system"), "theme round-trip");
         check(reopened.pingIntervalSec() == 12, "ping interval round-trip");
         check(reopened.watchdogIntervalMin() == 15, "watchdog interval round-trip");
@@ -541,9 +549,14 @@ static void testPowerButton()
           "a live run wears the same green as the connected chip");
     check(button.glyph() == QStringLiteral("power"), "the default glyph is the power mark");
 
+    button.show();
+    QTest::qWait(10);        // a control nobody has put on screen is hidden, and nothing animates on it
+
     button.setMode(PowerButton::Mode::Busy);
     check(button.mode() == PowerButton::Mode::Busy, "mode is readable back");
-    check(button.glow() > 0.0 && button.glow() <= 1.0, "the pulse holds the glow in range");
+    QTest::qWait(300);
+    check(button.glow() > 0.0 && button.glow() < 1.0,
+          "the busy pulse is actually moving the halo, not merely started");
     button.setMode(PowerButton::Mode::Idle);
     check(qFuzzyCompare(button.glow(), 1.0), "leaving Busy parks the glow at full");
 
@@ -1898,10 +1911,197 @@ static void testHistoryPage()
           "two of three is its own amber band, because it is neither working nor broken");
 }
 
+// --------------------------------------------------------------------- Motion ----
+//
+// The three kinds of movement and the one switch over them, each checked the same way round: the motion
+// is running when it should be, it has STOPPED and cleaned up when it should not, and the widget is left
+// where its layout wanted it. That last part is the difference between an animation and an animation
+// that broke the screen, and it is invisible to any check that only asks whether one started.
+//
+// The window's own paths — setCurrentPage, populateCards, renderStatus — are exercised in the watchdog
+// section below, which is the one place a real window is built.
+static void testMotion()
+{
+    std::printf("\n[motion]\n");
 
+    const bool wasEnabled = Motion::enabled();
+    Motion::setEnabled(true);
 
+    check(Motion::enabled(), "motion is on by default: the design was drawn moving");
+    Motion::setEnabled(false);
+    check(!Motion::enabled(), "and the switch is readable back");
+    Motion::setEnabled(true);
 
+    // ---- a page appearing ----
+    {
+        QWidget page;
+        page.resize(320, 200);
+        page.show();
+        QTest::qWait(10);
+        check(page.graphicsEffect() == nullptr, "a widget nobody touched carries no effect");
 
+        Motion::fadeIn(&page, 120);
+        check(Motion::isMoving(&page), "fadeIn starts a run on the widget it was given");
+        auto *fx = qobject_cast<QGraphicsOpacityEffect *>(page.graphicsEffect());
+        check(fx != nullptr,
+              "…driven by an opacity effect: QWidget::windowOpacity is a window property and would fade "
+              "the whole application rather than the page inside it");
+        QTest::qWait(60);
+        check(fx && fx->opacity() > 0.0 && fx->opacity() <= 1.0,
+              QStringLiteral("…whose opacity is actually moving (%1)").arg(fx ? fx->opacity() : -1.0));
+        QTest::qWait(150);
+        check(!Motion::isMoving(&page), "…which ends by itself");
+        check(page.graphicsEffect() == nullptr,
+              "…and detaches: an effect left attached would tax every repaint the page goes on doing");
+        check(!Motion::isMoving(nullptr), "a null widget is simply not moving");
+        page.hide();
+    }
+
+    // ---- a row rising into place ----
+    {
+        QWidget host;
+        auto *lay = new QVBoxLayout(&host);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(4);
+        auto *one = new QWidget(&host);
+        auto *two = new QWidget(&host);
+        one->setFixedSize(300, 52);
+        two->setFixedSize(300, 52);
+        lay->addWidget(one);
+        lay->addWidget(two);
+        host.show();
+        QTest::qWait(10);
+        const QPoint oneRest = one->pos();
+        const QPoint twoRest = two->pos();
+        check(twoRest.y() > oneRest.y(), "the fixture layout stacked its two rows");
+
+        Motion::riseIn(one);
+        Motion::riseIn(two, Motion::kCardStepMs);
+        check(one->pos() == oneRest + QPoint(0, Motion::kCardLiftPx),
+              "a rising row starts below the slot the layout gave it");
+        check(Motion::isMoving(one) && Motion::isMoving(two),
+              "…and a staggered row is staged from the same moment rather than starting late");
+        QTest::qWait(Motion::kCardRiseMs + Motion::kCardStepMs + 150);
+        check(one->pos() == oneRest && two->pos() == twoRest,
+              "…and both land exactly where the layout said, not 14 px short of it");
+        check(one->graphicsEffect() == nullptr && two->graphicsEffect() == nullptr,
+              "…with no effect left behind on either row");
+        host.hide();
+    }
+
+    // ---- off means nothing moves, and nothing is installed in order not to ----
+    {
+        QWidget page;
+        auto *lay = new QVBoxLayout(&page);
+        auto *row = new QWidget(&page);
+        row->setFixedSize(200, 40);
+        lay->addWidget(row);
+        page.show();
+        QTest::qWait(10);
+        const QPoint rest = row->pos();
+
+        Motion::setEnabled(false);
+        Motion::fadeIn(&page);
+        Motion::riseIn(row);
+        check(page.graphicsEffect() == nullptr && row->graphicsEffect() == nullptr,
+              "with motion off, neither entrance installs an effect at all");
+        check(!Motion::isMoving(&page) && !Motion::isMoving(row), "…and neither is left running");
+        check(row->pos() == rest, "…and the row was never moved, so there is nothing to put back");
+
+        // The mid-flight case: unchecking the box lands what was already in the air.
+        Motion::setEnabled(true);
+        Motion::riseIn(row, 0, 600);
+        check(Motion::isMoving(row), "a long rise is in flight");
+        Motion::setEnabled(false);
+        check(!Motion::isMoving(row), "unchecking motion stops it where it stands");
+        check(row->pos() == rest && row->graphicsEffect() == nullptr,
+              "…and puts the row back with the effect off, rather than parking it mid-slide");
+        Motion::setEnabled(true);
+        page.hide();
+    }
+
+    // ---- the power button's breath ----
+    {
+        PowerButton button;
+        button.show();
+        QTest::qWait(10);     // the same rule as above: hidden means still, so show it first
+        check(!button.isPulsing(), "an idle button does not breathe");
+        check(button.graphicsEffect() == nullptr, "…and carries no effect at all");
+
+        button.setPulsing(true);
+        check(button.isPulsing(), "a live run breathes the whole control");
+        check(qobject_cast<QGraphicsOpacityEffect *>(button.graphicsEffect()) != nullptr,
+              "…as an opacity effect, the only thing that dims ring, halo and glyph by one factor");
+        QTest::qWait(300);
+        const qreal level = Motion::breathLevel(&button);
+        check(level > 0.0 && level <= 1.0, QStringLiteral("the breath stays in range (%1)").arg(level));
+        check(level < 1.0, "…and is actually below full, which is what makes it a pulse rather than a poke");
+
+        button.setPulsing(false);
+        check(!button.isPulsing(), "stopping the run stops the breath");
+        check(button.graphicsEffect() == nullptr,
+              "…taking the effect off, so the ring goes back through the fast paint path");
+        check(qFuzzyCompare(button.glow(), 1.0), "…and leaves no layer parked at a dimmed value");
+
+        // One rhythm at a time: while the button breathes, the halo holds still.
+        button.setPulsing(true);
+        check(qFuzzyCompare(button.glow(), 1.0),
+              "a breathing button's halo does not breathe alongside it on a second period");
+        Motion::setEnabled(false);
+        button.setPulsing(true);        // what the next renderStatus() does under the new policy
+        check(!button.isPulsing(), "with motion off, the same state leaves the button still");
+        check(button.graphicsEffect() == nullptr, "…and no effect was installed in order to be skipped");
+        Motion::setEnabled(true);
+        button.setPulsing(true);
+        check(button.isPulsing(), "…and switching motion back on brings the pulse back");
+        button.setPulsing(false);
+    }
+
+    // ---- the halo breath belongs to a transition, and to the same switch ----
+    {
+        PowerButton button;
+        Motion::setEnabled(true);
+        button.show();
+        QTest::qWait(10);     // the same rule as above: a widget never put on screen stays still
+        button.setMode(PowerButton::Mode::Busy);
+        QTest::qWait(300);
+        check(button.glow() < 1.0 && button.glow() > 0.0,
+              "a transition in flight breathes the halo");
+        Motion::setEnabled(false);
+        button.setPulsing(false);       // the window reconciles on every settings change
+        check(qFuzzyCompare(button.glow(), 1.0),
+              "…and the motion switch parks it at full rather than leaving it half-dimmed");
+        Motion::setEnabled(true);
+        button.setMode(PowerButton::Mode::Idle);
+        check(qFuzzyCompare(button.glow(), 1.0), "an idle button is a still one");
+        button.hide();
+    }
+
+    // ---- the settings page owns the switch ----
+    QTemporaryDir dir;
+    check(dir.isValid(), "temporary store for the motion checkbox");
+    Settings store(dir.filePath(QStringLiteral("muffin-motion.ini")));
+    check(store.animationsEnabled(), "an unset store means motion on");
+    {
+        SettingsPage settingsPage(store);
+        QCheckBox *box = settingsPage.animationsField();
+        check(box != nullptr, "the settings page carries the motion checkbox");
+        check(box && box->isChecked(), "…ticked, because the model says so");
+        check(box && box->text() == LanguageManager::tr(QStringLiteral("settings.animations")),
+              "…labelled from the catalog rather than from a literal written into the page");
+        check(box && box->toolTip() == LanguageManager::tr(QStringLiteral("settings.animations_tip")),
+              "…and its tooltip came from the catalog too");
+        if (box)
+            box->setChecked(false);
+        settingsPage.saveButton()->click();
+        check(!store.animationsEnabled(), "Save writes an untick through the model");
+        check(box && !box->isChecked(), "…and the commit did not re-read the form over the tick");
+        store.setAnimationsEnabled(true);        // a write from anywhere else
+        check(box && box->isChecked(), "an external write re-reads into the box");
+    }
+
+    Motion::setEnabled(wasEnabled);
+}
 
 // ------------------------------------------------------------------- Watchdog ----
 //
@@ -2237,6 +2437,93 @@ static void testWatchdog()
         check(window.confirms == 2, "neither asks the user anything");
         check(rotation.count() == 1, "…and neither switches a profile");
 
+        // ---- motion, on a window that is actually on screen ----
+        //
+        // Everything above drives a window nobody ever showed, which is the only honest way to test a
+        // journal and a watchdog without a desktop. Motion refuses a hidden widget — a page behind
+        // another page has nothing to appear on — so the fade, the cascade and the pulse can only be
+        // watched on a window that is on screen, and under the offscreen platform that is a call rather
+        // than a wish. This is also the only place the window's own three paths (setCurrentPage,
+        // populateCards, renderStatus) are checked rather than the primitives they call.
+        const bool motionWasOn = Motion::enabled();
+        Motion::setEnabled(true);
+        window.show();
+        QTest::qWait(40);
+
+        // The rows' resting places, taken while nothing animates them, so the entrance is measured
+        // against the layout's own answer rather than against a position it had not decided yet.
+        Motion::setEnabled(false);
+        window.setCurrentPage(MainWindow::PageDashboard);
+        window.setCurrentPage(MainWindow::PageProfiles);
+        QTest::qWait(40);
+        const QList<ProfileCard *> rows = window.cardRows();
+        QVector<QPoint> resting;
+        for (ProfileCard *card : rows)
+            resting.append(card->pos());
+        check(rows.size() >= 2,
+              QStringLiteral("the fixture list gives the entrance %1 rows to move").arg(rows.size()));
+        check(resting.size() >= 2 && resting.at(1).y() > resting.at(0).y(),
+              "the list laid its rows out one under the other before anything was asked to move");
+        bool installed = false;
+        for (ProfileCard *card : rows)
+            installed = installed || card->graphicsEffect() != nullptr;
+        check(!installed && !Motion::isMoving(window.currentPageWidget()),
+              "opening a page with motion off installs nothing and leaves nothing running");
+
+        Motion::setEnabled(true);
+        window.setCurrentPage(MainWindow::PageDashboard);
+        check(Motion::isMoving(window.currentPageWidget()),
+              "opening a page fades the widget the stack is now showing, not the index it was given");
+        QTest::qWait(Motion::kPageFadeMs + 120);
+        check(!Motion::isMoving(window.currentPageWidget())
+                  && window.currentPageWidget()->graphicsEffect() == nullptr,
+              "…which ends by itself and takes the effect off, so a page that appeared once stops "
+              "paying for it on every later repaint");
+
+        window.setCurrentPage(MainWindow::PageProfiles);
+        int rising = 0;
+        for (ProfileCard *card : std::as_const(rows))
+            rising += Motion::isMoving(card) ? 1 : 0;
+        check(rising == qMin(rows.size(), Motion::kCardRiseRows),
+              QStringLiteral("%1 of the list's %2 rows rise into place (the cap is %3)")
+                  .arg(rising)
+                  .arg(rows.size())
+                  .arg(Motion::kCardRiseRows));
+        QTest::qWait(Motion::kCardRiseMs + Motion::kCardStepMs * Motion::kCardRiseRows + 250);
+        int landed = 0;
+        for (int i = 0; i < rows.size(); ++i) {
+            if (!Motion::isMoving(rows.at(i)) && rows.at(i)->pos() == resting.value(i)
+                    && rows.at(i)->graphicsEffect() == nullptr)
+                ++landed;
+        }
+        check(landed == rows.size(),
+              "every row finished exactly where the layout had put it with motion off, effect gone — "
+              "an entrance that parked a row 14 px low would break the list long after it looked right");
+
+        // The pulse is the window's claim about a backend state, so it is checked through the window.
+        window.setCurrentPage(MainWindow::PageDashboard);
+        QTest::qWait(Motion::kPageFadeMs + 60);
+        PowerButton *power = window.powerButton();
+        check(power != nullptr, "the window exposes the button the pulse belongs to");
+        window.renderStatusFor(IZapretBackend::State::Running);
+        check(power->mode() == PowerButton::Mode::Active && power->isPulsing(),
+              "a run that is up breathes the whole control");
+        window.renderStatusFor(IZapretBackend::State::Stopping);
+        check(power->mode() == PowerButton::Mode::Busy && power->isPulsing(),
+              "a teardown breathes too — it is a run coming down, not an absence of one");
+        window.renderStatusFor(IZapretBackend::State::Starting);
+        check(power->mode() == PowerButton::Mode::Busy && !power->isPulsing(),
+              "a launch in flight has no run to be alive yet, so the ring breathes instead of the button");
+        QTest::qWait(300);
+        check(power->glow() < 1.0, "…and that ring is measurably mid-breath, not merely started");
+        window.renderStatusFor(IZapretBackend::State::Stopped);
+        check(!power->isPulsing() && power->graphicsEffect() == nullptr
+                  && qFuzzyCompare(power->glow(), 1.0),
+              "an idle machine is a still button at full brightness: the pulse must not contradict the "
+              "word the chip is showing");
+        window.hide();
+        Motion::setEnabled(motionWasOn);
+
         store.setLastStrategyId(QString());   // do not leave the fixture's route to a later run
     }
 
@@ -2272,6 +2559,7 @@ int main(int argc, char **argv)
     testPingService();
     testDownloadDialog();
     testHistoryPage();
+    testMotion();
     testWatchdog();
 
     std::printf("\n=== %s (%d failures) ===\n", g_failures ? "FAILED" : "ALL PASS", g_failures);

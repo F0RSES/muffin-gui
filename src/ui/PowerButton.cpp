@@ -1,5 +1,6 @@
 #include "PowerButton.h"
 
+#include "Motion.h"
 #include "Theme.h"
 
 #include <QPainter>
@@ -62,6 +63,11 @@ PowerButton::PowerButton(QWidget *parent)
 
 PowerButton::~PowerButton()
 {
+    // Both rhythms die with this widget: the halo animation is parented where it is created, and
+    // Motion's breath run is parented to the widget it moves and unregisters itself in its own
+    // destructor — so the breath needs no call here at all. The stop below is the older half of the
+    // contract: it keeps a frame that was already queued from writing a glow level into a button that
+    // is partway through being destroyed.
     if (m_pulse)
         m_pulse->stop();
 }
@@ -106,11 +112,23 @@ void PowerButton::setMode(Mode mode)
         return;
     m_mode = mode;
     refreshGlyph();
-    if (mode == Mode::Busy)
-        startPulse();
-    else
-        stopPulse();
+    reconcileMotion();
     update();
+}
+
+void PowerButton::setPulsing(bool on)
+{
+    m_pulsing = on;
+    // Reconciled unconditionally rather than returned from early when the request did not change: this
+    // is also how the button re-reads the motion policy after the settings box was moved, and the two
+    // calls have to look the same from here.
+    reconcileMotion();
+    update();
+}
+
+bool PowerButton::isPulsing()
+{
+    return m_pulsing && Motion::isBreathing(this);
 }
 
 void PowerButton::setGlow(qreal level)
@@ -143,6 +161,44 @@ void PowerButton::stopPulse()
     update();
 }
 
+// Which of the two rhythms runs.
+//
+// Only one of them at a time, because two cycles of different lengths on the same circle beat against
+// each other and read as a flicker rather than as a pulse: the halo breathes through a transition that
+// has no run to report yet, and the whole button breathes while there is one — the request the window
+// makes, and the policy the settings box decides.
+void PowerButton::reconcileMotion()
+{
+    // isHidden(), not isVisible(): the widget's own flag, which stays true until something has actually
+    // been put on screen. A window hidden to the tray, a dashboard behind another page and a button
+    // constructed but never shown all answer "hidden", and none of them is worth animating; showEvent()
+    // and hideEvent() below are what re-run this on each of those transitions.
+    const bool motion = Motion::enabled() && !isHidden();
+    if (motion && m_pulsing)
+        startBreath();
+    else
+        stopBreath();
+    if (motion && !m_pulsing && m_mode == Mode::Busy)
+        startPulse();
+    else
+        stopPulse();
+}
+
+// The breath is the one place this widget lets an effect own a piece of its appearance, and it is the
+// piece that has to be an effect: fading the ring, its bloom and its glyph by the same factor is exactly
+// what "the whole button is dimming" means, and multiplying one paintEvent's alphas would have to be
+// written into every layer of that paint separately. Motion detaches the effect again when the breath is
+// stopped, so a button that is not pulsing keeps the fast paint path the rest of this class is drawn for.
+void PowerButton::startBreath()
+{
+    Motion::startBreath(this, Motion::kBreathFloor, Motion::kBreathMs);
+}
+
+void PowerButton::stopBreath()
+{
+    Motion::stopBreath(this);
+}
+
 QPixmap PowerButton::glyphPixmap(const QColor &tint, int px) const
 {
     if (m_glyph.isEmpty() || px <= 0)
@@ -170,6 +226,24 @@ void PowerButton::leaveEvent(QEvent *event)
     m_hovered = false;
     update();
     QAbstractButton::leaveEvent(event);
+}
+
+// Coming back on screen restarts whatever the state asked for; going off screen stops it. The button
+// lives on the dashboard, so opening the journal or the history hides it, and an endless pulse over a
+// hidden widget is frames spent on a paint nobody will look at — the same argument the settings switch
+// makes about the whole interface, applied to one control.
+void PowerButton::showEvent(QShowEvent *event)
+{
+    QAbstractButton::showEvent(event);
+    reconcileMotion();
+}
+
+void PowerButton::hideEvent(QHideEvent *event)
+{
+    // The request survives: what is parked is the animation, not the state that asked for it.
+    stopBreath();
+    stopPulse();
+    QAbstractButton::hideEvent(event);
 }
 
 void PowerButton::paintEvent(QPaintEvent *)

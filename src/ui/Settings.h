@@ -66,6 +66,14 @@ public:
     bool minimizeToTray() const;         // hide to tray instead of quitting on close
     void setMinimizeToTray(bool on);
 
+    // ---- motion ----
+    // Whether the interface may move at all: page fades, card entrances, the power button's breath. On
+    // by default, because the design was drawn moving; the switch exists for the machines the movement
+    // costs. Read once by MainWindow at startup and again on every write, and it is the whole policy —
+    // no widget consults this directly, they all ask Motion, which the window keeps in step with it.
+    bool animationsEnabled() const;
+    void setAnimationsEnabled(bool on);
+
     // ---- ping ----
     int pingIntervalSec() const;         // clamped to 3..60
     void setPingIntervalSec(int seconds);

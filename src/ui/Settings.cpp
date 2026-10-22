@@ -16,6 +16,7 @@ const QString kZapretPath        = QStringLiteral("zapret/path");
 const QString kLastStrategyId    = QStringLiteral("strategy/last");
 const QString kStartLastOnLaunch = QStringLiteral("startup/startLast");
 const QString kMinimizeToTray    = QStringLiteral("ui/minimizeToTray");
+const QString kAnimations        = QStringLiteral("ui/animations");
 const QString kPingIntervalSec   = QStringLiteral("ping/intervalSec");
 const QString kWatchdogInterval  = QStringLiteral("watchdog/intervalMin");
 const QString kTheme             = QStringLiteral("ui/theme");
@@ -156,6 +157,12 @@ void Settings::setStartLastOnLaunch(bool on) { write(kStartLastOnLaunch, on); }
 // MainWindow refuses to hide when the platform has no system tray, so this can never strand the app.
 bool Settings::minimizeToTray() const { return read<bool>(kMinimizeToTray, true); }
 void Settings::setMinimizeToTray(bool on) { write(kMinimizeToTray, on); }
+
+// Default on too, and for the opposite reason: the interface was drawn moving, so a first run that did
+// not would be a different application. Unlike the tray this has no platform half — the box is the whole
+// answer, and Motion::setEnabled is the only thing that reads it.
+bool Settings::animationsEnabled() const { return read<bool>(kAnimations, true); }
+void Settings::setAnimationsEnabled(bool on) { write(kAnimations, on); }
 
 int Settings::pingIntervalSec() const
 {
