@@ -6,6 +6,7 @@
 
 #include <QElapsedTimer>
 #include <QHash>
+#include <QList>
 #include <QMainWindow>
 #include <QPoint>
 #include <QSet>
@@ -52,10 +53,11 @@ class ZapretManager;
 // starting is the dashboard's job alone, so a row never carries a second power button.
 //
 // It owns no domain logic. Rows come from the manager's catalog (which is the parser's output), the
-// start/stop path is the manager's, and persisted values are Settings'. What lives here is only
-// presentation state: which row is selected, what the title says, whether closing hides to the tray, and
-// which page the rail is showing. The window is frameless, so the header's two chrome buttons and the
-// drag that starts on the header are drawn and driven here too.
+// start/stop path is the manager's, and persisted values are Settings'. What lives here is presentation
+// state and cadence: which row is selected, what the title says, whether closing hides to the tray, which
+// page the rail is showing, and the watchdog that re-asks a live profile every few minutes whether it
+// still bypasses — the one thing here that acts without being asked to. The window is frameless, so the
+// header's two chrome buttons and the drag that starts on the header are drawn and driven here too.
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -141,6 +143,41 @@ public:
     // Static because the formatting is a policy of its own and checkable without a window.
     static QString blockcheckResultText(const QJsonObject &results);
 
+    // ---- the watchdog: is the bypass still bypassing? ------------------------------------------
+    //
+    // A profile that worked at breakfast can stop working at tea time, and the only way anybody finds
+    // out is to open the thing they were bypassing for. So the window re-asks one cheap question on a
+    // timer, through the same BlockcheckEngine the profiles page's button drives, and when the answer
+    // turns from OK to FAIL it says so in the journal, reaches the desktop through the tray, and offers
+    // the next profile in the list.
+    //
+    // Everything that decides — whether to measure, what counts as a failure, which profile comes next —
+    // is static and pure below, in the same spirit as canStartFrom() and errorTargetId(): the whole
+    // policy is checkable without a backend, a network, a desktop or a window.
+    //
+    // The one host a quiet cycle probes. Deliberately one, and deliberately a service this app exists to
+    // unblock: a background check must cost a second or two of traffic, not a round of three, and
+    // google.com is the baseline that answers happily with no bypass at all — measuring it would let a
+    // dead profile pass.
+    static QString watchdogQuickHost();
+    // minutes -> QTimer interval, clamped through the model's own range so a stored 0, a hand-edited
+    // 900 or a future default cannot arm a timer that fires every tick or once a fortnight.
+    static int watchdogIntervalMs(int minutes);
+    // Whether a tick may measure now. Only a live run has a path for the answer to describe: probing
+    // while stopped would measure the provider's default behaviour and call it the profile's. And one
+    // engine serves one cycle at a time, whatever asked for it.
+    static bool watchdogShouldProbe(IZapretBackend::State state, bool quietRunInFlight,
+                                    bool manualCycleInFlight);
+    // The FAIL that starts all of this: at least one verdict in the map, and not one host through. An
+    // empty map is a cycle that broke (no manager, a refused start, a preset that never came up) — a
+    // broken measurement is not evidence about the bypass, and must not wake anybody with a question.
+    static bool watchdogCycleFailed(const QJsonObject &results);
+    // The profile to rotate to: the entry after `currentId` in the window's own row order, wrapping at
+    // the end. An empty answer means there is nothing else to try — the same profile brought back up is
+    // not a rotation, it is a retry, and the watchdog's promise is a different profile.
+    static QString watchdogNextStrategyId(const QList<Strategy> &strategies,
+                                          const QString &currentId);
+
     // Accessors used by tests and by nothing else in the app.
     ZapretManager *manager() const { return m_manager; }
     LogPanel *logPanel() const { return m_log; }
@@ -150,6 +187,10 @@ public:
     bool hasTray() const { return m_tray != nullptr; }
     // The card a failure was pinned to ("" when none). Test hook for the inline error badge.
     QString errorCardId() const;
+    // The watchdog's live cadence, and whether it is armed. Hooks for the same reason as cardCount():
+    // a timer the suite cannot look at is a timer it cannot prove was re-armed when the setting moved.
+    int watchdogTimerInterval() const;
+    bool watchdogTimerActive() const;
 
     // ---- rail navigation ------------------------------------------------------------
     // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
@@ -196,6 +237,25 @@ public:
     // entry point main.cpp wires into; nothing else in the class needs to reach it.
     void bringToFront();
 
+public slots:
+    // The watchdog timer's answer. Guards first (watchdogShouldProbe), then asks the shared engine for
+    // one quiet verdict on watchdogQuickHost() — quiet meaning the journal, the profiles-page meter and
+    // the verdict sheet all stay out of it, because this cycle was not asked for and the window is most
+    // likely hidden. Public (rather than a private slot) because a five-minute timer is not something a
+    // test can wait for: the suite drives a tick by hand.
+    void onWatchdogTick();
+    // What a quiet cycle came back with — the engine's testFinished on the normal path, or a map handed
+    // straight in by a test. Silent on a pass, on a cycle that produced no verdict at all, and on one
+    // whose run came down while it was being measured; on a FAIL it says so in red, reaches the desktop,
+    // and asks whether to try the next profile.
+    void onWatchdogResult(const QJsonObject &results);
+
+signals:
+    // A quiet check said the live profile is dead and the user answered "yes" to switching. Emitted
+    // before anything is touched — this is the intent, performWatchdogRotation() is the act, and the
+    // difference is what lets a test watch the decision without a backend being asked to move.
+    void watchdogRotationRequested(const QString &fromId, const QString &nextId);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     // The window is frameless (see the constructor), so its own header is the only thing to grab: a press
@@ -203,6 +263,25 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+
+    // ---- the watchdog's three seams ---------------------------------------------------
+    //
+    // The alert has exactly one part that needs a desktop and one part that needs a backend, and both
+    // are answers rather than behaviour: what a test wants to check is the decision in between. Each is
+    // virtual so a suite can answer it by hand instead of blocking on a modal, spawning pkexec, or
+    // waiting on a network that may not be there.
+    //
+    // The measurement itself — the quiet cycle a tick asks for. The real one drives the engine the
+    // power button shares; the verdict lands in onWatchdogResult() either way.
+    virtual void startWatchdogProbe(const Strategy &strategy);
+    // The question the user answers, naming the profile that died and the one being offered. The two
+    // are spelled out because "the next profile" is a position in a list the user has to look at to
+    // know what they are agreeing to.
+    virtual bool confirmWatchdogRotation(const QString &fromName, const QString &nextName);
+    // Bring this one down, bring that one up when it is down. One method rather than two calls at the
+    // call site, because the pair is the unit: a rotation that only stopped the old profile is a
+    // rotation that left the user with nothing running.
+    virtual void performWatchdogRotation(const QString &fromId, const QString &nextId);
 
 private slots:
     void onStopRequested();
@@ -287,6 +366,21 @@ private:
     void beginBlockcheck();
     void endBlockcheck();
     void onBlockcheckFinished(const QJsonObject &results);
+
+    // ---- the watchdog's own half --------------------------------------------------------
+    // (Re)arm the timer from Settings, and only when the interval really moved: Settings answers every
+    // write with changed() — including the last-strategy id a start writes — and restarting a five-
+    // minute cadence on each of those is how a check silently never happens.
+    void startWatchdog();
+    // The profile a quiet verdict belongs to, in the window's own precedence order (see errorTargetId),
+    // falling back to the row the power button is pointed at when no run is named any more.
+    QString watchdogRunId() const;
+    // The display name of a catalog entry, or the id itself when the row is gone — a message that names
+    // a profile has to name it with whatever the user recognises.
+    QString watchdogProfileName(const QString &id) const;
+    // The deferred half of a rotation: the start that waits for the stop to finish. Idempotent — it
+    // does nothing while no rotation is waiting, and the id it consumes it consumes once.
+    void continueWatchdogRotation();
     void updateStatusUi();
     // Draw the chip and the power button for one state, with no reference to what the manager says it
     // is in. updateStatusUi() calls it with the real state; the Stop press calls the feedback below,
@@ -386,6 +480,25 @@ private:
     bool m_blockcheckActive = false;
     QPushButton *m_blockcheckButton = nullptr;
     QProgressBar *m_blockcheckProgress = nullptr;
+    // ---- the watchdog -------------------------------------------------------------------
+    // Fires every Settings::watchdogIntervalMin() minutes from the moment the window exists. There is
+    // no "waiting for the first answer" state to show and no watchdog-of-the-watchdog: a tick either
+    // starts a cycle or does nothing, and every cycle ends in onWatchdogResult() by the engine's own
+    // contract (testFinished is the last word of every run, refused ones included).
+    QTimer *m_watchdogTimer = nullptr;
+    // A quiet cycle owns the shared engine while this is set: the manual press is refused, the engine's
+    // log/meter channels stay muted, and its testFinished goes to the watchdog instead of to the
+    // verdict sheet. Also the flag that keeps two ticks from measuring at once.
+    bool m_watchdogRun = false;
+    // Set when the run a quiet cycle is measuring comes down mid-flight — the user pressed Stop, or the
+    // payload died. The engine's answer still has to arrive (it owns the engine until testFinished), but
+    // that verdict describes a path being torn down rather than a provider that moved, so it is dropped
+    // instead of turned into an offer to start something the user has just stopped.
+    bool m_watchdogVerdictVoid = false;
+    // The profile an accepted rotation starts once the current one is down. The backend takes one
+    // operation at a time and a portable teardown costs seconds, so the start cannot happen in the same
+    // call as the stop — see performWatchdogRotation().
+    QString m_watchdogRotationId;
     // The profile the power button will run — read at start, written on every row press, and persisted
     // through Settings under lastStrategyId so it survives a restart. Empty means "nothing chosen yet",
     // which the power button answers by opening the profiles page.

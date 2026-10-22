@@ -166,6 +166,15 @@ MainWindow::MainWindow(QWidget *parent)
     m_ping->setIntervalSec(m_settings->pingIntervalSec());
     m_ping->start();
 
+    // The watchdog runs from the moment the window exists, because the whole point is the hours nobody
+    // is looking: a profile that dies at two in the morning should be known about before breakfast. The
+    // tick is a no-op until something is actually running, so arming it before the first start costs
+    // nothing, and a coarse timer is the honest type for a cadence measured in minutes.
+    m_watchdogTimer = new QTimer(this);
+    m_watchdogTimer->setTimerType(Qt::VeryCoarseTimer);
+    connect(m_watchdogTimer, &QTimer::timeout, this, &MainWindow::onWatchdogTick);
+    startWatchdog();
+
     // Seed the route from the persisted choice before the first scan, so the very first populateCards()
     // lights the row the last session left running rather than the first one alphabetically. If that id is
     // stale (the folder changed, the entry was deleted) populateCards falls it back to a real row.
@@ -218,6 +227,11 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    // No tick, and no rotation waiting on a stop that will never be reported: both are statements about
+    // a run this window is no longer here to follow.
+    if (m_watchdogTimer)
+        m_watchdogTimer->stop();
+    m_watchdogRotationId.clear();
     if (m_blockcheck) {
         // Disconnect before cancelling: cancel() winds a mid-flight cycle down through failTest, and
         // its testFinished must not re-enter UI slots (a modal verdict sheet) from inside a teardown.
@@ -1057,14 +1071,29 @@ void MainWindow::wire()
     // deliberately gets no modal of its own — a backend-side failure already dialogs through the
     // manager's own channel, and every failed run still ends in testFinished, so the sheet below is
     // the one place a press is answered, once.
-    connect(m_blockcheck, &BlockcheckEngine::logMessage, this, &MainWindow::onLogMessage);
+    //
+    // Four of the five then hold their tongue while m_watchdogRun is set. A quiet cycle is the same
+    // engine answering a question nobody asked, and the window is most likely in the tray: journal
+    // lines, a moving meter and a footer message from a background check would be exactly the noise the
+    // "quiet" in the name rules out. testFinished is not muted — it is the verdict, and it routes to
+    // onWatchdogResult() instead of to the sheet.
+    connect(m_blockcheck, &BlockcheckEngine::logMessage, this,
+            [this](const QString &line, int level) {
+        if (m_watchdogRun)
+            return;
+        onLogMessage(line, level);
+    });
     connect(m_blockcheck, &BlockcheckEngine::stageChanged, this, [this](const QString &stage) {
+        if (m_watchdogRun)
+            return;
         if (!m_blockcheckProgress || stage == QLatin1String("probing"))
             return;   // the first progress() moves the meter to determinate on its own
         m_blockcheckProgress->setRange(0, 0);   // busy while starting / settling / stopping
     });
     connect(m_blockcheck, &BlockcheckEngine::progress, this,
             [this](int done, int total, const QString &) {
+        if (m_watchdogRun)
+            return;
         if (!m_blockcheckProgress)
             return;
         if (m_blockcheckProgress->maximum() != qMax(1, total))
@@ -1073,6 +1102,8 @@ void MainWindow::wire()
     });
     connect(m_blockcheck, &BlockcheckEngine::hostChecked, this,
             [this](const QString &host, const HostCheckResult &r) {
+        if (m_watchdogRun)
+            return;
         // A journal line per host, in the engine's own vocabulary rather than a translated sentence:
         // the sheet at the end is the user-facing wording, and the journal is where the numbers live.
         QString verdict;
@@ -1090,7 +1121,11 @@ void MainWindow::wire()
                           r.success ? LogPanel::Info : LogPanel::Warn);
     });
     connect(m_blockcheck, &BlockcheckEngine::errorOccurred, this,
-            [this](const QString &message) { showTransientMessage(message, 6000); });
+            [this](const QString &message) {
+        if (m_watchdogRun)
+            return;
+        showTransientMessage(message, 6000);
+    });
     connect(m_blockcheck, &BlockcheckEngine::testFinished, this,
             &MainWindow::onBlockcheckFinished);
 
@@ -1675,6 +1710,11 @@ void MainWindow::onStateChanged(IZapretBackend::State state)
     // pending start that already resolved.
     if (state == IZapretBackend::State::Running || state == IZapretBackend::State::Stopped)
         m_pendingStartId.clear();
+    // A quiet cycle measuring a run that has just come down is measuring the teardown: the probes that
+    // follow it fail against a closed path, and calling that "the provider changed its rules" would be
+    // the window arguing with a decision the user just made. The verdict is dropped at onWatchdogResult().
+    if (m_watchdogRun && state != IZapretBackend::State::Running)
+        m_watchdogVerdictVoid = true;
     // Capture the run's card while the manager still names it. It forwards stateChanged before its own
     // bookkeeping slot clears m_activeId, so this is the last moment the two agree — and a portable
     // failure that deferred its report to after the nfqueue teardown arrives with nothing to attribute
@@ -1683,6 +1723,12 @@ void MainWindow::onStateChanged(IZapretBackend::State state)
         m_lastRunId.clear();
     else if (const QString id = m_manager->activeStrategyId(); !id.isEmpty())
         m_lastRunId = id;
+    // The deferred half of a watchdog rotation: the stop it waited on has now been reported (Stopped by
+    // the teardown, Error by a run that died instead — either way the backend is free, which is what
+    // canStartFrom() answers for). Called after the bookkeeping above so the start, which writes the
+    // pending-start id, is not overwritten by it.
+    if (state == IZapretBackend::State::Stopped || state == IZapretBackend::State::Error)
+        continueWatchdogRotation();
     updateStatusUi();
     if (state == IZapretBackend::State::Stopped && m_tray && !isVisible())
         updateTrayIcon();
@@ -1870,6 +1916,14 @@ void MainWindow::onBlockcheckRequested()
     if (m_blockcheckActive)
         return;   // a cycle is in flight; the button says so and is not answering presses
 
+    // A quiet watchdog cycle holds the same engine. The press is refused rather than queued, and said
+    // out loud: unlike the manual round this one leaves the button looking perfectly idle, so a silent
+    // return here would read as a button that stopped working.
+    if (m_watchdogRun) {
+        showTransientMessage(LanguageManager::tr(QStringLiteral("watchdog.busy")), 4000);
+        return;
+    }
+
     // The same gate the power button answers to, widened by exactly one state: a backend owns one
     // operation at a time, so Starting/Stopping refuse — but a run that is already up is fine, the
     // engine measures it as-is and leaves its lifecycle alone (it only stops what it started).
@@ -1922,6 +1976,14 @@ void MainWindow::endBlockcheck()
 // the one verdict sheet per press, and the only modal the cycle ever opens.
 void MainWindow::onBlockcheckFinished(const QJsonObject &results)
 {
+    // One exception: a cycle the watchdog started is not a press and gets no sheet. Its own handler
+    // reads the map for a dead bypass and stays silent otherwise, which is the whole difference between
+    // a check the user asked for and one that is merely watching.
+    if (m_watchdogRun) {
+        onWatchdogResult(results);
+        return;
+    }
+
     endBlockcheck();
     if (results.isEmpty()) {
         const QString why = m_blockcheck ? m_blockcheck->lastError() : QString();
@@ -1958,6 +2020,285 @@ QString MainWindow::blockcheckResultText(const QJsonObject &results)
     return lines.join(QLatin1Char('\n'));
 }
 
+// ---- the watchdog ----
+//
+// The same measurement the profiles page's button asks for, asked on a timer instead of on a press, of
+// one host instead of two, and answered only when it comes back wrong. What follows is the whole policy:
+// five pure predicates that say when to measure, what counts as a dead bypass and which profile is next;
+// then the thin impulsive half that asks the engine, speaks up, and — if the user says yes — hands the
+// running profile to the next row in the list.
+
+QString MainWindow::watchdogQuickHost()
+{
+    // Discord rather than Youtube because the question has to be cheap: one host, one port, three tries.
+    // It is also the service the profile lists are drawn around, so a FAIL here is a FAIL the user would
+    // have noticed within the hour anyway.
+    return QStringLiteral("discord.com");
+}
+
+int MainWindow::watchdogIntervalMs(int minutes)
+{
+    // Clamped here too, not only in Settings, because the caller is not always Settings: a test, a
+    // hand-edited ini or a future default all arrive as a plain int, and a 0 or a negative value would
+    // arm a QTimer that fires on every tick of the event loop.
+    const int bounded = qBound(Settings::kWatchdogMinIntervalMin, minutes,
+                               Settings::kWatchdogMaxIntervalMin);
+    return bounded * 60 * 1000;
+}
+
+bool MainWindow::watchdogShouldProbe(IZapretBackend::State state, bool quietRunInFlight,
+                                     bool manualCycleInFlight)
+{
+    // Only a live run. A stopped profile has no path to measure, so a probe would report what the
+    // provider does without zapret and the window would call it the profile's verdict — the one answer
+    // more misleading than the question. Transitions are excluded by the same reasoning: Starting has
+    // not opened anything yet, and Stopping is taking it back down.
+    //
+    // And one engine serves one cycle, whoever asked: a tick landing during the manual round would be
+    // refused outright by the shared engine, which is a wasted measurement and a confusing silence.
+    return state == IZapretBackend::State::Running
+           && !quietRunInFlight && !manualCycleInFlight;
+}
+
+bool MainWindow::watchdogCycleFailed(const QJsonObject &results)
+{
+    // An empty map is not a failure of the bypass; it is a failure of the measurement (no manager, a
+    // start the backend refused, a preset that never came up). Asking "want to switch profiles?" because
+    // the probe broke would blame the provider for the window's own bad day.
+    if (results.isEmpty())
+        return false;
+    for (auto it = results.constBegin(); it != results.constEnd(); ++it) {
+        if (it.value().toObject().value(QLatin1String("success")).toBool())
+            return false;   // one host through is the bypass working
+    }
+    return true;
+}
+
+QString MainWindow::watchdogNextStrategyId(const QList<Strategy> &strategies,
+                                           const QString &currentId)
+{
+    // Rows are addressed the way the window addresses them everywhere else — id, or the file path when
+    // the parser could not name the entry (populateCards uses the same expression).
+    const auto rowId = [](const Strategy &s) { return s.id.isEmpty() ? s.filePath : s.id; };
+    const int size = static_cast<int>(strategies.size());
+    if (size < 2)
+        return QString();   // one profile is not a list to rotate through
+
+    int at = -1;
+    for (int i = 0; i < size; ++i) {
+        if (rowId(strategies.at(i)) == currentId) {
+            at = i;
+            break;
+        }
+    }
+
+    if (at < 0) {
+        // The run names nothing on the list (an entry deleted mid-flight, or an id inherited from a
+        // previous session): the first row is the only sensible "next".
+        for (const Strategy &s : strategies) {
+            const QString candidate = rowId(s);
+            if (!candidate.isEmpty() && candidate != currentId)
+                return candidate;
+        }
+        return QString();
+    }
+
+    // Forward from the failed row, wrapping at the end — and never back onto the row itself, which is
+    // what a list of two would otherwise do every other time.
+    for (int step = 1; step <= size; ++step) {
+        const QString candidate = rowId(strategies.at((at + step) % size));
+        if (!candidate.isEmpty() && candidate != currentId)
+            return candidate;
+    }
+    return QString();
+}
+
+void MainWindow::startWatchdog()
+{
+    if (!m_watchdogTimer)
+        return;
+    const int intervalMs = watchdogIntervalMs(m_settings->watchdogIntervalMin());
+    // Re-arm only on a real change. Settings::changed() fires for every write, including the
+    // last-strategy id startStrategy() persists on each start, and restarting the countdown for that
+    // would push a five-minute check five minutes further out every time the user pressed the button.
+    if (m_watchdogTimer->isActive() && m_watchdogTimer->interval() == intervalMs)
+        return;
+    m_watchdogTimer->stop();
+    m_watchdogTimer->setInterval(intervalMs);
+    m_watchdogTimer->start();
+}
+
+int MainWindow::watchdogTimerInterval() const
+{
+    return m_watchdogTimer ? m_watchdogTimer->interval() : -1;
+}
+
+bool MainWindow::watchdogTimerActive() const
+{
+    return m_watchdogTimer && m_watchdogTimer->isActive();
+}
+
+void MainWindow::onWatchdogTick()
+{
+    // Not while the window has a question open. A modal runs its own event loop, and this timer is
+    // armed inside it: starting a measurement the user cannot see while they are answering something
+    // else is a surprise waiting behind the dialog — and the rotation prompt is exactly such a modal.
+    if (QApplication::activeModalWidget())
+        return;
+
+    if (!watchdogShouldProbe(m_manager->state(), m_watchdogRun, m_blockcheckActive))
+        return;
+
+    // The run to measure, not the row the pointer happens to be over: a watchdog that checked a profile
+    // nobody is running would be reporting a promise rather than the path in use.
+    const Strategy *s = m_manager->activeStrategy();
+    if (!s) {
+        const QString id = watchdogRunId();
+        s = id.isEmpty() ? nullptr : m_manager->findStrategy(id);
+    }
+    if (!s)
+        return;   // a Running the window cannot name: there is nothing to ask the engine about
+
+    m_watchdogRun = true;
+    m_watchdogVerdictVoid = false;   // a fresh cycle starts with a live run by definition
+    startWatchdogProbe(*s);
+}
+
+void MainWindow::startWatchdogProbe(const Strategy &strategy)
+{
+    if (!m_blockcheck) {
+        // Nothing to ask — and the flag has to come back down with the question, because a quiet cycle
+        // that was never started would otherwise mute the journal and refuse the manual press forever.
+        m_watchdogRun = false;
+        return;
+    }
+    // The engine measures a run that is already up as-is and leaves its lifecycle alone (it only ever
+    // stops what it started), so a quiet cycle costs a settle and a probe — not a teardown of the very
+    // profile the user is relying on. m_watchdogRun is cleared by onWatchdogResult(), and testFinished
+    // is contractually the last word of every run, including the ones the engine refuses.
+    m_blockcheck->startTest(strategy, QStringList{watchdogQuickHost()});
+}
+
+void MainWindow::onWatchdogResult(const QJsonObject &results)
+{
+    // The cycle is over whatever the map says, and this is the only place that ends it: the engine is
+    // shared with the manual press, so the mute in wire() and the refusal in onBlockcheckRequested()
+    // have to expire with the run — a refused one included.
+    const bool voided = m_watchdogVerdictVoid;
+    m_watchdogRun = false;
+    m_watchdogVerdictVoid = false;
+    if (voided)
+        return;   // the run this measured came down on the way; see m_watchdogVerdictVoid
+
+    // Silence on a pass — that is the deal — and silence on a cycle that produced no verdict at all.
+    if (!watchdogCycleFailed(results))
+        return;
+
+    const QString fromId = watchdogRunId();
+    const QString fromName = watchdogProfileName(fromId);
+
+    // Three voices for one event, and not one of them the verdict sheet. The journal keeps the sentence
+    // at error level, which is the red line the alert exists to be (and which lights the rail's unread
+    // badge through onLogMessage); the balloon is the only part that reaches a window sitting in the
+    // tray; the footer stands in for the balloon on a desktop that publishes no tray host at all.
+    onLogMessage(LanguageManager::tr(QStringLiteral("watchdog.alert")), LogPanel::Error);
+    const QString notify = LanguageManager::tr(QStringLiteral("watchdog.notify")).arg(fromName);
+    if (m_tray && m_tray->isVisible())
+        m_tray->showMessage(QStringLiteral("Muffin"), notify,
+                            Theme::icon(QStringLiteral("tray"), Theme::error(), 22), 8000);
+    else
+        showTransientMessage(notify, 8000);
+
+    const QString nextId = watchdogNextStrategyId(m_manager->strategies(), fromId);
+    if (nextId.isEmpty()) {
+        // Nothing to offer, so nothing to ask: with one profile in the list, "switch to the next" is a
+        // question with no answer in it. The journal says the same thing a dialog would have.
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("watchdog.no_next")), LogPanel::Warn);
+        return;
+    }
+
+    if (!confirmWatchdogRotation(fromName, watchdogProfileName(nextId)))
+        return;   // the user's own call: the alert has been given, the run stays exactly as it was
+
+    // Said here rather than inside the act, because it belongs to what the user agreed to: the journal
+    // records the decision, and the act itself is two backend calls with no message of their own.
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("watchdog.rotating"))
+                          .arg(watchdogProfileName(nextId)),
+                      LogPanel::Info);
+    emit watchdogRotationRequested(fromId, nextId);
+    performWatchdogRotation(fromId, nextId);
+}
+
+QString MainWindow::watchdogRunId() const
+{
+    // The same precedence a failure badge uses: the start this window asked for that has not resolved,
+    // else the run the manager still names, else the run it has already forgotten. The selected row is
+    // the last resort, for a verdict that arrives after everything has come down.
+    const QString id = errorTargetId(m_pendingStartId, m_manager->activeStrategyId(), m_lastRunId);
+    return id.isEmpty() ? m_selectedId : id;
+}
+
+QString MainWindow::watchdogProfileName(const QString &id) const
+{
+    if (const Strategy *s = m_manager->findStrategy(id))
+        return s->name;
+    // A row that has left the catalog still has to be named in the sentence about it, and its id is the
+    // only honest thing left: "unknown" would lose which profile the user is being asked to give up.
+    return id;
+}
+
+bool MainWindow::confirmWatchdogRotation(const QString &fromName, const QString &nextName)
+{
+    // Yes or No, defaulting to No. Saying yes costs a teardown through pkexec and a new payload, so a
+    // dialog dismissed by the keyboard must not be read as consent on the user's behalf.
+    //
+    // Built as an object rather than through the static because the two profile names belong under the
+    // question rather than inside it: the sentence is the catalog's wording in seven languages, and
+    // which rows it means is data that must not be threaded through every one of them.
+    QMessageBox box(QMessageBox::Question,
+                    LanguageManager::tr(QStringLiteral("watchdog.title")),
+                    LanguageManager::tr(QStringLiteral("watchdog.question")),
+                    QMessageBox::Yes | QMessageBox::No, this);
+    box.setInformativeText(QStringLiteral("%1 \u2192 %2").arg(fromName, nextName));
+    box.setDefaultButton(QMessageBox::No);
+    return box.exec() == QMessageBox::Yes;
+}
+
+void MainWindow::performWatchdogRotation(const QString &fromId, const QString &nextId)
+{
+    Q_UNUSED(fromId);
+    // Queued before the stop, because the stop is the part that takes time: a portable teardown runs a
+    // pkexec iptables flush and costs seconds, during which the backend accepts no start at all (see the
+    // gating note on canStartFrom). onStateChanged() picks the id up when the run is reported down.
+    m_watchdogRotationId = nextId;
+
+    if (canStopFrom(m_manager->state()))
+        onStopRequested();   // the toolbar's own path, so the button and the journal both say "stopping"
+    // A teardown that finished inside that call, and a run that was already down when the answer came,
+    // both leave the backend free now. Otherwise this is the no-op that waits for the state change.
+    continueWatchdogRotation();
+}
+
+void MainWindow::continueWatchdogRotation()
+{
+    if (m_watchdogRotationId.isEmpty())
+        return;
+    if (!canStartFrom(m_manager->state()))
+        return;   // still coming down; the next Stopped/Error reports it and calls this again
+
+    const QString id = m_watchdogRotationId;
+    m_watchdogRotationId.clear();
+    // The next turn of the loop, never this one. continueWatchdogRotation() is reached from inside
+    // stateChanged, and on the direct-payload path that signal is emitted from within the backend's own
+    // stop(): a start() run under that frame would let the rest of the teardown write over the state the
+    // new launch just set. Queued costs nothing (the backend is already idle) and cannot re-enter.
+    //
+    // interactive: the user answered a dialog to get here, so a refusal that landed in silence would be
+    // the window taking back the choice it just offered. startStrategy() dialogs, badges the row and
+    // writes the selection through Settings, exactly as a press of the power button would.
+    QTimer::singleShot(0, this, [this, id] { startStrategy(id, true); });
+}
+
 void MainWindow::onStrategiesLoaded(int count)
 {
     populateCards();
@@ -1975,6 +2316,10 @@ void MainWindow::onSettingsChanged()
 
     applyTheme();
     m_ping->setIntervalSec(m_settings->pingIntervalSec());
+    // The watchdog's cadence is the other number the page can move, and this is the only channel that
+    // tells the window about it. startWatchdog() ignores a write that did not change the interval, so
+    // the last-strategy id a start persists cannot push the next check five minutes further out.
+    startWatchdog();
     // The footer's standing line states the cadence, so it is the settings dialog's business too.
     m_footerIdleText = pingCadenceText(m_settings->pingIntervalSec());
     if (m_footerLabel && !m_footerTimer->isActive())

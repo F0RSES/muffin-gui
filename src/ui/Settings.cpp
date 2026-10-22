@@ -17,6 +17,7 @@ const QString kLastStrategyId    = QStringLiteral("strategy/last");
 const QString kStartLastOnLaunch = QStringLiteral("startup/startLast");
 const QString kMinimizeToTray    = QStringLiteral("ui/minimizeToTray");
 const QString kPingIntervalSec   = QStringLiteral("ping/intervalSec");
+const QString kWatchdogInterval  = QStringLiteral("watchdog/intervalMin");
 const QString kTheme             = QStringLiteral("ui/theme");
 const QString kLanguage          = QStringLiteral("ui/language");
 
@@ -165,6 +166,20 @@ int Settings::pingIntervalSec() const
 void Settings::setPingIntervalSec(int seconds)
 {
     write(kPingIntervalSec, qBound(kPingIntervalMin, seconds, kPingIntervalMax));
+}
+
+// Five minutes: long enough that nobody pays for the check in traffic or in a pkexec prompt, short
+// enough that a provider that flips its rules during the evening is caught before the user wonders
+// why Discord is acting up — rather than the next morning.
+int Settings::watchdogIntervalMin() const
+{
+    const int value = read<int>(kWatchdogInterval, kWatchdogDefaultIntervalMin);
+    return qBound(kWatchdogMinIntervalMin, value, kWatchdogMaxIntervalMin);
+}
+
+void Settings::setWatchdogIntervalMin(int minutes)
+{
+    write(kWatchdogInterval, qBound(kWatchdogMinIntervalMin, minutes, kWatchdogMaxIntervalMin));
 }
 
 QString Settings::theme() const { return read<QString>(kTheme, QStringLiteral("dark")); }

@@ -115,11 +115,25 @@ void SettingsPage::build()
     i18nSuffix(m_pingSpin, QStringLiteral("settings.ping_suffix"));
     m_pingSpin->setSingleStep(1);
 
+    // The watchdog's cadence, built like the box above because it is the same kind of answer: one short
+    // number with a unit. Its range comes from Settings, not from a second pair of literals here — the
+    // model clamps what it stores and the window arms a QTimer from that value, so three places would
+    // otherwise have to agree on "1..60" by coincidence.
+    m_watchdogSpin = new QSpinBox(this);
+    m_watchdogSpin->setMaximumWidth(kNarrowFieldPx);
+    m_watchdogSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_watchdogSpin->setRange(Settings::kWatchdogMinIntervalMin, Settings::kWatchdogMaxIntervalMin);
+    m_watchdogSpin->setSuffix(LanguageManager::tr(QStringLiteral("settings.watchdog_suffix")));
+    i18nSuffix(m_watchdogSpin, QStringLiteral("settings.watchdog_suffix"));
+    m_watchdogSpin->setSingleStep(1);
+    i18nTip(m_watchdogSpin, QStringLiteral("settings.watchdog_tip"));
+
     // Labels are built here rather than passed as strings to addRow so each one can carry the key it
     // came from; a QFormLayout's own label has no handle to tag.
     auto *pathRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.path"));
     auto *themeRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.theme"));
     auto *pingRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.ping"));
+    auto *watchdogRowLabel = i18nText(new QLabel(this), QStringLiteral("settings.watchdog"));
 
     // The two short fields, held to the left. A QFormLayout gives a field the whole width of its column,
     // which is right for a path and wrong for a three-word choice: the page then reads as two long
@@ -135,6 +149,11 @@ void SettingsPage::build()
     pingField->addWidget(m_pingSpin);
     pingField->addStretch(1);
 
+    auto *watchdogField = new QHBoxLayout;
+    watchdogField->setContentsMargins(0, 0, 0, 0);
+    watchdogField->addWidget(m_watchdogSpin);
+    watchdogField->addStretch(1);
+
     auto *form = new QFormLayout;
     form->setSpacing(10);
     form->addRow(pathRowLabel, pathRow);
@@ -144,6 +163,9 @@ void SettingsPage::build()
     form->addRow(QString(), m_trayNote);
     form->addRow(themeRowLabel, themeField);
     form->addRow(pingRowLabel, pingField);
+    // Right under the ping interval, because that is what it is: a second cadence, measured in minutes
+    // rather than seconds, for the same question about the same services.
+    form->addRow(watchdogRowLabel, watchdogField);
 
     // The commit row. The dialog's OK/Cancel pair is gone: a page has no frame to dismiss, so leaving it
     // is the cancel, and the only thing that has to be explicit is the write. The acknowledgement sits to
@@ -191,6 +213,7 @@ void SettingsPage::loadFromSettings()
     m_startLastCheck->setChecked(m_settings.startLastOnLaunch());
     m_trayCheck->setChecked(m_settings.minimizeToTray());
     m_pingSpin->setValue(m_settings.pingIntervalSec());
+    m_watchdogSpin->setValue(m_settings.watchdogIntervalMin());
     m_trayNote->setVisible(!QSystemTrayIcon::isSystemTrayAvailable());
 
     const QString theme = m_settings.theme();
@@ -202,14 +225,15 @@ void SettingsPage::loadFromSettings()
 
 void SettingsPage::apply()
 {
-    // One guard around five writes: Settings answers every write with changed(), and the reload slot
+    // One guard around six writes: Settings answers every write with changed(), and the reload slot
     // connected in the constructor would otherwise re-read the form underneath the commit — harmless
-    // for these five values, but it would drop the note this call is about to put up.
+    // for these six values, but it would drop the note this call is about to put up.
     m_writing = true;
     m_settings.setZapretPath(m_pathEdit->text().trimmed());
     m_settings.setStartLastOnLaunch(m_startLastCheck->isChecked());
     m_settings.setMinimizeToTray(m_trayCheck->isChecked());
     m_settings.setPingIntervalSec(m_pingSpin->value());
+    m_settings.setWatchdogIntervalMin(m_watchdogSpin->value());
     m_settings.setTheme(m_themeBox->currentData().toString());
     m_writing = false;
 

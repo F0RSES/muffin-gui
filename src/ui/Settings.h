@@ -35,6 +35,16 @@ class Settings : public QObject
     Q_OBJECT
 
 public:
+    // ---- the watchdog's cadence, spelled exactly once ----
+    //
+    // The clamp below is the policy; the spin box's range, the model's own clamp and the QTimer's
+    // interval are three places that would otherwise each get their own copy of "1..60". A range that
+    // lives in one of them only is a range that silently disagrees with the other two the first time
+    // somebody widens it, so they are published here and read from everywhere else.
+    static constexpr int kWatchdogDefaultIntervalMin = 5;
+    static constexpr int kWatchdogMinIntervalMin = 1;
+    static constexpr int kWatchdogMaxIntervalMin = 60;
+
     // Application-wide store (organizationName/applicationName from QApplication).
     explicit Settings(QObject *parent = nullptr);
     // Explicit ini file — used by tests and by anyone who wants an isolated store.
@@ -59,6 +69,12 @@ public:
     // ---- ping ----
     int pingIntervalSec() const;         // clamped to 3..60
     void setPingIntervalSec(int seconds);
+
+    // ---- watchdog ----
+    // How often a live profile is re-asked "do you still bypass?", in minutes, clamped to the range
+    // above. The window re-arms its timer from this value, so the setting is the whole policy.
+    int watchdogIntervalMin() const;
+    void setWatchdogIntervalMin(int minutes);
 
     // ---- appearance ----
     QString theme() const;               // "dark" | "light" | "system"

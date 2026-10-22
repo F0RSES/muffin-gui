@@ -14,8 +14,9 @@ namespace zapret {
 
 class Settings;
 
-// Where zapret lives, what happens at startup, how the window behaves, which theme and how often the
-// reachability probes run — as a page of the main window's own stack rather than a modal sheet.
+// Where zapret lives, what happens at startup, how the window behaves, which theme, how often the
+// reachability probes run and how often a live profile is re-asked whether it still bypasses — as a
+// page of the main window's own stack rather than a modal sheet.
 //
 // The move from dialog to page is the whole point: the rail already carries a settings glyph, and a
 // glyph that opens a modal is two ways of navigating where the design wants one. It also changes what
@@ -53,6 +54,9 @@ public:
     // stepper arrows. Both are things a later layout change can silently undo.
     QComboBox *themeField() const { return m_themeBox; }
     QSpinBox *pingIntervalField() const { return m_pingSpin; }
+    // The watchdog's cadence, in the same shape as the ping interval above — and exposed for the same
+    // reason: the range is a promise too, and it is the one this page has to keep with the model.
+    QSpinBox *watchdogIntervalField() const { return m_watchdogSpin; }
 
     // True when `dir` is a zapret root, or a base that contains a windows/ or linux/ root.
     static bool pathLooksValid(const QString &dir);
@@ -90,6 +94,7 @@ private:
     QLabel *m_trayNote = nullptr;    // shown only when this desktop has no tray host at all
     QComboBox *m_themeBox = nullptr;
     QSpinBox *m_pingSpin = nullptr;
+    QSpinBox *m_watchdogSpin = nullptr;
 
     QPushButton *m_save = nullptr;
     QLabel *m_savedNote = nullptr;

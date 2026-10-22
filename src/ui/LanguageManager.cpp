@@ -179,6 +179,75 @@ const QVector<Row> &catalog()
             "Vérification du contournement : démarrage du profil %1",
             "बाईपास जाँच: प्रोफ़ाइल %1 शुरू हो रही है"),
 
+        // ---- the watchdog: the same measurement, unsolicited ----
+        // Where the button above answers a question the user asked, the watchdog asks it on a timer
+        // and only speaks when the answer has turned from OK to FAIL. Three voices for one event,
+        // because the point is a window that is probably hidden: the journal keeps the sentence
+        // (watchdog.alert, in error red), the balloon reaches the desktop (watchdog.notify), and the
+        // question (watchdog.question) is the only part that waits for an answer.
+        ROW("watchdog.title", "Watchdog", "Watchdog", "Watchdog", "Watchdog", "看门狗",
+            "Watchdog", "वॉचडॉग"),
+        ROW("watchdog.alert",
+            "Внимание! Текущий профиль перестал обходить блокировки (Watchdog).",
+            "Warning! The current profile stopped bypassing blocks (Watchdog).",
+            "¡Atención! El perfil actual ha dejado de eludir los bloqueos (Watchdog).",
+            "Achtung! Das aktuelle Profil umgeht Sperren nicht mehr (Watchdog).",
+            "注意！当前配置文件已停止绕过屏蔽（看门狗）。",
+            "Attention ! le profil actuel ne contourne plus les blocages (Watchdog).",
+            "चेतावनी! मौजूदा प्रोफ़ाइल ने अवरोध तोड़ना बंद कर दिया (वॉचडॉग)."),
+        ROW("watchdog.notify",
+            "%1 перестал обходить блокировки (Watchdog)",
+            "%1 stopped bypassing blocks (Watchdog)",
+            "%1 ha dejado de eludir los bloqueos (Watchdog)",
+            "%1 umgeht Sperren nicht mehr (Watchdog)",
+            "%1 已停止绕过屏蔽（看门狗）",
+            "%1 ne contourne plus les blocages (Watchdog)",
+            "%1 ने अवरोध तोड़ना बंद कर दिया (वॉचडॉग)"),
+        ROW("watchdog.question",
+            "Похоже, провайдер изменил настройки, и текущий профиль перестал работать. "
+            "Попробовать переключиться на следующий профиль?",
+            "It looks like the provider changed its settings and the current profile stopped "
+            "working. Try switching to the next profile?",
+            "Parece que el proveedor cambió sus ajustes y el perfil actual ha dejado de "
+            "funcionar. ¿Intentar cambiar al siguiente perfil?",
+            "Der Anbieter scheint die Einstellungen geändert zu haben — das aktuelle Profil "
+            "funktioniert nicht mehr. Auf das nächste Profil wechseln?",
+            "运营商似乎更改了设置，当前配置文件已失效。要尝试切换到下一个配置文件吗？",
+            "Le fournisseur a apparemment modifié ses réglages et le profil actuel ne fonctionne "
+            "plus. Essayer de passer au profil suivant ?",
+            "लगता है प्रदाता ने सेटिंग बदल दी हैं और मौजूदा प्रोफ़ाइल काम करना बंद कर दी है। "
+            "अगली प्रोफ़ाइल पर बदलकर देखें?"),
+        // Said when the user said yes: which profile the window is about to bring up through the
+        // backend (on Linux, through pkexec), so the journal names the change it is making.
+        ROW("watchdog.rotating",
+            "Watchdog: переключение на профиль %1",
+            "Watchdog: switching to profile %1",
+            "Watchdog: cambiando al perfil %1",
+            "Watchdog: wechselt zu Profil %1",
+            "看门狗：正在切换到配置文件 %1",
+            "Watchdog : bascule vers le profil %1",
+            "वॉचडॉग: प्रोफ़ाइल %1 पर बदल रहे हैं"),
+        // The honest answer when the list holds only the profile that just failed: restarting the same
+        // entry is not a rotation, so there is nothing to ask.
+        ROW("watchdog.no_next",
+            "Watchdog: обход не работает, но в списке не осталось других профилей",
+            "Watchdog: the bypass is down, but the list holds no other profile to switch to",
+            "Watchdog: la evasión no funciona, pero la lista no ofrece otro perfil",
+            "Watchdog: der Bypass ist tot, aber die Liste enthält kein anderes Profil",
+            "看门狗：绕过已失效，但列表中没有其他配置文件",
+            "Watchdog : le contournement est mort, mais la liste n'offre aucun autre profil",
+            "वॉचडॉग: बाईपास ठीक नहीं है, पर सूची में कोई दूसरी प्रोफ़ाइल नहीं बची"),
+        // The manual press that lands in the middle of a quiet cycle: one engine, one operation, and a
+        // button that refuses silently reads as a button that is broken.
+        ROW("watchdog.busy",
+            "Фоновая проверка обхода уже идёт — подождите её ответа",
+            "A background bypass check is already running — wait for its answer",
+            "Ya hay una verificación en segundo plano en marcha; espere su respuesta",
+            "Eine Hintergrund-Bypass-Prüfung läuft bereits — bitte auf ihre Antwort warten",
+            "后台绕过检查已在进行——请等待其结果",
+            "Une vérification en arrière-plan est déjà en cours — attendez sa réponse",
+            "पृष्ठभूमि में बाईपास जाँच पहले से चल है — इसके उत्तर का इंतज़ार करें"),
+
         // ---- the profile row's menu ----
         ROW("profile.copy", "Скопировать", "Copy", "Copiar", "Kopieren", "复制", "Copier",
             "कॉपी करें"),
@@ -493,6 +562,22 @@ const QVector<Row> &catalog()
         ROW("settings.ping", "Интервал пинга", "Ping interval", "Intervalo de ping",
             "Ping-Intervall", "Ping 间隔", "Intervalle de ping", "पिंग अंतराल"),
         ROW("settings.ping_suffix", " сек", " s", " s", " s", " 秒", " s", " सेकंड"),
+        // The watchdog's cadence. A field of the same shape as the ping interval on purpose: both are
+        // one short number with a unit, and the page keeps that shape for both.
+        ROW("settings.watchdog", "Интервал проверки обхода", "Bypass re-check interval",
+            "Intervalo de verificación de evasión", "Bypass-Nachprüfintervall",
+            "绕过复检间隔", "Intervalle de re-vérification du contournement",
+            "बाईपास दोबारा-जाँच अंतराल"),
+        ROW("settings.watchdog_suffix", " мин", " min", " min", " Min", " 分钟", " min",
+            " मिनट"),
+        ROW("settings.watchdog_tip",
+            "Как часто проверять, что запущенный профиль всё ещё обходит блокировки",
+            "How often to check that the running profile still bypasses blocks",
+            "Con qué frecuencia comprobar si el perfil activo sigue eludiendo bloqueos",
+            "Wie oft geprüft wird, dass das laufende Profil Sperren weiterhin umgeht",
+            "多久检查一次运行中的配置文件仍能绕过屏蔽",
+            "Fréquence à laquelle vérifier que le profil lancé contourne toujours les blocages",
+            "कितनी बार जाँचें कि चलती प्रोफ़ाइल अब भी अवरोध तोड़ती है"),
         ROW("settings.save", "Сохранить", "Save", "Guardar", "Speichern", "保存", "Enregistrer",
             "सहेजें"),
         // The acknowledgement the Save button puts beside itself for two seconds. The tick is the whole

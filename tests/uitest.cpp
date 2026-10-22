@@ -4,11 +4,16 @@
 // runnable straight from a shell). Like coretest it is a plain console program: readable PASS/FAIL
 // lines, non-zero exit on any failure, no QTest data-driven scaffolding.
 //
-// Deliberately NOT covered here: a constructed MainWindow (it needs a window manager and, for the tray
-// paths, a tray host) — its pure policy predicates are covered — anything that would spawn
-// pkexec/winws, and real network reachability (the ping test only asserts that a verdict arrives).
-// DownloadDialog is constructed but never started: startFetch() is the only thing in it that touches
-// GitHub, and a test suite must not depend on that answer.
+// Deliberately NOT covered here: anything that would spawn pkexec or winws, and real network
+// reachability (the ping test only asserts that a verdict arrives). DownloadDialog is constructed but
+// never started: startFetch() is the only thing in it that touches GitHub, and a test suite must not
+// depend on that answer.
+//
+// A constructed MainWindow is covered in exactly one place — the watchdog section, which needs the real
+// catalog and journal to prove that a dead bypass turns into an offer. It is built without a window
+// manager (offscreen), never shown, and its three seams that would need a desktop, a network or a root
+// prompt are overridden; the store it reads is the redirected test identity, and that section skips
+// itself when the harness has not redirected it.
 
 #include "BlockcheckEngine.h"
 #include "IZapretBackend.h"
@@ -109,6 +114,12 @@ static void testSettings()
         check(s.startLastOnLaunch() == false, "default startLastOnLaunch is false");
         check(s.minimizeToTray() == true, "default minimizeToTray is true");
         check(s.pingIntervalSec() == 5, "default ping interval is 5s");
+        check(s.watchdogIntervalMin() == 5, "default watchdog interval is 5 min");
+        check(Settings::kWatchdogDefaultIntervalMin == 5,
+              "and the default the window reads is the same number");
+        check(s.watchdogIntervalMin() >= Settings::kWatchdogMinIntervalMin
+                  && s.watchdogIntervalMin() <= Settings::kWatchdogMaxIntervalMin,
+              "the default sits inside the range the page offers");
         check(s.theme() == QLatin1String("dark"), "default theme is dark");
 
         QSignalSpy changed(&s, &Settings::changed);
@@ -116,8 +127,9 @@ static void testSettings()
         s.setLastStrategyId(QStringLiteral("general"));
         s.setStartLastOnLaunch(true);
         s.setMinimizeToTray(false);
+        s.setWatchdogIntervalMin(15);
         s.setTheme(QStringLiteral("system"));
-        check(changed.count() == 5, "each setter emits changed()");
+        check(changed.count() == 6, "each setter emits changed()");
 
         // The spinbox range is also enforced in the model, so a bad value cannot be persisted.
         s.setPingIntervalSec(900);
@@ -126,6 +138,16 @@ static void testSettings()
         check(s.pingIntervalSec() == 3, "ping interval clamped to 3");
         s.setPingIntervalSec(12);
         check(s.pingIntervalSec() == 12, "ping interval stored as given");
+        // Same for the watchdog, against its own published bounds: a stored 0 would arm a timer that
+        // fires continuously, and a stored 900 one that never fires in a session.
+        s.setWatchdogIntervalMin(0);
+        check(s.watchdogIntervalMin() == Settings::kWatchdogMinIntervalMin,
+              "watchdog interval clamped to the floor");
+        s.setWatchdogIntervalMin(900);
+        check(s.watchdogIntervalMin() == Settings::kWatchdogMaxIntervalMin,
+              "watchdog interval clamped to the ceiling");
+        s.setWatchdogIntervalMin(15);
+        check(s.watchdogIntervalMin() == 15, "watchdog interval stored as given");
     }
 
     {
@@ -136,6 +158,7 @@ static void testSettings()
         check(reopened.minimizeToTray() == false, "minimizeToTray round-trip");
         check(reopened.theme() == QLatin1String("system"), "theme round-trip");
         check(reopened.pingIntervalSec() == 12, "ping interval round-trip");
+        check(reopened.watchdogIntervalMin() == 15, "watchdog interval round-trip");
     }
 }
 
@@ -750,6 +773,32 @@ static void testTrayPolicy()
     check(theme && fieldEndsInStretch(theme), "the theme picker is held to the left of its row");
     check(interval && fieldEndsInStretch(interval), "and so is the interval box");
 
+    // ---- the watchdog's cadence ----
+    // The page is the only place the number is chosen, so the range it offers has to be the range the
+    // model stores and the window arms its timer from — one spelling, read from Settings rather than
+    // repeated as a second pair of literals here. Shaped like the box above on purpose.
+    QSpinBox *watchdog = page.watchdogIntervalField();
+    check(watchdog != nullptr, "the page carries a watchdog interval field");
+    check(watchdog && watchdog->maximumWidth() == 200, "it is one short value wide like the others");
+    check(watchdog && watchdog->buttonSymbols() == QAbstractSpinBox::NoButtons,
+          "and it shows no stepper arrows either");
+    check(watchdog && watchdog->minimum() == Settings::kWatchdogMinIntervalMin
+                  && watchdog->maximum() == Settings::kWatchdogMaxIntervalMin,
+          "its range is the model's range, 1 to 60 minutes");
+    check(watchdog && fieldEndsInStretch(watchdog), "and it is held to the left of its row");
+    check(watchdog && !watchdog->suffix().isEmpty(), "the unit is spelled on the field");
+    check(watchdog && watchdog->property("i18nSuffix").toString()
+                          == QLatin1String("settings.watchdog_suffix"),
+          "tagged for retranslation, so the unit moves with the language");
+    // Loaded from the model, not left on the widget's own default: the store said 5 minutes.
+    check(watchdog && watchdog->value() == settings.watchdogIntervalMin(),
+          "the field opens on the stored interval");
+    // And committed back through Save, the only way this page writes anything.
+    if (watchdog)
+        watchdog->setValue(30);
+    save->click();
+    check(settings.watchdogIntervalMin() == 30, "Save wrote the new interval through the model");
+
     // A write that came from somewhere else (a download, the startup auto-location) re-reads the page
     // rather than leaving it showing a stale path.
     const QString other = dir.filePath(QStringLiteral("zapret/windows"));
@@ -1064,7 +1113,8 @@ static void testLanguage()
 
     // The walk itself, on a widget that already exists: tag-and-rewrite is what makes a language switch
     // take effect without a restart, so it is checked on the log panel's own toolbar — buttons, the
-    // filter combo's entries, and the tooltips — rather than on a MainWindow this suite does not build.
+    // filter combo's entries, and the tooltips — rather than on the window, whose tree is the watchdog
+    // section's business and needs a store of its own.
     {
         LogPanel panel;
         LanguageManager::instance().setCode(QStringLiteral("de"));
@@ -1469,6 +1519,329 @@ static void testDownloadDialog()
           "an unannounced size is called unknown, not zero");
 }
 
+// ------------------------------------------------------------------- Watchdog ----
+//
+// The quiet bypass check: a timer asks one host whether the live profile still gets through, and a FAIL
+// turns into a red journal line, a balloon and an offer to switch. The deciding half is pure and is
+// checked as such; the acting half is checked on a real window, because what it does depends on the
+// catalog, on the row the power button points at, and on the journal that has to say it out loud.
+//
+// Three things in that path need something a test suite must not have — a network (the engine's probe),
+// a desktop (the modal), a root prompt (the backend's stop/start) — and all three are MainWindow's
+// virtual seams, overridden below. Everything between them is the production code.
+
+namespace {
+
+// A verdict map in the engine's own JSON shape, so the watchdog is handed exactly what testFinished
+// would hand it: one entry per host, `success` the only field the decision reads.
+QJsonObject watchdogVerdicts(const QStringList &hosts, const QStringList &through)
+{
+    QJsonObject out;
+    for (const QString &host : hosts) {
+        HostCheckResult r;
+        r.success = through.contains(host);
+        r.attempts = 3;
+        r.attemptsOk = r.success ? 3 : 0;
+        r.avgLatency = r.success ? 40 : -1;
+        r.ttfbMs = r.success ? 12 : -1;
+        r.lastError = r.success ? QString() : QStringLiteral("connection timed out");
+        out.insert(host, BlockcheckEngine::resultToJson(r));
+    }
+    return out;
+}
+
+// The row id the window uses for a strategy: the parser's name when it has one, the file when it does
+// not. The same expression populateCards() and watchdogNextStrategyId() use.
+QString watchdogRowId(const Strategy &s)
+{
+    return s.id.isEmpty() ? s.filePath : s.id;
+}
+
+// A linux tree the parser names two profiles in: the sysv/openrc init script — which survives the scan
+// only because <root>/config exists, since an unconfigured tree loses its InitScript card — and the
+// portable nfqws payload synthesised from binaries/<arch>/nfqws. Two rows is the point: with one profile
+// in the list there is nothing to rotate to, and the whole prompt path would be unreachable.
+bool makeWatchdogTree(const QString &root)
+{
+    const QString initBody = QStringLiteral(
+        "#!/bin/sh\ncase \"$1\" in\n  start) echo starting ;;\n  stop) echo stopping ;;\nesac\n");
+    bool ok = true;
+    ok &= writeTextFile(root + QLatin1String("/init.d/sysv/zapret"), initBody);
+    ok &= writeTextFile(root + QLatin1String("/init.d/openrc/zapret"), initBody);
+    ok &= writeTextFile(root + QLatin1String("/config.default"),
+                        QStringLiteral("#!/bin/sh\n# options\n"));
+    ok &= writeTextFile(root + QLatin1String("/config"), QStringLiteral("MODE_FILTER=none\n"));
+    const QString arch = ZapretPaths::nativeArchDirName();
+    ok &= writeTextFile(root + QLatin1String("/binaries/")
+                            + (arch.isEmpty() ? QStringLiteral("linux-x86_64") : arch)
+                            + QLatin1String("/nfqws"),
+                        QStringLiteral("fixture payload\n"));
+    return ok;
+}
+
+// The window under test: the same class, with its three answers replaced.
+class WatchdogProbe : public MainWindow
+{
+public:
+    using MainWindow::MainWindow;
+
+    int probes = 0;
+    int confirms = 0;
+    bool answerYes = true;
+    QStringList confirmPairs;   // "from|next", one per question asked
+    QStringList performed;      // "from|next", one per rotation actually carried out
+
+protected:
+    void startWatchdogProbe(const Strategy &strategy) override
+    {
+        ++probes;
+        // Not the base: the base drives the shared engine, which would bring a profile up through
+        // pkexec and probe the real internet from a test binary. The verdict is fed to
+        // onWatchdogResult() by hand instead, which is where the base's cycle would have landed.
+    }
+
+    bool confirmWatchdogRotation(const QString &fromName, const QString &nextName) override
+    {
+        ++confirms;
+        confirmPairs << (fromName + QLatin1Char('|') + nextName);
+        return answerYes;   // no modal anywhere in this suite — nothing out here could answer one
+    }
+
+    void performWatchdogRotation(const QString &fromId, const QString &nextId) override
+    {
+        performed << (fromId + QLatin1Char('|') + nextId);
+        // Again not the base: the real act stops a live payload and starts another, both through the
+        // backend. The intent it replaces is what watchdogRotationRequested has already recorded.
+    }
+};
+
+} // namespace
+
+static void testWatchdog()
+{
+    std::printf("\n[Watchdog]\n");
+
+    using S = IZapretBackend::State;
+
+    // ---- the one host, and the cadence ----
+    const QString quick = MainWindow::watchdogQuickHost();
+    check(quick == QLatin1String("discord.com"), "the quiet check probes one quick host");
+    check(MainWindow::profilePingHosts().contains(quick),
+          "and it is a service the profile rows promise to unblock");
+    check(quick != QLatin1String("google.com"),
+          "…not the baseline, which answers happily with no bypass at all");
+
+    check(MainWindow::watchdogIntervalMs(5) == 300000, "the default five minutes is five minutes");
+    check(MainWindow::watchdogIntervalMs(Settings::kWatchdogDefaultIntervalMin) == 300000,
+          "and the window's default is the model's default, spelled once");
+    check(MainWindow::watchdogIntervalMs(1) == 60000, "the floor is a minute");
+    check(MainWindow::watchdogIntervalMs(60) == 3600000, "the ceiling is an hour");
+    check(MainWindow::watchdogIntervalMs(0) == 60000, "a stored zero is not a timer that never rests");
+    check(MainWindow::watchdogIntervalMs(-9) == 60000, "nor is a negative one");
+    check(MainWindow::watchdogIntervalMs(100000) == 3600000,
+          "and a hand-edited huge value is an hour, not a check that never happens");
+
+    // ---- when a tick may measure ----
+    check(MainWindow::watchdogShouldProbe(S::Running, false, false), "a live run is re-checked");
+    check(!MainWindow::watchdogShouldProbe(S::Running, true, false),
+          "a tick does not stack on the quiet cycle it started");
+    check(!MainWindow::watchdogShouldProbe(S::Running, false, true),
+          "…nor on the round the user pressed");
+    check(!MainWindow::watchdogShouldProbe(S::Stopped, false, false),
+          "a stopped profile has nothing for the answer to describe");
+    check(!MainWindow::watchdogShouldProbe(S::Starting, false, false),
+          "a launch in flight has opened nothing yet");
+    check(!MainWindow::watchdogShouldProbe(S::Stopping, false, false),
+          "and a teardown is closing the path it would measure");
+    check(!MainWindow::watchdogShouldProbe(S::Error, false, false),
+          "a failed run is not a live one");
+
+    // ---- what counts as dead ----
+    const QStringList one{quick};
+    check(MainWindow::watchdogCycleFailed(watchdogVerdicts(one, {})),
+          "no attempt through on any host is the FAIL the watchdog exists for");
+    check(!MainWindow::watchdogCycleFailed(watchdogVerdicts(one, one)),
+          "the same host getting through is not");
+    check(!MainWindow::watchdogCycleFailed(QJsonObject()),
+          "an empty map is a broken measurement, not a dead bypass");
+    const QStringList two{quick, QStringLiteral("youtube.com")};
+    check(!MainWindow::watchdogCycleFailed(watchdogVerdicts(two, {QStringLiteral("youtube.com")})),
+          "one living host out of two is the bypass working");
+    QJsonObject bare;
+    bare.insert(quick, QJsonObject{{QStringLiteral("latency"), 30}});
+    check(MainWindow::watchdogCycleFailed(bare), "a verdict with no success key is not a pass");
+
+    // ---- which profile comes next ----
+    QList<Strategy> list;
+    for (const char *name : {"A", "B", "C"}) {
+        Strategy s;
+        s.id = QLatin1String(name);
+        s.name = QLatin1String(name);
+        list.append(s);
+    }
+    Strategy unnamed;
+    unnamed.filePath = QStringLiteral("/opt/zapret/linux/no-name.sh");
+    QList<Strategy> withUnnamed = list;
+    withUnnamed << unnamed;
+
+    check(MainWindow::watchdogNextStrategyId(list, QStringLiteral("A")) == QLatin1String("B"),
+          "the next row in the list is the one offered");
+    check(MainWindow::watchdogNextStrategyId(list, QStringLiteral("B")) == QLatin1String("C"),
+          "…and the one after that, the time after");
+    check(MainWindow::watchdogNextStrategyId(list, QStringLiteral("C")) == QLatin1String("A"),
+          "the list wraps instead of running out");
+    check(MainWindow::watchdogNextStrategyId(list, QStringLiteral("Z")) == QLatin1String("A"),
+          "a run that names nothing on the list gets the first row");
+    check(MainWindow::watchdogNextStrategyId(list, QString()) == QLatin1String("A"),
+          "…and so does a run with no name at all");
+    check(MainWindow::watchdogNextStrategyId(withUnnamed, QStringLiteral("C")) == unnamed.filePath,
+          "a row the parser could not name is addressed by its path");
+    check(MainWindow::watchdogNextStrategyId(QList<Strategy>{list.first()}, QStringLiteral("A"))
+              .isEmpty(),
+          "one profile in the list is not a rotation");
+    check(MainWindow::watchdogNextStrategyId(QList<Strategy>{}, QStringLiteral("A")).isEmpty(),
+          "nor is an empty list");
+
+    // ---- the acting half, on a real window ----
+    //
+    // A window builds its own Settings from the process identity, so this section runs only where the
+    // harness has redirected the config location into the build tree (CMake sets XDG_CONFIG_HOME to
+    // <build>/test-home/config for uitest). Requiring the path to sit under the binary's own directory
+    // is what makes that safe rather than merely likely: a developer running the suite from a shell
+    // where XDG_CONFIG_HOME is just ~/.config has that variable set, and a check against it alone would
+    // let the test write into their real config home. Anywhere else it skips.
+    const QString buildTree = QCoreApplication::applicationDirPath();
+    const QString xdgConfig = qEnvironmentVariable("XDG_CONFIG_HOME");
+    const QString configBase =
+        QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    QDir().mkpath(xdgConfig);   // the store's directory is created on its first write anyway
+    const QString canonicalXdg = QDir(xdgConfig).canonicalPath();
+    const QString canonicalBuild = QDir(buildTree).canonicalPath();
+    const bool redirected = !xdgConfig.isEmpty() && !canonicalXdg.isEmpty()
+                            && QDir::cleanPath(configBase) == QDir::cleanPath(xdgConfig)
+                            && canonicalXdg.startsWith(canonicalBuild + QLatin1Char('/'));
+    if (!redirected) {
+        std::printf("  SKIP  the window section needs XDG_CONFIG_HOME redirected into the build tree "
+                    "(run it through ctest)\n");
+        return;
+    }
+
+    QTemporaryDir dir;
+    check(dir.isValid(), "temporary directory for the fixture tree");
+    const QString root = dir.filePath(QStringLiteral("zapret/linux"));
+    check(makeWatchdogTree(root), "a two-profile linux tree written");
+
+    Settings store;   // the same store a MainWindow constructed here resolves to
+    const QString savedPath = store.zapretPath();
+    const QString savedLast = store.lastStrategyId();
+    const bool savedStart = store.startLastOnLaunch();
+    const int savedInterval = store.watchdogIntervalMin();
+
+    store.setStartLastOnLaunch(false);   // nothing may start itself while the window is being built
+    store.setLastStrategyId(QString());
+    store.setWatchdogIntervalMin(7);     // a cadence only this suite sees, so the timer is checkable
+    store.setZapretPath(root);
+
+    {
+        WatchdogProbe window;
+        const QList<Strategy> catalog = window.manager()->strategies();
+        check(catalog.size() >= 2,
+              QStringLiteral("the fixture tree gives the window %1 profiles").arg(catalog.size()));
+        check(window.cardCount() >= 2, "and draws a row for each of them");
+
+        check(window.watchdogTimerActive(), "the watchdog is armed the moment the window exists");
+        check(window.watchdogTimerInterval() == 7 * 60 * 1000,
+              "and it beats on the stored cadence, not on a literal in the window");
+
+        // The other half of startWatchdog()'s rule: Settings::changed() answers every write, and the
+        // one a start makes must not push the next check further out. Written through the window's own
+        // model — which is the same object SettingsPage holds a reference to — because that is the only
+        // way the application ever changes a setting.
+        window.settingsModel()->setLastStrategyId(QStringLiteral("an-unrelated-write"));
+        check(window.watchdogTimerInterval() == 7 * 60 * 1000,
+              "a write that did not move the interval leaves the countdown alone");
+        window.settingsModel()->setWatchdogIntervalMin(20);
+        check(window.watchdogTimerInterval() == 20 * 60 * 1000,
+              "a new interval re-arms the timer with the new one");
+
+        // A tick on a stopped window must not reach the engine at all.
+        window.onWatchdogTick();
+        check(window.probes == 0, "a stopped window asks the engine for nothing");
+
+        // ---- the dead bypass, answered yes ----
+        QSignalSpy rotation(&window, &MainWindow::watchdogRotationRequested);
+        const QString fromId = watchdogRowId(catalog.first());   // what the window points at idle
+        const QString nextId = MainWindow::watchdogNextStrategyId(catalog, fromId);
+        check(!nextId.isEmpty(), "the fixture list has something to rotate to");
+        QString nextName;
+        for (const Strategy &s : catalog)
+            if (watchdogRowId(s) == nextId)
+                nextName = s.name;
+
+        const int before = window.logPanel()->storedLineCount();
+        window.onWatchdogResult(watchdogVerdicts(one, {}));
+        const QString alert = LanguageManager::tr(QStringLiteral("watchdog.alert"));
+        const QString rotating = LanguageManager::tr(QStringLiteral("watchdog.rotating")).arg(nextName);
+
+        check(window.logPanel()->storedLineCount() == before + 2,
+              "one dead check costs the journal two lines — the alert, and the switch");
+        check(!alert.contains(QStringLiteral("%1")), "the alert sentence needs no arguments");
+        QTextBlock hit, moved;
+        QTextDocument *doc = window.logPanel()->view()->document();
+        for (QTextBlock b = doc->firstBlock(); b.isValid(); b = b.next()) {
+            if (b.text().contains(alert))
+                hit = b;
+            if (b.text().contains(rotating))
+                moved = b;
+        }
+        check(hit.isValid(), "the alert is in the journal, in the current language");
+        check(hit.isValid() && firstForegroundColor(hit) == Theme::error().name(QColor::HexRgb),
+              "and it is the red line, not an info row");
+        check(moved.isValid(), "and the switch names the profile it is making");
+
+        check(window.confirms == 1, "the user is asked once, not twice for one verdict");
+        check(window.confirmPairs.size() == 1
+                  && window.confirmPairs.first()
+                         == catalog.first().name + QLatin1Char('|') + nextName,
+              "the question names the profile that died and the one being offered");
+        check(rotation.count() == 1, "a yes is recorded as the intent to switch profiles");
+        if (rotation.count() == 1) {
+            check(rotation.at(0).size() == 2, "…carried as the pair of ids");
+            check(rotation.at(0).at(0).toString() == fromId, "from the profile whose check failed");
+            check(rotation.at(0).at(1).toString() == nextId, "to the next row in the list");
+        }
+        check(window.performed.size() == 1 && window.performed.first()
+                                        == fromId + QLatin1Char('|') + nextId,
+              "and the act is asked for exactly the pair the intent named");
+
+        // ---- the same verdict, answered no ----
+        window.answerYes = false;
+        const int askedBefore = window.logPanel()->storedLineCount();
+        window.onWatchdogResult(watchdogVerdicts(one, {}));
+        check(window.confirms == 2, "a second dead check asks again");
+        check(rotation.count() == 1, "a no is not a switch: nothing more was requested");
+        check(window.performed.size() == 1, "…and nothing was performed");
+        check(window.logPanel()->storedLineCount() == askedBefore + 1,
+              "the alert is still given when the answer is no");
+
+        // ---- a pass, and a cycle that produced nothing: silence ----
+        const int silentBefore = window.logPanel()->storedLineCount();
+        window.onWatchdogResult(watchdogVerdicts(one, one));
+        window.onWatchdogResult(QJsonObject());
+        check(window.logPanel()->storedLineCount() == silentBefore,
+              "a passing check and a broken one leave the journal untouched");
+        check(window.confirms == 2, "neither asks the user anything");
+        check(rotation.count() == 1, "…and neither switches a profile");
+
+        store.setLastStrategyId(QString());   // do not leave the fixture's route to a later run
+    }
+
+    store.setZapretPath(savedPath);
+    store.setLastStrategyId(savedLast);
+    store.setStartLastOnLaunch(savedStart);
+    store.setWatchdogIntervalMin(savedInterval);
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
@@ -1494,6 +1867,7 @@ int main(int argc, char **argv)
     testTheme(app);
     testPingService();
     testDownloadDialog();
+    testWatchdog();
 
     std::printf("\n=== %s (%d failures) ===\n", g_failures ? "FAILED" : "ALL PASS", g_failures);
     return g_failures ? 1 : 0;
