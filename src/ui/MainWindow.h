@@ -16,9 +16,11 @@ class QAction;
 class QCloseEvent;
 class QFrame;
 class QHBoxLayout;
+class QJsonObject;
 class QLabel;
 class QMenu;
 class QMouseEvent;
+class QProgressBar;
 class QPushButton;
 class QScrollArea;
 class QStackedWidget;
@@ -30,6 +32,7 @@ class QWidget;
 
 namespace zapret {
 
+class BlockcheckEngine;
 class LogPanel;
 class PingIndicator;
 class PingService;
@@ -130,6 +133,13 @@ public:
     static QStringList profilePingHosts();
     // Whether a verdict from the service may repaint this row.
     static bool rowFollowsCycle(bool manualRound, bool rowIsActive);
+
+    // The verdict sheet for one finished bypass check: a line per host in QJsonObject's own sorted
+    // key order (so the sheet cannot reorder between two presses), "Discord: OK (45 ms)" or
+    // "Youtube: FAIL", with the catalog's certificate warning appended to an OK whose TLS
+    // certificate was rejected — the one line that says "intercepted" rather than "unreachable".
+    // Static because the formatting is a policy of its own and checkable without a window.
+    static QString blockcheckResultText(const QJsonObject &results);
 
     // Accessors used by tests and by nothing else in the app.
     ZapretManager *manager() const { return m_manager; }
@@ -266,6 +276,17 @@ private:
     // already ended.
     void beginPingTest();
     void endPingTest();
+
+    // ---- the real-bypass check ----------------------------------------------------------
+    // The profiles page's second measuring press. Where the ping test asks "are the services
+    // reachable", this one asks the harder question through a preset the engine itself brings up
+    // and takes back down (BlockcheckEngine): connect, TLS handshake, certificate verdict, three
+    // tries per host. The window owns no part of the measurement — it presses, drives the bar and
+    // the button's wording, and opens the verdict sheet when testFinished lands.
+    void onBlockcheckRequested();
+    void beginBlockcheck();
+    void endBlockcheck();
+    void onBlockcheckFinished(const QJsonObject &results);
     void updateStatusUi();
     // Draw the chip and the power button for one state, with no reference to what the manager says it
     // is in. updateStatusUi() calls it with the real state; the Stop press calls the feedback below,
@@ -307,6 +328,10 @@ private:
     Settings *m_settings = nullptr;
     ZapretManager *m_manager = nullptr;
     PingService *m_ping = nullptr;
+
+    // The real-bypass check's engine. A child of the window — it lives on this thread, and only its
+    // internal probe worker does not — wired to the same manager the power button drives.
+    BlockcheckEngine *m_blockcheck = nullptr;
     LogPanel *m_log = nullptr;
 
     QWidget *m_sidebar = nullptr;          // the rail: brand, the journal glyph, settings and version
@@ -353,6 +378,14 @@ private:
     QSet<QString> m_pingTestPending;
     QTimer *m_pingTestWatchdog = nullptr;   // ends the round if the service never answers at all
     QPushButton *m_pingTestButton = nullptr;
+    // ---- the real-bypass check round ---------------------------------------------------------
+    // The button, the slim bar under the page head, and the one flag that says a cycle owns them.
+    // No watchdog lives here: every phase of the engine is bounded by its own deadlines, and
+    // testFinished is contractually the last word of every run — including a failed one — so the
+    // window never has to guess whether an answer is still coming.
+    bool m_blockcheckActive = false;
+    QPushButton *m_blockcheckButton = nullptr;
+    QProgressBar *m_blockcheckProgress = nullptr;
     // The profile the power button will run — read at start, written on every row press, and persisted
     // through Settings under lastStrategyId so it survives a restart. Empty means "nothing chosen yet",
     // which the power button answers by opening the profiles page.

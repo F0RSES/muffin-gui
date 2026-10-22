@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The real-bypass check: a shield carrying a check. Reads as "verify the path is actually open"
+     beside the ping test's pulse. Monochrome currentColor + declared 24px box — see icons/app.svg
+     for the contract. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2.9l7.1 2.5v5.3c0 4.6-2.9 8.2-7.1 10.4-4.2-2.2-7.1-5.8-7.1-10.4V5.4z"/>
+    <polyline points="8.7 11.9 11.1 14.3 15.5 9.5"/>
+</svg>

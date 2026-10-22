@@ -288,6 +288,11 @@ QDialogButtonBox QPushButton { min-width: 84px; }
 QProgressBar { border: 1px solid #D1D5DB; border-radius: 6px; background: #F9FAFB; color: #1F2937; }
 QProgressBar::chunk { background-color: #0891B2; border-radius: 5px; }
 
+/* The profiles page's bypass-check meter: a 6 px thread under the page head, not the download's
+   bar — it reports one button press. Geometry only; the colours come from the rules above. */
+QProgressBar#blockcheckProgress { min-height: 6px; max-height: 6px; border-radius: 3px; }
+QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
+
 /* ---------- window surfaces (keep this block last) ---------------------------
    Same cascade trap as the dark sheet: the generic transparent QWidget rule outranks the window rule at
    the top of the file, so anything with nothing behind it (the window itself, the stacked widget, the

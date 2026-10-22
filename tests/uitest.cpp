@@ -10,6 +10,7 @@
 // DownloadDialog is constructed but never started: startFetch() is the only thing in it that touches
 // GitHub, and a test suite must not depend on that answer.
 
+#include "BlockcheckEngine.h"
 #include "IZapretBackend.h"
 #include "DownloadDialog.h"
 #include "LanguageManager.h"
@@ -902,6 +903,74 @@ static void testWindowPolicy()
           "a manual round reaches the rows that are not running");
     check(MainWindow::rowFollowsCycle(true, true),
           "and the one that is");
+
+    // ---- the bypass check's verdict sheet ----
+    //
+    // The engine measures and the window words. What sits between them is this pure formatter, so the
+    // two halves are run through each other here: a verdict goes out as the engine's own JSON (its real
+    // resultToJson, not a hand-copy of the shape) and comes back as the line the user reads. That is
+    // what catches a key renamed on one side only — a sheet that silently prints "FAIL (0 ms)" for
+    // every host that actually passed.
+    auto sheetFor = [](const QString &host, const HostCheckResult &r) {
+        QJsonObject map;
+        map.insert(host, BlockcheckEngine::resultToJson(r));
+        return MainWindow::blockcheckResultText(map);
+    };
+
+    HostCheckResult pass;
+    pass.success = true;
+    pass.avgLatency = 45;
+    pass.attemptsOk = 3;
+    pass.attempts = 3;
+    check(sheetFor(QStringLiteral("youtube.com"), pass)
+              == QStringLiteral("Youtube: OK (45 ms)"),
+          "a host that got through reads as OK with its latency");
+
+    HostCheckResult dead;
+    dead.success = false;
+    dead.avgLatency = -1;
+    dead.attempts = 3;
+    dead.lastError = QStringLiteral("connect timed out after 3000 ms");
+    check(sheetFor(QStringLiteral("discord.com"), dead) == QStringLiteral("Discord: FAIL"),
+          "a host that did not is a bare FAIL with no latency invented for it");
+
+    // The one line that means "intercepted", not "unreachable" — and the only case the sheet decorates.
+    HostCheckResult intercepted = pass;
+    intercepted.isCertificateValid = false;
+    check(sheetFor(QStringLiteral("youtube.com"), intercepted)
+              == QStringLiteral("Youtube: OK (45 ms) — %1")
+                     .arg(LanguageManager::tr(QStringLiteral("blockcheck.cert_invalid"))),
+          "an OK whose certificate was rejected says so on the same line");
+    HostCheckResult deadUntrusted = dead;
+    deadUntrusted.isCertificateValid = false;
+    check(sheetFor(QStringLiteral("discord.com"), deadUntrusted)
+              == QStringLiteral("Discord: FAIL"),
+          "a host that never got through is not also blamed for its certificate");
+
+    // An absent flag must read as the ordinary pass: the sheet is also handed maps written by older
+    // builds and by muffin-cli, where the field simply is not there.
+    QJsonObject legacy;
+    legacy.insert(QStringLiteral("youtube.com"),
+                  QJsonObject{{QStringLiteral("success"), true},
+                              {QStringLiteral("latency"), 12}});
+    check(MainWindow::blockcheckResultText(legacy) == QStringLiteral("Youtube: OK (12 ms)"),
+          "a map without a certificate_valid key defaults to trusted, not to a warning");
+
+    check(MainWindow::blockcheckResultText(QJsonObject()).isEmpty(),
+          "no results is no lines — the empty map is the caller's no_results dialog instead");
+
+    // Two hosts, inserted both ways round: QJsonObject owns the ordering, so the sheet a user reads
+    // cannot depend on the order the probes happened to finish in.
+    QJsonObject forward, backward;
+    forward.insert(QStringLiteral("discord.com"), BlockcheckEngine::resultToJson(dead));
+    forward.insert(QStringLiteral("youtube.com"), BlockcheckEngine::resultToJson(pass));
+    backward.insert(QStringLiteral("youtube.com"), BlockcheckEngine::resultToJson(pass));
+    backward.insert(QStringLiteral("discord.com"), BlockcheckEngine::resultToJson(dead));
+    const QString two = MainWindow::blockcheckResultText(forward);
+    check(two == MainWindow::blockcheckResultText(backward),
+          "the sheet is the same text whatever order the results arrived in");
+    check(two == QStringLiteral("Discord: FAIL\nYoutube: OK (45 ms)"),
+          "one line per host, in the map's own sorted order");
 }
 
 // ------------------------------------------------------------ LanguageManager ----

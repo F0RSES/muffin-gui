@@ -33,6 +33,7 @@ add_library(zapretcore STATIC
     src/core/PrivilegeHelper.cpp
     src/core/ZapretManager.cpp
     src/core/PingService.cpp
+    src/core/BlockcheckEngine.cpp
     src/platform/WindowsBackend.cpp
     src/platform/LinuxBackend.cpp
 )
@@ -46,6 +47,7 @@ target_sources(zapretcore PRIVATE
     src/core/ZapretDownloader.h
     src/core/ZapretManager.h
     src/core/PingService.h
+    src/core/BlockcheckEngine.h
     src/platform/WindowsBackend.h
     src/platform/LinuxBackend.h
 )
@@ -197,6 +199,25 @@ if (WIN32)
     endif()
 endif()
 
+# ---- muffin-cli: the blockcheck console --------------------------------------
+# The same BlockcheckEngine the GUI's «Проверить реальный обход» button drives, behind a
+# QCoreApplication: start a preset, probe the services through it, print the verdicts as JSON on
+# stdout (logs go to stderr, so `muffin-cli ... | jq` stays clean). This is the head for routers,
+# CI jobs and the future watchdog — no QtWidgets, no window, and exit codes a script can branch on.
+# Deliberately no WIN32 keyword: that flag is what switches a Windows target to the GUI subsystem
+# and detaches it from its console, and a console is the whole point here. Not built on emscripten,
+# where QProcess (and with it every backend) does not exist.
+if (NOT EMSCRIPTEN)
+    add_executable(muffin-cli src/cli/main.cpp)
+    target_compile_definitions(muffin-cli PRIVATE MUFFIN_VERSION="${MUFFIN_VERSION}")
+    target_link_libraries(muffin-cli PRIVATE zapretcore)
+    set_target_properties(muffin-cli PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        WIN32_EXECUTABLE FALSE
+        MACOSX_BUNDLE FALSE
+    )
+endif()
+
 # ---- tests ------------------------------------------------------------------
 # coretest: QtCore-only console verifier for the parser/locator/manager/backends.
 add_executable(coretest tests/coretest.cpp)
@@ -238,6 +259,11 @@ if (MSVC)
     target_compile_options(zapretcore PRIVATE /utf-8)
     target_compile_options(coretest PRIVATE /utf-8)
     target_compile_options(uitest PRIVATE /utf-8)
+    # TARGET-guarded because the CLI does not exist on the emscripten toolchain, which is the one
+    # configuration where an MSVC compile and a missing target could otherwise meet.
+    if (TARGET muffin-cli)
+        target_compile_options(muffin-cli PRIVATE /utf-8)
+    endif()
 endif()
 
 # ---- install rules ----------------------------------------------------------
@@ -245,6 +271,12 @@ endif()
 # build + ctest) never touches them, and nothing here runs unless someone does `cmake --install` or
 # `cpack`. The test targets are deliberately not installed.
 install(TARGETS Muffin RUNTIME DESTINATION bin)
+
+# The console blockcheck rides along with the GUI package: one apt install gives a router or a CI
+# job the same measurement the window offers, and the DEB/NSIS file lists pick this up unchanged.
+if (NOT EMSCRIPTEN)
+    install(TARGETS muffin-cli RUNTIME DESTINATION bin)
+endif()
 
 # Linux-only desktop integration. A Windows build tree has no use for an icon theme or a .desktop
 # file, and the macOS case does not exist here, so the whole block is guarded — installing them on

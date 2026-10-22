@@ -27,22 +27,33 @@
 #include "LinuxBackend.h"
 #include "WindowsBackend.h"
 #include "WindowsArgs.h"
+#include "BlockcheckEngine.h"
+#include "blockcheck_testcert.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QSslKey>
+#include <QSslSocket>
 #include <QString>
 #include <QStringList>
 #include <QStandardPaths>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QThread>
 #include <QVector>
 
+#include <atomic>
 #include <functional>
 
 using namespace zapret;
@@ -324,6 +335,102 @@ private:
     QVector<IZapretBackend::State> m_states;
     QStringList m_logs;
     QStringList m_errors;
+};
+
+// ---- BlockcheckEngine: a throwaway TCP/TLS server on a worker thread ----
+//
+// checkHost() blocks its calling thread inside sliced waitFor* loops, so the server it probes has to
+// live on some other thread with a running event loop of its own — the same shape the GUI's async path
+// reaches by running the probes on a private QThread. This stands one up on 127.0.0.1 at an ephemeral
+// port in either plain-TCP or TLS mode; TLS always presents the self-signed blockcheck_testcert.h pair,
+// which VerifyPeer must reject — the substitution shape the engine exists to catch. accepted() counts
+// the connections it took, so a test can prove the probe actually landed instead of merely "not failed".
+class MockBlockServer : public QTcpServer
+{
+public:
+    // The PEM pair is parsed ONCE, here, into real QSslCertificate/QSslKey objects. Passing the raw
+    // QByteArrays straight to setLocalCertificate()/setPrivateKey() is the trap: Qt 6 made
+    // QSslCertificate(const QByteArray&) explicit, so a QByteArray argument converts to QString and
+    // binds the setLocalCertificate(const QString &fileName) overload instead — the server then
+    // silently runs with no certificate and every handshake dies with
+    // "SSL routines::no suitable signature algorithm" on the wire and a plain
+    // "The remote host closed the connection" on the probe side. A TLS failure that reads exactly like
+    // the case under test is the worst possible fixture, so the types are pinned by construction.
+    MockBlockServer(const QByteArray &cert, const QByteArray &key, bool tls)
+        : m_cert(QSslCertificate(cert, QSsl::Pem)),
+          m_key(QSslKey(key, QSsl::Rsa, QSsl::Pem)),
+          m_tls(tls) {}
+
+    int accepted() const { return m_accepted.load(); }
+    // True when TLS mode was handed a pair that actually parsed — a fixture that cannot present a
+    // certificate is a broken fixture, not a negative test case.
+    bool usable() const { return !m_tls || (!m_cert.isNull() && !m_key.isNull()); }
+
+protected:
+    void incomingConnection(qintptr descriptor) override
+    {
+        ++m_accepted;
+        // An unencrypted QSslSocket behaves exactly like a QTcpSocket, so one type serves both modes.
+        QSslSocket *sock = new QSslSocket(this);
+        QObject::connect(sock, &QIODevice::readyRead, sock, [sock] {
+            sock->readAll();
+            sock->write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            sock->flush();
+        });
+        QObject::connect(sock, &QAbstractSocket::disconnected, sock, &QObject::deleteLater);
+        if (!sock->setSocketDescriptor(descriptor)) {
+            sock->deleteLater();
+            return;
+        }
+        if (m_tls) {
+            // Order matters: identity first, then startServerEncryption() so the very ClientHello is
+            // answered with a Certificate message rather than an alert.
+            sock->setLocalCertificate(m_cert);
+            sock->setPrivateKey(m_key);
+            sock->startServerEncryption();
+        }
+    }
+
+private:
+    QSslCertificate m_cert;
+    QSslKey m_key;
+    bool m_tls;
+    std::atomic_int m_accepted{0};
+};
+
+// Owns the worker thread the server runs on. listen() happens on the constructing (main) thread so
+// serverPort() is known before the object is moved to its thread; from then on every socket event is
+// serviced by the worker's event loop. stop()/destruction quits that loop and joins it.
+class BlockServerThread
+{
+public:
+    explicit BlockServerThread(bool tls)
+    {
+        m_server = new MockBlockServer(zaprettest::blockcheckTestCert(),
+                                       zaprettest::blockcheckTestKey(), tls);
+        if (m_server->listen(QHostAddress::LocalHost, 0))
+            m_port = m_server->serverPort();
+        m_thread = new QThread;
+        m_server->moveToThread(m_thread);
+        QObject::connect(m_thread, &QThread::finished, m_server, &QObject::deleteLater);
+        m_thread->start();
+    }
+    ~BlockServerThread()
+    {
+        if (m_thread) {
+            m_thread->quit();
+            m_thread->wait(5000);
+            delete m_thread;
+        }
+    }
+    quint16 port() const { return m_port; }
+    int accepted() const { return m_server ? m_server->accepted() : 0; }
+    bool usable() const { return m_server && m_server->usable(); }
+
+private:
+    MockBlockServer *m_server = nullptr;
+    QThread *m_thread = nullptr;
+    quint16 m_port = 0;
 };
 
 static void pumpFor(int ms)
@@ -3428,6 +3535,444 @@ int main(int argc, char **argv)
 #else
     out << "  SKIP  real-execution tests need a POSIX host to run the /bin/sh fixtures\n";
 #endif
+
+    // ---- BlockcheckEngine ----
+    //
+    // Three tiers, in the order the engine's own header describes them. A pure tier (the tuning
+    // setters' floors, the resultToJson contract, and the input validation that returns before a
+    // socket is opened) that needs no I/O. A socket tier that runs checkHost() against throwaway
+    // local servers running on their own worker thread — a reachable plain port succeeds, an
+    // untrusted TLS handshake is refused with the certificate named (the substitution shape the
+    // engine exists to catch), and once that same test cert is trusted the verdict flips to success.
+    // An orchestration tier on POSIX that drives the full start/settle/probe/stop cycle through a
+    // real ZapretManager and a sleeping /bin/sh payload — never the real nfqws, never the network.
+    out << "\n[BlockcheckEngine]\n";
+
+    // (a) Tuning setters: every floor and the port range, asserted as data. A setter must clamp,
+    //     never take a nonsense value the unlocked probe worker would then read.
+    {
+        BlockcheckEngine e;
+        check(e.attempts() == 3 && e.attemptTimeoutMs() == 3000 && e.settleDelayMs() == 2500
+                  && e.startTimeoutMs() == 30000 && e.stopTimeoutMs() == 20000 && e.port() == 443,
+              "defaults are the documented ones");
+
+        e.setAttempts(0);
+        check(e.attempts() == 1, "setAttempts floors at 1");
+        e.setAttempts(7);
+        check(e.attempts() == 7, "setAttempts raises above the floor");
+        e.setAttemptTimeoutMs(10);
+        check(e.attemptTimeoutMs() == 200, "setAttemptTimeoutMs floors at 200 ms");
+        e.setSettleDelayMs(-500);
+        check(e.settleDelayMs() == 0, "setSettleDelayMs floors at 0");
+        e.setStartTimeoutMs(1);
+        check(e.startTimeoutMs() == 1000, "setStartTimeoutMs floors at 1000 ms");
+        e.setStopTimeoutMs(1);
+        check(e.stopTimeoutMs() == 1000, "setStopTimeoutMs floors at 1000 ms");
+
+        e.setPort(0);
+        check(e.port() == 443, "setPort ignores 0 (out of range)");
+        e.setPort(70000);
+        check(e.port() == 443, "setPort ignores a value above 65535");
+        e.setPort(8443);
+        check(e.port() == 8443, "setPort accepts a real port");
+    }
+
+    // (b) resultToJson: the exact contract both front doors and muffin-cli print — every key spelled
+    //     as the schema says, and "error" absent when there is nothing to report.
+    {
+        HostCheckResult r;
+        r.success = true; r.avgLatency = 42; r.isCertificateValid = true;
+        r.ttfbMs = 11; r.attemptsOk = 3; r.attempts = 3;
+        const QJsonObject ok = BlockcheckEngine::resultToJson(r);
+        check(ok.value(QStringLiteral("success")).toBool()
+                  && ok.value(QStringLiteral("latency")).toInt() == 42
+                  && ok.value(QStringLiteral("certificate_valid")).toBool()
+                  && ok.value(QStringLiteral("ttfb_ms")).toInt() == 11
+                  && ok.value(QStringLiteral("attempts_ok")).toInt() == 3
+                  && ok.value(QStringLiteral("attempts")).toInt() == 3,
+              "resultToJson carries the whole verdict");
+        check(!ok.contains(QStringLiteral("error")), "resultToJson omits error when lastError is empty");
+
+        r.success = false; r.avgLatency = -1; r.ttfbMs = -1; r.isCertificateValid = false;
+        r.attemptsOk = 0; r.lastError = QStringLiteral("TLS certificate rejected: x");
+        const QJsonObject bad = BlockcheckEngine::resultToJson(r);
+        check(!bad.value(QStringLiteral("success")).toBool()
+                  && bad.value(QStringLiteral("latency")).toInt() == -1
+                  && bad.value(QStringLiteral("ttfb_ms")).toInt() == -1
+                  && !bad.value(QStringLiteral("certificate_valid")).toBool(),
+              "resultToJson preserves the -1 sentinels and the false flags");
+        check(bad.value(QStringLiteral("error")).toString().contains(QStringLiteral("ertificate")),
+              "resultToJson includes error when one is set");
+    }
+
+    // (c) checkHost input validation: both guards return before opening a socket, so these never
+    //     block on I/O and are deterministic on every host.
+    {
+        BlockcheckEngine e;
+        e.setAttempts(1);
+        const HostCheckResult empty = e.checkHost(QStringLiteral("   "), 80, false);
+        check(!empty.success && empty.lastError == QStringLiteral("empty host"),
+              "checkHost rejects a blank host before any I/O");
+        const HostCheckResult p0 = e.checkHost(QStringLiteral("127.0.0.1"), 0, false);
+        check(!p0.success && p0.lastError.startsWith(QStringLiteral("invalid port")),
+              "checkHost rejects port 0");
+        const HostCheckResult pBig = e.checkHost(QStringLiteral("127.0.0.1"), 70000, false);
+        check(!pBig.success && pBig.lastError.startsWith(QStringLiteral("invalid port")),
+              "checkHost rejects an out-of-range port");
+    }
+
+    // (d) A reachable plain-TCP port. Off 443 the transport is the whole verdict, so the check
+    //     succeeds, and the server's answer is measured as a real TTFB number. The server lives on a
+    //     worker thread so it can accept+reply while checkHost() blocks this thread's loop.
+    {
+        BlockServerThread plain(false);
+        if (plain.port() == 0) {
+            check(false, "plain mock server listens on an ephemeral port");
+        } else {
+            BlockcheckEngine e;
+            e.setAttempts(2);
+            e.setAttemptTimeoutMs(3000);
+            const HostCheckResult r = e.checkHost(QStringLiteral("127.0.0.1"), int(plain.port()));
+            check(r.success, "checkHost succeeds against a reachable plain port");
+            check(r.attemptsOk == 2 && r.attempts == 2, "both attempts landed");
+            check(r.isCertificateValid, "no TLS attempted means certificate stays valid-by-default");
+            check(r.avgLatency >= 0, "a passing attempt reports a non-negative latency");
+            check(r.ttfbMs >= 0, "the server's answer is measured as TTFB");
+            check(plain.accepted() >= 1, "the mock server actually accepted the probe connection");
+        }
+    }
+
+    // (e) Nothing listening on the port: the connect is refused, so the check fails with a reason and
+    //     claims no latency. A grab-and-release ephemeral port gives a deterministic loopback refusal.
+    {
+        quint16 dead = 0;
+        {
+            QTcpServer holder;
+            if (holder.listen(QHostAddress::LocalHost, 0)) {
+                dead = holder.serverPort();
+                holder.close();
+            }
+        }
+        if (dead == 0) {
+            check(false, "reserved a closed port for the refused-connect case");
+        } else {
+            BlockcheckEngine e;
+            e.setAttempts(1);
+            e.setAttemptTimeoutMs(1500);
+            const HostCheckResult r = e.checkHost(QStringLiteral("127.0.0.1"), int(dead));
+            check(!r.success, "checkHost fails when the connect is refused");
+            check(r.attemptsOk == 0, "a refused attempt is not counted as OK");
+            check(r.avgLatency == -1, "no latency is claimed when nothing connected");
+            check(!r.lastError.isEmpty(), "the failure carries a reason");
+        }
+    }
+
+    // The TLS tier is the engine's whole reason to exist, but Qt can be built without an SSL backend.
+    if (!QSslSocket::supportsSsl()) {
+        out << "  SKIP  TLS cases: this Qt build has no SSL backend\n";
+    } else {
+        const QSslCertificate cert(zaprettest::blockcheckTestCert(), QSsl::Pem);
+        const QSslKey key(zaprettest::blockcheckTestKey(), QSsl::Rsa, QSsl::Pem);
+        check(!cert.isNull(), "test certificate parses and is valid");
+        check(!key.isNull(), "test private key parses");
+
+        if (!cert.isNull() && !key.isNull()) {
+            BlockServerThread tls(true);
+            if (tls.port() == 0) {
+                check(false, "TLS mock server listens on an ephemeral port");
+            } else if (!tls.usable()) {
+                // A server that cannot present the pair is a broken fixture; saying so here keeps the
+                // two verdicts below from being read as results about the engine.
+                check(false, "TLS mock server presents the test certificate pair");
+            } else {
+                const int tlsPort = int(tls.port());
+
+                // 1) Untrusted (the substitution shape): the default CA store knows nothing about
+                //    this self-signed cert, so VerifyPeer must reject the handshake and name the
+                //    certificate — the exact reading that catches a DPI handing back its own cert.
+                //    This runs before the trust injection below, while the store is untouched.
+                {
+                    BlockcheckEngine e;
+                    e.setAttempts(1);
+                    e.setAttemptTimeoutMs(4000);
+                    const HostCheckResult r = e.checkHost(QStringLiteral("127.0.0.1"), tlsPort, true);
+                    check(!r.success, "TLS handshake to an untrusted cert fails the check");
+                    check(!r.isCertificateValid,
+                          "an untrusted cert is reported certificate-invalid (the substitution case)");
+                    // The engine's own prefix, not Qt's wording: it proves the verdict came through the
+                    // sslErrors channel rather than a socket error, which is what distinguishes a
+                    // rejected certificate from a dead or misconfigured server.
+                    check(r.lastError.startsWith(QStringLiteral("TLS certificate rejected")),
+                          "the failure names the certificate as the reason");
+                    check(r.attemptsOk == 0 && r.avgLatency == -1,
+                          "a handshake that died on the certificate claims no transport");
+                }
+
+                // 2) Trusted: a freshly built QSslSocket copies QSslConfiguration::defaultConfiguration()
+                //    at construction, so temporarily promoting a config that carries the test cert in its
+                //    CA list makes the *same* handshake the untrusted case just rejected complete — the
+                //    verdict flips to success with the certificate valid. The default is restored at once,
+                //    and the cert is self-signed-CA (x509 default) with 127.0.0.1 in its SAN, so both the
+                //    chain and the hostname check pass. Nothing downstream sees the altered default.
+                {
+                    const QSslConfiguration saved = QSslConfiguration::defaultConfiguration();
+                    QSslConfiguration trusted = saved;
+                    trusted.addCaCertificate(cert);
+                    QSslConfiguration::setDefaultConfiguration(trusted);
+
+                    BlockcheckEngine e;
+                    e.setAttempts(1);
+                    e.setAttemptTimeoutMs(4000);
+                    const HostCheckResult r = e.checkHost(QStringLiteral("127.0.0.1"), tlsPort, true);
+                    check(r.success, "TLS handshake to a trusted cert succeeds the check");
+                    check(r.isCertificateValid, "a trusted cert is reported certificate-valid");
+                    check(r.lastError.isEmpty() && r.attemptsOk == r.attempts,
+                          "the trusted run reports a clean pass with no error text");
+                    check(r.avgLatency >= 0, "the successful TLS try reports a latency");
+                    check(r.ttfbMs >= 0, "the TLS server's answer is measured as TTFB");
+
+                    QSslConfiguration::setDefaultConfiguration(saved);
+                }
+            }
+        }
+    }
+
+    // (f) The synchronous and asynchronous refusals that return an empty map without ever launching a
+    //     process — every platform. Each is the console/GUI's guarantee that a bad request is stated,
+    //     not silently swallowed.
+    {
+        Strategy s;
+        s.name = QStringLiteral("refusal-only");
+
+        BlockcheckEngine e;
+        const QJsonObject noMgr = e.runTestForPreset(s, {QStringLiteral("127.0.0.1")});
+        check(noMgr.isEmpty() && e.lastError().contains(QStringLiteral("ZapretManager")),
+              "runTestForPreset refuses with no manager attached");
+
+        ZapretManager mgr;
+        e.setManager(&mgr);
+        const QJsonObject noTargets = e.runTestForPreset(s, QStringList());
+        check(noTargets.isEmpty() && e.lastError().contains(QStringLiteral("target")),
+              "runTestForPreset refuses when no targets are given");
+
+        BlockcheckEngine a;
+        QStringList stages;
+        int finishedCount = 0;
+        int errorCount = 0;
+        QObject::connect(&a, &BlockcheckEngine::stageChanged, [&](const QString &g) { stages << g; });
+        QObject::connect(&a, &BlockcheckEngine::testFinished, [&](const QJsonObject &m) {
+            ++finishedCount;
+            check(m.isEmpty(), "startTest refusal finishes with an empty map");
+        });
+        QObject::connect(&a, &BlockcheckEngine::errorOccurred, [&](const QString &) { ++errorCount; });
+        a.startTest(s, {QStringLiteral("127.0.0.1")});
+        check(finishedCount == 1 && errorCount == 1 && stages.contains(QStringLiteral("done")),
+              "startTest with no manager refuses once through errorOccurred + empty testFinished");
+        check(!a.isBusy(), "a refused startTest does not leave the engine busy");
+    }
+
+#if defined(Q_OS_UNIX)
+    // (g) The synchronous full cycle: bring a preset up through the same ZapretManager the power
+    //     button uses, settle, probe a reachable local port through it, and tear it back down. The
+    //     payload is a throwaway /bin/sh that sleeps, so nothing network-privileged is ever exec'd.
+    {
+        using S = IZapretBackend::State;
+        QTemporaryDir bc;
+        const QString bcLive = makeScript(bc.filePath(QStringLiteral("fake-bc-payload.sh")),
+            QStringLiteral("echo up\ni=0\nwhile [ \"$i\" -lt 30 ]; do sleep 1; i=$((i+1)); done\n"));
+        check(!bcLive.isEmpty(), "blockcheck payload fixture written");
+
+        BlockServerThread plain(false);
+        if (plain.port() == 0 || bcLive.isEmpty()) {
+            check(false, "blockcheck orchestration prerequisites are up");
+        } else {
+            ZapretManager mgr;
+            BlockcheckEngine e;
+            e.setManager(&mgr);
+            e.setAttempts(1);
+            e.setAttemptTimeoutMs(2000);
+            e.setSettleDelayMs(0);
+            e.setStartTimeoutMs(8000);
+            e.setStopTimeoutMs(8000);
+            e.setPort(int(plain.port()));
+
+            QStringList stages;
+            QStringList logs;
+            QJsonObject finished;
+            int finishedCount = 0;
+            QObject::connect(&e, &BlockcheckEngine::stageChanged, [&](const QString &g) { stages << g; });
+            QObject::connect(&e, &BlockcheckEngine::logMessage,
+                             [&](const QString &l, int) { logs << l; });
+            QObject::connect(&e, &BlockcheckEngine::testFinished, [&](const QJsonObject &m) {
+                finished = m; ++finishedCount; });
+
+            Strategy s = fakeDirectStrategy(QStringLiteral("bc-cycle"), bcLive, Strategy::Platform::Linux);
+            const QJsonObject r = e.runTestForPreset(s, {QStringLiteral("127.0.0.1")});
+
+            check(!r.isEmpty(), "runTestForPreset produced a map for the full cycle");
+            check(r.contains(QStringLiteral("127.0.0.1")), "the probed host is keyed in the map");
+            check(r.value(QStringLiteral("127.0.0.1")).toObject()
+                      .value(QStringLiteral("success")).toBool(),
+                  "the reachable local port passes the in-cycle probe");
+            check(finishedCount == 1, "testFinished fired exactly once for the cycle");
+            check(finished == r, "the testFinished map is the one runTestForPreset returned");
+            check(stages.contains(QStringLiteral("starting"))
+                      && stages.contains(QStringLiteral("settling"))
+                      && stages.contains(QStringLiteral("probing"))
+                      && stages.contains(QStringLiteral("stopping"))
+                      && stages.contains(QStringLiteral("done")),
+                  "the cycle walked starting -> settling -> probing -> stopping -> done");
+            check(e.lastError().isEmpty(), "the cycle reports no orchestration error");
+
+            // Whatever the cycle started it must leave down — and it must be down BEFORE this call
+            // returns. main() writes its JSON on the strength of the return value alone, so a
+            // teardown still in flight here is a rescue command that outlives the process which asked
+            // for it: sweeping the host after nobody is listening any more, and (with the old `-f`)
+            // able to kill whichever run comes next. Asserted without pumping first — needing to pump
+            // here is precisely the promise being broken.
+            check(mgr.state() == S::Stopped,
+                  "runTestForPreset returns only once the preset it started is confirmed down");
+            int unconfirmed = 0;
+            for (const QString &l : logs)
+                if (l.contains(QStringLiteral("teardown did not confirm")))
+                    ++unconfirmed;
+            check(unconfirmed == 0,
+                  "the awaited teardown completed instead of running out the engine's deadline");
+            check(mgr.activeStrategyId().isEmpty(), "nothing stays active after the cycle");
+        }
+    }
+
+    // (g2) The same cycle when the polite stop is never answered — the exact shape the console died
+    //      in. A payload that ignores SIGTERM takes LinuxBackend past its terminate deadline and onto
+    //      the rescue, which is the command that used to sweep by command line and kill the CLI that
+    //      was waiting for it. What is pinned here is the promise main() relies on: even on that
+    //      path, runTestForPreset comes back only once the teardown has been confirmed, so the JSON
+    //      is the last word and nothing is still being cleaned up behind it.
+    {
+        using S = IZapretBackend::State;
+        QTemporaryDir bc;
+        // Named for what it stands in for, and short enough to survive the kernel's comm cap — the
+        // rescue really runs on this host, so a fixture called `nfqws` would sweep a real one.
+        const QString stubborn = makeScript(bc.filePath(QStringLiteral("nfqws-stubborn")),
+            QStringLiteral("trap '' TERM INT\n"
+                           "echo up\n"
+                           "i=0\nwhile [ \"$i\" -lt 12 ]; do sleep 1; i=$((i+1)); done\n"));
+
+        BlockServerThread plain(false);
+        if (plain.port() == 0 || stubborn.isEmpty()) {
+            check(false, "forced-cycle: prerequisites are up");
+        } else {
+            ZapretManager mgr;
+            BlockcheckEngine e;
+            e.setManager(&mgr);
+            e.setAttempts(1);
+            e.setAttemptTimeoutMs(2000);
+            // Not decoration: "Running" is announced the moment the payload is fork'd, before its
+            // first statement has run, so a cycle that settles for 0 ms can send SIGTERM at a shell
+            // whose `trap '' TERM` is not installed yet — a politely dead payload, and no forced stop
+            // left to measure. A second and a half of settle is far more than the exec needs.
+            e.setSettleDelayMs(1500);
+            e.setStartTimeoutMs(8000);
+            e.setStopTimeoutMs(15000);   // the rescue's own deadline is inside this one
+            e.setPort(int(plain.port()));
+
+            QStringList logs;
+            QObject::connect(&mgr, &ZapretManager::logMessage,
+                             [&](const QString &l, int) { logs << l; });
+            QObject::connect(&e, &BlockcheckEngine::logMessage,
+                             [&](const QString &l, int) { logs << l; });
+            auto sawLog = [&logs](const QString &needle) {
+                for (const QString &l : logs)
+                    if (l.contains(needle))
+                        return true;
+                return false;
+            };
+
+            Strategy s = fakeDirectStrategy(QStringLiteral("bc-forced"), stubborn,
+                                            Strategy::Platform::Linux);
+            const QJsonObject r = e.runTestForPreset(s, {QStringLiteral("127.0.0.1")});
+
+            check(!r.isEmpty(), "forced-cycle: a map is produced even when the stop had to be forced");
+            check(sawLog(QStringLiteral("did not report an exit within")),
+                  "forced-cycle: the payload ignored SIGTERM, so the stop really was forced");
+            check(sawLog(QStringLiteral("sweeping 'nfqws-stubborn' by name")),
+                  "forced-cycle: the run went down through the rescue, not a polite teardown");
+            // The console's whole guarantee, on the path that used to kill it: the call returns with
+            // the teardown already confirmed, so stdout is written last and nothing outlives it.
+            check(mgr.state() == S::Stopped,
+                  "forced-cycle: the engine waits for the rescue before returning");
+            check(!mgr.isRunning(), "forced-cycle: and nothing is managed on the way out");
+            check(!sawLog(QStringLiteral("teardown did not confirm")),
+                  "forced-cycle: the rescue answers inside the deadline it was given");
+            check(r.value(QStringLiteral("127.0.0.1")).toObject()
+                      .value(QStringLiteral("success")).toBool(),
+                  "forced-cycle: the measurement itself is unaffected by how the run came down");
+            pumpFor(300);
+        }
+    }
+#endif // Q_OS_UNIX — the synchronous orchestration launches a real /bin/sh payload
+
+#if defined(Q_OS_UNIX)
+    // (h) The asynchronous full cycle — the GUI's front door. startTest returns at once and the
+    //     probes run on the engine's private worker; the caller's loop is only ever pumping events,
+    //     never held. A preset this engine brings up must be torn back down by it when the run ends.
+    {
+        using S = IZapretBackend::State;
+        QTemporaryDir bc;
+        const QString bcLive = makeScript(bc.filePath(QStringLiteral("fake-bc-async.sh")),
+            QStringLiteral("echo up\ni=0\nwhile [ \"$i\" -lt 30 ]; do sleep 1; i=$((i+1)); done\n"));
+
+        BlockServerThread plain(false);
+        if (plain.port() != 0 && !bcLive.isEmpty()) {
+            ZapretManager mgr;
+            BlockcheckEngine e;
+            e.setManager(&mgr);
+            e.setAttempts(1);
+            e.setAttemptTimeoutMs(2000);
+            e.setSettleDelayMs(0);
+            e.setStartTimeoutMs(8000);
+            e.setStopTimeoutMs(8000);
+            e.setPort(int(plain.port()));
+
+            QStringList checked;
+            QStringList stages;
+            QJsonObject finished;
+            int finishedCount = 0;
+            // &e as the context makes these queued onto the engine's (main) thread, which is exactly
+            // the crossing that starts when hostChecked arrives from the probe worker.
+            QObject::connect(&e, &BlockcheckEngine::hostChecked, &e,
+                             [&](const QString &h, const HostCheckResult &r) {
+                                 Q_UNUSED(r); checked << h; });
+            QObject::connect(&e, &BlockcheckEngine::testFinished, &e,
+                             [&](const QJsonObject &m) { finished = m; ++finishedCount; });
+            QObject::connect(&e, &BlockcheckEngine::stageChanged, &e,
+                             [&](const QString &g) { stages << g; });
+
+            Strategy s = fakeDirectStrategy(QStringLiteral("bc-async"), bcLive, Strategy::Platform::Linux);
+            e.startTest(s, {QStringLiteral("127.0.0.1")});
+            check(e.isBusy(), "async: the engine is busy the moment startTest returns");
+            check(pumpUntil([&] { return finishedCount >= 1 && !e.isBusy(); }, 20000),
+                  "async: the cycle completes while the caller's loop only pumps");
+
+            check(finishedCount == 1, "async: testFinished fired once");
+            check(checked.contains(QStringLiteral("127.0.0.1")),
+                  "async: hostChecked delivered the probed host across the worker thread");
+            check(finished.value(QStringLiteral("127.0.0.1")).toObject()
+                      .value(QStringLiteral("success")).toBool(),
+                  "async: the reachable local port passes the async probe");
+            check(stages.contains(QStringLiteral("starting"))
+                      && stages.contains(QStringLiteral("probing"))
+                      && stages.contains(QStringLiteral("stopping"))
+                      && stages.contains(QStringLiteral("done")),
+                  "async: the GUI path walked starting -> probing -> stopping -> done");
+            check(pumpUntil([&] { return mgr.state() == S::Stopped; }, 8000),
+                  "async: the preset this engine started is torn back down");
+            check(!e.isBusy(), "async: the engine is idle once the cycle has finished");
+        } else {
+            check(false, "async: prerequisites (payload fixture + local server) are up");
+        }
+    }
+#endif // Q_OS_UNIX — the asynchronous orchestration launches a real /bin/sh payload
 
     out << "\n=== " << (g_failures ? "FAILED" : "ALL PASS") << " (" << g_failures << " failures) ===\n";
     out.flush();

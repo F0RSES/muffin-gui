@@ -345,6 +345,11 @@ QProgressBar {
    primary button. */
 QProgressBar::chunk { background-color: #22D3EE; border-radius: 7px; }
 
+/* The profiles page's bypass-check meter: a 6 px thread under the page head, not the download's
+   16 px bar — it reports one button press, and its chunk keeps the same cyan. */
+QProgressBar#blockcheckProgress { min-height: 6px; max-height: 6px; border-radius: 3px; }
+QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
+
 /* ---------- window surfaces (keep this block last) ---------------------------
    The generic `QWidget { background-color: transparent }` near the top is what lets cards, rows and
    labels composite over their parents. It has the same specificity as a plain type rule, and in Qt's

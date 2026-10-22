@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "BlockcheckEngine.h"
 #include "DownloadDialog.h"
 #include "LanguageManager.h"
 #include "LogPanel.h"
@@ -29,6 +30,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
@@ -134,6 +136,11 @@ MainWindow::MainWindow(QWidget *parent)
     // Parentless by design: PingService lives on its own thread, and parenting it here would move it
     // back to the GUI thread. It is deleted explicitly in the destructor.
     m_ping = new PingService();
+    // The bypass-check engine shares the manager — and through it the backend, and through that the
+    // one-operation-at-a-time rule — with the power button. An ordinary child: the engine itself
+    // lives on this thread, and only its probe worker does not.
+    m_blockcheck = new BlockcheckEngine(this);
+    m_blockcheck->setManager(m_manager);
 
     // A fixed 900x700 canvas with no system frame at all. The dashboard is laid out around a 200 px ring
     // and a footer that must stay centred, so a maximised or resized window is a different design that
@@ -211,6 +218,12 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    if (m_blockcheck) {
+        // Disconnect before cancelling: cancel() winds a mid-flight cycle down through failTest, and
+        // its testFinished must not re-enter UI slots (a modal verdict sheet) from inside a teardown.
+        m_blockcheck->disconnect(this);
+        m_blockcheck->cancel();
+    }
     if (m_ping) {
         m_ping->stop();
         delete m_ping;      // joins the worker thread (quit + wait)
@@ -600,6 +613,22 @@ QWidget *MainWindow::buildProfilesPage()
     m_pingTestButton->setAutoDefault(false);
     connect(m_pingTestButton, &QPushButton::clicked, this, &MainWindow::onPingTestRequested);
 
+    // The page's second measurement, and the harder question: not "do the services answer" but
+    // "does the path the SELECTED profile opens actually work" — connect + TLS handshake + the
+    // certificate verdict, three tries per host. The engine brings the preset up itself and takes
+    // it back down, so the verdict this button reports is about the profile, not about whatever
+    // happens to be running right now.
+    m_blockcheckButton = new QPushButton(QString(), page);
+    m_blockcheckButton->setObjectName(QStringLiteral("ghostButton"));
+    m_blockcheckButton->setProperty("glyph", QStringLiteral("shield-check"));
+    m_blockcheckButton->setProperty("glyphPx", 16);
+    m_blockcheckButton->setIcon(Theme::themedIcon(QStringLiteral("shield-check"), 16));
+    i18nText(m_blockcheckButton, QStringLiteral("action.blockcheck"));
+    i18nTip(m_blockcheckButton, QStringLiteral("action.blockcheck_tip"));
+    m_blockcheckButton->setCursor(Qt::PointingHandCursor);
+    m_blockcheckButton->setAutoDefault(false);
+    connect(m_blockcheckButton, &QPushButton::clicked, this, &MainWindow::onBlockcheckRequested);
+
     auto *refresh = new QPushButton(QString(), page);
     refresh->setObjectName(QStringLiteral("ghostButton"));
     refresh->setProperty("glyph", QStringLiteral("refresh"));
@@ -614,11 +643,24 @@ QWidget *MainWindow::buildProfilesPage()
     head->addWidget(title);
     head->addSpacing(12);
     head->addWidget(m_pingTestButton);
+    head->addWidget(m_blockcheckButton);
     // The corner is the list's own utility: read the folder again. Everything else this page can do has
     // a place to say it in — the measurement in its label, the download on the settings page.
     head->addStretch(1);
     head->addWidget(refresh);
     box->addLayout(head);
+
+    // The slim meter that exists only while a bypass-check cycle is in flight: busy (indeterminate)
+    // while the engine starts, settles and stops the preset, determinate while the hosts are being
+    // probed, hidden the rest of the time. A bar of its own rather than the footer's text because
+    // "how far along" is the one thing a label cannot say.
+    m_blockcheckProgress = new QProgressBar(page);
+    m_blockcheckProgress->setObjectName(QStringLiteral("blockcheckProgress"));
+    m_blockcheckProgress->setRange(0, 0);
+    m_blockcheckProgress->setTextVisible(false);
+    m_blockcheckProgress->setFixedHeight(6);
+    m_blockcheckProgress->hide();
+    box->addWidget(m_blockcheckProgress);
 
     // m_stack is still what it always was — the profile rows or the "nothing found" page.
     m_stack = new QStackedWidget(page);
@@ -1008,6 +1050,49 @@ void MainWindow::wire()
 
     connect(m_settings, &Settings::changed, this, &MainWindow::onSettingsChanged);
     connect(m_ping, &PingService::pingUpdated, this, &MainWindow::onPingUpdated);
+
+    // The bypass-check cycle reports through five channels, and each has exactly one job here: the
+    // log lines into the journal, the stage into the meter's mode, progress into its value, per-host
+    // verdicts into a compact log line, and the final map into the verdict sheet. errorOccurred
+    // deliberately gets no modal of its own — a backend-side failure already dialogs through the
+    // manager's own channel, and every failed run still ends in testFinished, so the sheet below is
+    // the one place a press is answered, once.
+    connect(m_blockcheck, &BlockcheckEngine::logMessage, this, &MainWindow::onLogMessage);
+    connect(m_blockcheck, &BlockcheckEngine::stageChanged, this, [this](const QString &stage) {
+        if (!m_blockcheckProgress || stage == QLatin1String("probing"))
+            return;   // the first progress() moves the meter to determinate on its own
+        m_blockcheckProgress->setRange(0, 0);   // busy while starting / settling / stopping
+    });
+    connect(m_blockcheck, &BlockcheckEngine::progress, this,
+            [this](int done, int total, const QString &) {
+        if (!m_blockcheckProgress)
+            return;
+        if (m_blockcheckProgress->maximum() != qMax(1, total))
+            m_blockcheckProgress->setRange(0, qMax(1, total));
+        m_blockcheckProgress->setValue(done);
+    });
+    connect(m_blockcheck, &BlockcheckEngine::hostChecked, this,
+            [this](const QString &host, const HostCheckResult &r) {
+        // A journal line per host, in the engine's own vocabulary rather than a translated sentence:
+        // the sheet at the end is the user-facing wording, and the journal is where the numbers live.
+        QString verdict;
+        if (r.success) {
+            verdict = QStringLiteral("OK %1 ms (%2/%3 tries)").arg(r.avgLatency)
+                          .arg(r.attemptsOk).arg(r.attempts);
+            if (r.ttfbMs >= 0)
+                verdict += QStringLiteral(", ttfb %1 ms").arg(r.ttfbMs);
+            if (!r.isCertificateValid)
+                verdict += QStringLiteral(", certificate REJECTED");
+        } else {
+            verdict = QStringLiteral("FAIL (%1)").arg(r.lastError);
+        }
+        m_log->appendLine(QStringLiteral("blockcheck: %1 — %2").arg(host, verdict),
+                          r.success ? LogPanel::Info : LogPanel::Warn);
+    });
+    connect(m_blockcheck, &BlockcheckEngine::errorOccurred, this,
+            [this](const QString &message) { showTransientMessage(message, 6000); });
+    connect(m_blockcheck, &BlockcheckEngine::testFinished, this,
+            &MainWindow::onBlockcheckFinished);
 
     // The language can move while this window is open (the rail's flag button), and nothing else tells
     // the widgets: one signal, one walk over the tree. updateStatusUi() is part of retranslateUi(), so
@@ -1772,6 +1857,105 @@ void MainWindow::endPingTest()
         m_pingTestButton->setEnabled(true);
         i18nText(m_pingTestButton, QStringLiteral("action.ping_test"));
     }
+}
+
+// ---- the real-bypass check ----
+
+// The profiles page's second measuring press. Unlike the ping round this one has teeth: the engine
+// starts the selected profile (on Linux through pkexec, so the polkit prompt can appear, exactly as
+// for the power button), measures the services through it, and stops it again. The window's job is
+// the gate, the meter and the sheet — the measurement itself is the engine's, start to verdict.
+void MainWindow::onBlockcheckRequested()
+{
+    if (m_blockcheckActive)
+        return;   // a cycle is in flight; the button says so and is not answering presses
+
+    // The same gate the power button answers to, widened by exactly one state: a backend owns one
+    // operation at a time, so Starting/Stopping refuse — but a run that is already up is fine, the
+    // engine measures it as-is and leaves its lifecycle alone (it only stops what it started).
+    const IZapretBackend::State state = m_manager->state();
+    if (state != IZapretBackend::State::Running && !canStartFrom(state)) {
+        showTransientMessage(blockedReason(state), 4000);
+        return;
+    }
+    const Strategy *s = m_selectedId.isEmpty() ? nullptr : m_manager->findStrategy(m_selectedId);
+    if (!s) {
+        showTransientMessage(LanguageManager::tr(QStringLiteral("msg.pick_profile")), 5000);
+        return;
+    }
+
+    beginBlockcheck();
+    m_log->appendLine(LanguageManager::tr(QStringLiteral("log.blockcheck_started")).arg(s->name),
+                      LogPanel::Info);
+    // The row's two hosts, not the dashboard's three: this check is about the path the profile
+    // exists to open, and google.com is the baseline no profile ever promised.
+    m_blockcheck->startTest(*s, profilePingHosts());
+}
+
+void MainWindow::beginBlockcheck()
+{
+    m_blockcheckActive = true;
+    if (m_blockcheckButton) {
+        m_blockcheckButton->setEnabled(false);
+        i18nText(m_blockcheckButton, QStringLiteral("action.blockcheck_running"));
+    }
+    if (m_blockcheckProgress) {
+        m_blockcheckProgress->setRange(0, 0);   // busy until the first host lands
+        m_blockcheckProgress->show();
+    }
+}
+
+void MainWindow::endBlockcheck()
+{
+    m_blockcheckActive = false;
+    if (m_blockcheckButton) {
+        m_blockcheckButton->setEnabled(true);
+        i18nText(m_blockcheckButton, QStringLiteral("action.blockcheck"));
+    }
+    if (m_blockcheckProgress) {
+        m_blockcheckProgress->hide();
+        m_blockcheckProgress->setRange(0, 0);
+    }
+}
+
+// Every run ends here — complete, cancelled (a partial map) or failed (an empty one) — so this is
+// the one verdict sheet per press, and the only modal the cycle ever opens.
+void MainWindow::onBlockcheckFinished(const QJsonObject &results)
+{
+    endBlockcheck();
+    if (results.isEmpty()) {
+        const QString why = m_blockcheck ? m_blockcheck->lastError() : QString();
+        QMessageBox::warning(this, LanguageManager::tr(QStringLiteral("blockcheck.title")),
+                             why.isEmpty()
+                                 ? LanguageManager::tr(QStringLiteral("blockcheck.no_results"))
+                                 : why);
+        return;
+    }
+    QMessageBox::information(this, LanguageManager::tr(QStringLiteral("blockcheck.title")),
+                             blockcheckResultText(results));
+}
+
+QString MainWindow::blockcheckResultText(const QJsonObject &results)
+{
+    QStringList lines;
+    for (auto it = results.constBegin(); it != results.constEnd(); ++it) {
+        const QJsonObject one = it.value().toObject();
+        const bool ok = one.value(QLatin1String("success")).toBool();
+        // OK / FAIL / ms stay in the source's own words like the other design tokens (the header
+        // chip's "CONNECTED" is the precedent): a verdict stamp, not a sentence.
+        QString line = ok
+            ? QStringLiteral("%1: OK (%2 ms)")
+                  .arg(friendlyHostName(it.key()))
+                  .arg(one.value(QLatin1String("latency")).toInt())
+            : QStringLiteral("%1: FAIL").arg(friendlyHostName(it.key()));
+        // The one result that is worse than unreachable: the path is open but somebody in the
+        // middle owns its certificate. It gets the catalog's warning appended, in the UI language.
+        if (ok && !one.value(QLatin1String("certificate_valid")).toBool(true))
+            line += QStringLiteral(" — %1")
+                        .arg(LanguageManager::tr(QStringLiteral("blockcheck.cert_invalid")));
+        lines << line;
+    }
+    return lines.join(QLatin1Char('\n'));
 }
 
 void MainWindow::onStrategiesLoaded(int count)
