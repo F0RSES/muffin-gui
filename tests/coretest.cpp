@@ -28,14 +28,17 @@
 #include "WindowsBackend.h"
 #include "WindowsArgs.h"
 #include "BlockcheckEngine.h"
+#include "HistoryStore.h"
 #include "blockcheck_testcert.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
@@ -728,6 +731,27 @@ int main(int argc, char **argv)
     check(ZapretPaths::detectPlatform(linuxRoot) == Strategy::Platform::Linux, "linux root detected");
     check(!ZapretPaths::nfqwsPath(linuxRoot).isEmpty(), "native nfqws located");
     check(QFileInfo::exists(ZapretPaths::sysvScriptPath(linuxRoot)), "sysv zapret script located");
+
+    // The two app-data accessors HistoryStore is handed, asserted against the base they are built from
+    // rather than against a spelled-out path: managedInstallDir() is appDataDir() plus "zapret", and
+    // historyFilePath() is appDataDir() plus the record's own name. Nothing here is written — the point
+    // is that the history does not live inside the payload tree a download replaces, and that the
+    // refactor which made both share one identity resolution did not move either.
+    {
+        const QString data = ZapretPaths::appDataDir();
+        check(data.isEmpty() || QDir::isAbsolutePath(data),
+              "appDataDir() is empty or an absolute per-user directory");
+        check(ZapretPaths::managedInstallDir()
+                  == (data.isEmpty() ? QString() : data + QLatin1String("/zapret")),
+              "managedInstallDir() is still appDataDir() plus the payload folder");
+        const QString history = ZapretPaths::historyFilePath();
+        check(history.isEmpty() || (history != ZapretPaths::managedInstallDir()
+                                    && !history.startsWith(ZapretPaths::managedInstallDir()
+                                                           + QLatin1Char('/'))),
+              "historyFilePath() sits outside the managed install, where a re-download cannot erase it");
+        check(history.isEmpty() || history == data + QLatin1String("/history.json"),
+              "historyFilePath() is appDataDir() plus history.json");
+    }
 
     // ---- windows strategy parse ----
     out << "\n[parse windows]\n";
@@ -3973,6 +3997,497 @@ int main(int argc, char **argv)
         }
     }
 #endif // Q_OS_UNIX — the asynchronous orchestration launches a real /bin/sh payload
+
+    // ---------------------------------------------------------------------
+    // [HistoryStore] — the bounded JSON record of past bypass checks.
+    //
+    // Three promises get pinned here, because they are the three the class is built on: the cap and
+    // which end it trims, the exact file format a user may open or hand-edit, and the fact that the disk
+    // work happens off the caller's thread without ever losing the newest state. Every case runs against
+    // its own file inside a QTemporaryDir — nothing here writes into the real per-user data directory.
+    out << "\n[HistoryStore]\n";
+
+    // (a) Defaults, and the bytes of the format itself. Asserted as text because the file is a promise
+    //     to the user, not an implementation detail: six keys, ISO timestamps to the second, one array.
+    {
+        HistoryStore s;
+        check(s.count() == 0 && s.maxEntries() == HistoryStore::kDefaultMaxEntries
+                  && s.saveDelayMs() == HistoryStore::kDefaultSaveDelayMs
+                  && s.filePath().isEmpty() && !s.isDirty() && !s.isWriting()
+                  && s.lastError().isEmpty(),
+              "a fresh store is empty, at the documented cap and delay, and clean");
+
+        const QDateTime base(QDate(2026, 10, 22), QTime(12, 0, 0));
+        QVector<HistoryEntry> rows;
+        HistoryEntry good;
+        good.timestamp = base; good.preset = QStringLiteral("nfqws (portable)");
+        good.host = QStringLiteral("discord.com"); good.success = true; good.latency = 45;
+        good.certValid = true;
+        rows << good;
+        HistoryEntry bad;
+        bad.timestamp = base.addSecs(1); bad.preset = QStringLiteral("xargs");
+        bad.host = QStringLiteral("youtube.com"); bad.success = false; bad.latency = -1;
+        bad.certValid = false;
+        rows << bad;
+
+        const QByteArray json = HistoryStore::toJson(rows);
+        const QJsonDocument doc = QJsonDocument::fromJson(json);
+        check(doc.isArray() && doc.array().size() == 2, "toJson is one array holding every row, in order");
+        check(json.count('\n') > 4, "the array is indented, so a user can read it in a text editor");
+
+        const QJsonObject o0 = doc.array().at(0).toObject();
+        const QStringList keys = o0.keys();
+        check(o0.size() == 6 && keys.contains(QStringLiteral("timestamp"))
+                  && keys.contains(QStringLiteral("preset")) && keys.contains(QStringLiteral("host"))
+                  && keys.contains(QStringLiteral("success")) && keys.contains(QStringLiteral("latency"))
+                  && keys.contains(QStringLiteral("cert")),
+              "a record is exactly the six documented keys, no more");
+        check(o0.value(QStringLiteral("timestamp")).toString() == QStringLiteral("2026-10-22T12:00:00"),
+              "the timestamp is ISO-8601 to the second, as the format promises");
+        check(o0.value(QStringLiteral("preset")).toString() == QStringLiteral("nfqws (portable)")
+                  && o0.value(QStringLiteral("host")).toString() == QStringLiteral("discord.com")
+                  && o0.value(QStringLiteral("success")).toBool()
+                  && o0.value(QStringLiteral("latency")).toInt() == 45
+                  // toBool(false) answers false for an absent key, so a true here can only mean the key
+                  // is present and written as the row's own verdict.
+                  && o0.value(QStringLiteral("cert")).toBool(false),
+              "preset, host, verdict, latency and certificate are written as given");
+        check(doc.array().at(1).toObject().value(QStringLiteral("latency")).toInt(-999) == -1,
+              "an unmeasured latency round-trips as -1, not as 0 and not as absent");
+        // The mirror image of the check above: toBool(true) answers true for an absent key, so a false
+        // here can only mean the key is present and written as false. An intercepting row never has its
+        // "cert" left out, because leaving it out is what a pre-cert history file looks like — and that
+        // silence is read as "nobody disputed the certificate", not as an accusation.
+        check(!doc.array().at(1).toObject().value(QStringLiteral("cert")).toBool(true),
+              "a rejected certificate is written as an explicit false, not as an absent key");
+
+        // A row that came back with nothing measured still has to say what happened.
+        HistoryEntry unknown;
+        unknown.timestamp = base; unknown.host = QStringLiteral("example.com");
+        const QJsonArray one = QJsonDocument::fromJson(HistoryStore::toJson({unknown})).array();
+        check(one.size() == 1 && !one.at(0).toObject().value(QStringLiteral("success")).toBool()
+                  && one.at(0).toObject().value(QStringLiteral("latency")).toInt(-999) == -1
+                  && one.at(0).toObject().value(QStringLiteral("preset")).toString().isEmpty()
+                  && one.at(0).toObject().value(QStringLiteral("cert")).toBool(false),
+              "a default-constructed record writes a false verdict, no preset, -1 latency and a "
+              "certificate nobody has disputed");
+    }
+
+    // (b) fromJson: what a record has to have to be one, and what degrades instead. Both matter to a
+    //     user who edits the file by hand — the store must not invent a check out of a fragment, and
+    //     must not throw away a readable row over a field it could read around.
+    {
+        const QString iso = QStringLiteral("2026-10-22T12:00:00");
+        HistoryEntry e;
+
+        QJsonObject noHost;
+        noHost.insert(QStringLiteral("timestamp"), iso);
+        noHost.insert(QStringLiteral("success"), true);
+        check(!HistoryEntry::fromJson(noHost, &e), "a record naming no host is refused, not stored");
+
+        QJsonObject noTime;
+        noTime.insert(QStringLiteral("host"), QStringLiteral("x.io"));
+        check(!HistoryEntry::fromJson(noTime, &e), "a record with no readable timestamp is refused");
+
+        check(!HistoryEntry::fromJson(QJsonObject(), nullptr), "fromJson with nowhere to write fails");
+
+        QJsonObject minimal;
+        minimal.insert(QStringLiteral("host"), QStringLiteral("  x.io  "));
+        minimal.insert(QStringLiteral("timestamp"), iso);
+        check(HistoryEntry::fromJson(minimal, &e) && e.host == QStringLiteral("x.io")
+                  && e.preset.isEmpty() && !e.success && e.latency == -1 && e.timestamp.isValid()
+                  && e.certValid,
+              "a minimal record loads: host trimmed, preset empty, verdict false, latency unmeasured, "
+              "certificate undisputed");
+
+        QJsonObject junkLatency;
+        junkLatency.insert(QStringLiteral("host"), QStringLiteral("x.io"));
+        junkLatency.insert(QStringLiteral("timestamp"), iso);
+        junkLatency.insert(QStringLiteral("latency"), QStringLiteral("fast"));
+        check(HistoryEntry::fromJson(junkLatency, &e) && e.latency == -1,
+              "a non-numeric latency means 'nothing was measured', never a fabricated 0");
+
+        // "cert" is the newest key in the format, which makes the two shapes below real files rather than
+        // hypotheticals: every history written by an older build is one of them. A record the store has
+        // no opinion about must load as an undisputed certificate, since reading the silence as a
+        // substituted cert would rewrite the user's past into a series of interceptions.
+        QJsonObject rejectedCert;
+        rejectedCert.insert(QStringLiteral("host"), QStringLiteral("x.io"));
+        rejectedCert.insert(QStringLiteral("timestamp"), iso);
+        rejectedCert.insert(QStringLiteral("cert"), false);
+        check(HistoryEntry::fromJson(rejectedCert, &e) && !e.certValid,
+              "an explicit false cert loads as the certificate having been rejected");
+
+        QJsonObject junkCert;
+        junkCert.insert(QStringLiteral("host"), QStringLiteral("x.io"));
+        junkCert.insert(QStringLiteral("timestamp"), iso);
+        junkCert.insert(QStringLiteral("cert"), QStringLiteral("probably"));
+        check(HistoryEntry::fromJson(junkCert, &e) && e.certValid,
+              "a non-boolean cert degrades to 'valid' rather than failing the row or inventing a "
+              "rejection out of a hand-edit");
+
+        QJsonObject withMs;
+        withMs.insert(QStringLiteral("host"), QStringLiteral("x.io"));
+        withMs.insert(QStringLiteral("timestamp"), QStringLiteral("2026-10-22T12:00:00.500"));
+        check(HistoryEntry::fromJson(withMs, &e) && e.timestamp.isValid(),
+              "a hand-written timestamp carrying milliseconds still reads back");
+
+        QJsonObject withZone;
+        withZone.insert(QStringLiteral("host"), QStringLiteral("x.io"));
+        withZone.insert(QStringLiteral("timestamp"), QStringLiteral("2026-10-22T12:00:00+03:00"));
+        check(HistoryEntry::fromJson(withZone, &e) && e.timestamp.isValid(),
+              "a hand-written timestamp carrying an offset still reads back");
+    }
+
+    // (c) The cap, and which end it trims. Delay armed far out so nothing here touches the disk: the
+    //     retention rule is about the rows in memory, and asserting it without I/O keeps it honest.
+    {
+        QTemporaryDir hs;
+        HistoryStore s(hs.filePath(QStringLiteral("cap.json")));
+        s.setMaxEntries(3);
+        s.setSaveDelayMs(600000);
+
+        int changes = 0;
+        QObject::connect(&s, &HistoryStore::changed, [&] { ++changes; });
+
+        bool taken = true;
+        for (int i = 1; i <= 5; ++i)
+            taken &= s.appendResult(QStringLiteral("preset"), QStringLiteral("h%1.com").arg(i),
+                                    i % 2 == 0, 10 + i);
+        check(taken, "every well-formed row is taken");
+        check(s.count() == 3 && s.maxEntries() == 3, "five appends under a cap of three leave three rows");
+        check(s.entries().at(0).host == QStringLiteral("h3.com")
+                  && s.entries().at(2).host == QStringLiteral("h5.com"),
+              "the rows that go are the OLDEST: the newest is always the one kept");
+        check(changes == 5, "changed() fires once per recorded check, and not once per trim");
+
+        check(!s.appendResult(QStringLiteral("preset"), QStringLiteral("   "), true, 1)
+                  && s.count() == 3,
+              "a blank host is refused outright and changes nothing");
+
+        s.setMaxEntries(0);
+        check(s.maxEntries() == 1 && s.count() == 1
+                  && s.entries().at(0).host == QStringLiteral("h5.com"),
+              "setMaxEntries floors at 1 and trims to it, keeping the newest row");
+
+        s.setMaxEntries(10);
+        check(s.count() == 1, "raising the cap invents nothing — it only stops trimming");
+    }
+
+    // (d) Stamping and the setters' floors. append() is where "now" is decided, so a caller that only
+    //     knows the verdict never has to build a QDateTime to record one.
+    {
+        QTemporaryDir hs;
+        const QString p = hs.filePath(QStringLiteral("stamp.json"));
+        HistoryStore s(p);
+        s.setSaveDelayMs(600000);
+
+        HistoryEntry e;
+        e.host = QStringLiteral("discord.com");
+        check(!e.timestamp.isValid(), "an entry carries no timestamp before it is recorded");
+        check(s.append(e) && s.entries().at(0).timestamp.isValid(),
+              "append() stamps an untimed row at the moment it is taken");
+
+        const QDateTime then(QDate(2025, 1, 2), QTime(3, 4, 5));
+        HistoryEntry dated;
+        dated.timestamp = then; dated.host = QStringLiteral("youtube.com");
+        check(s.append(dated) && s.entries().at(1).timestamp == then,
+              "a row that arrived with a timestamp keeps it — the store does not rewrite history");
+
+        s.setSaveDelayMs(-5);
+        check(s.saveDelayMs() == 0, "setSaveDelayMs floors at 0, which means 'write now, still off-thread'");
+        check(s.recent(0).isEmpty() && s.recent(-1).isEmpty(), "recent() of nothing is nothing");
+        check(s.recent(1).at(0).host == QStringLiteral("youtube.com"),
+              "recent() reads newest-first");
+        check(s.recent(100).size() == 2, "asking recent() for more than exists means all of them");
+    }
+
+    // (e) The promise the whole write design exists for: a burst of appends is one deferred, off-thread
+    //     write. Nothing here blocks, and the file goes from absent to complete without the caller's
+    //     thread ever doing the disk work.
+    {
+        QTemporaryDir hs;
+        const QString p = hs.filePath(QStringLiteral("burst.json"));
+        HistoryStore s(p);
+        s.setSaveDelayMs(150);
+
+        int saves = 0;
+        bool lastOk = false;
+        QString lastErr;
+        QObject::connect(&s, &HistoryStore::saved, [&](bool ok, const QString &err) {
+            ++saves; lastOk = ok; lastErr = err;
+        });
+
+        for (int i = 0; i < 20; ++i)
+            s.appendResult(QStringLiteral("nfqws (portable)"), QStringLiteral("h%1.io").arg(i),
+                           i % 2 == 0, 10 + i);
+
+        check(!QFile::exists(p), "twenty appends have not touched the disk: the write is deferred, not inline");
+        check(s.isDirty() && !s.isWriting(), "the store is dirty and has no worker out yet");
+
+        pumpFor(60);
+        check(!QFile::exists(p) && saves == 0, "it still has not written before the debounce window closes");
+
+        check(pumpUntil([&] { return saves >= 1 && !s.isWriting(); }, 5000),
+              "the debounced write lands on its own, off this thread");
+        check(saves == 1, "a burst of twenty appends costs ONE file write, not twenty");
+        check(lastOk && lastErr.isEmpty(), "saved() reported success");
+        check(!s.isDirty() && !s.isWriting(), "nothing is left pending once it has landed");
+
+        const QJsonArray written = QJsonDocument::fromJson(readFileOrNull(p).toUtf8()).array();
+        check(written.size() == 20 && written.at(19).toObject().value(QStringLiteral("host")).toString()
+                                          == QStringLiteral("h19.io"),
+              "the one write carried every row of the burst, including the last");
+
+        // A change that arrives after a completed write is a new cycle, not a lost row.
+        s.appendResult(QStringLiteral("nfqws (portable)"), QStringLiteral("late.io"), true, 5);
+        check(pumpUntil([&] { return saves >= 2 && !s.isDirty(); }, 5000),
+              "the row appended after a write is written too");
+        const QJsonArray afterLate =
+            QJsonDocument::fromJson(readFileOrNull(p).toUtf8()).array();
+        check(afterLate.size() == 21
+                  && afterLate.at(20).toObject().value(QStringLiteral("host")).toString()
+                         == QStringLiteral("late.io"),
+              "the file ends up describing the whole store, not the snapshot that raced it");
+    }
+
+    // (f) A change that lands while a worker is still out there must not be swallowed by it, and must
+    //     not start a second writer racing into the same file. The 0 ms delay makes every append a
+    //     write request, so the collision is reached without any sleep at all.
+    {
+        QTemporaryDir hs;
+        const QString p = hs.filePath(QStringLiteral("race.json"));
+        HistoryStore s(p);
+        s.setSaveDelayMs(0);
+
+        int saves = 0;
+        QObject::connect(&s, &HistoryStore::saved, [&](bool) { ++saves; });
+
+        for (int i = 0; i < 40; ++i)
+            s.appendResult(QStringLiteral("preset"), QStringLiteral("r%1.io").arg(i), true, i);
+        check(s.isDirty() || s.isWriting() || saves > 0, "some part of the write is under way");
+
+        check(pumpUntil([&] { return !s.isDirty() && !s.isWriting(); }, 8000),
+              "every request settles, however many piled up behind a busy worker");
+        const QJsonArray raced = QJsonDocument::fromJson(readFileOrNull(p).toUtf8()).array();
+        check(raced.size() == 40 && raced.at(39).toObject().value(QStringLiteral("host")).toString()
+                                        == QStringLiteral("r39.io"),
+              "and the file holds the final state, not an intermediate one");
+        check(saves >= 1, "each write that ran reported its outcome once");
+    }
+
+    // (g) Leaving the scope with a write still waiting is the shutdown case, and the one place a user
+    //     can lose data: quitting must not cost them the checks of their last second.
+    {
+        QTemporaryDir hs;
+        const QString p = hs.filePath(QStringLiteral("quit.json"));
+        {
+            HistoryStore s(p);
+            s.setSaveDelayMs(600000);   // would not fire for ten minutes; the scope ends at once
+            s.appendResult(QStringLiteral("preset"), QStringLiteral("quit.io"), false, -1, false);
+            check(!QFile::exists(p), "nothing is on disk while the debounce is still counting");
+        }
+        check(QFile::exists(p), "destroying the store wrote what was pending — a quit does not lose a check");
+
+        HistoryStore r(p);
+        check(r.load() && r.count() == 1 && r.entries().at(0).host == QStringLiteral("quit.io")
+                  && !r.entries().at(0).success && r.entries().at(0).latency == -1
+                  && !r.entries().at(0).certValid,
+              "and the row the destructor flushed reads back exactly as it was recorded, certificate "
+              "verdict and all");
+    }
+
+    // (h) Reading a file back. The interesting cases are all the ways a file a user may have opened in
+    //     an editor is not what the writer produced, and the rule for each: keep what reads, say what
+    //     was dropped, and never silently rewrite something the store could not understand.
+    {
+        QTemporaryDir hs;
+
+        {
+            const QString p = hs.filePath(QStringLiteral("absent.json"));
+            HistoryStore s(p);
+            check(s.load() && s.count() == 0 && s.lastError().isEmpty(),
+                  "no file at all is an empty history, not a failure");
+        }
+
+        {
+            const QString p = hs.filePath(QStringLiteral("broken.json"));
+            const QByteArray broken = QByteArrayLiteral("{ this is not json at all");
+            check(writeFile(p, broken), "an unreadable history file was written for the load case");
+            HistoryStore s(p);
+            QString err;
+            check(!s.load(&err) && !err.isEmpty() && s.count() == 0,
+                  "a file that is not JSON fails the load and says why");
+            check(readFileOrNull(p).toUtf8() == broken,
+                  "and the unreadable file is left byte-for-byte as it was");
+            s.appendResult(QStringLiteral("preset"), QStringLiteral("after.io"), true, 1);
+            check(s.flush() && readFileOrNull(p).toUtf8() != broken,
+                  "the next save replaces it instead of refusing to write forever");
+        }
+
+        {
+            const QString p = hs.filePath(QStringLiteral("object.json"));
+            check(writeFile(p, QByteArrayLiteral("{\"records\": []}")),
+                  "a wrong-shaped history file was written for the load case");
+            HistoryStore s(p);
+            check(!s.load() && !s.lastError().isEmpty(),
+                  "JSON that is not an array at the top level is refused, not half-read");
+        }
+
+        {
+            const QString p = hs.filePath(QStringLiteral("partial.json"));
+            check(writeFile(p, QByteArrayLiteral(
+                      "[ {\"timestamp\":\"2026-10-22T12:00:00\",\"preset\":\"p\",\"host\":\"good.io\","
+                      "\"success\":true,\"latency\":7,\"cert\":false},\n"
+                      "  {\"timestamp\":\"2026-10-22T12:00:01\",\"preset\":\"p\",\"success\":true},\n"
+                      "  {\"timestamp\":\"not a time\",\"preset\":\"p\",\"host\":\"badtime.io\","
+                      "\"success\":true},\n"
+                      "  \"a string is not a record\",\n"
+                      "  {\"timestamp\":\"2026-10-22T12:00:02\",\"preset\":\"\",\"host\":\"  late.io  \","
+                      "\"success\":false} ]")),
+                  "a partly hand-edited history file was written for the load case");
+            HistoryStore s(p);
+            check(s.load() && s.count() == 2, "two of the five records load — the readable ones");
+            check(s.lastError().contains(QStringLiteral("3")),
+                  "and the three that did not are counted out loud instead of vanishing");
+            check(s.entries().at(0).certValid == false && s.entries().at(0).latency == 7,
+                  "a certificate rejection written by an older save reads back as a rejection");
+            check(s.entries().at(1).host == QStringLiteral("late.io")
+                      && s.entries().at(1).preset.isEmpty() && s.entries().at(1).latency == -1
+                      && !s.entries().at(1).success && s.entries().at(1).certValid,
+                  "a blank preset, an absent latency and — the shape every file from before the "
+                  "cert key has — an absent cert all degrade rather than failing the row");
+        }
+
+        {
+            // A file from a build that kept more than this cap: the cap wins on the way in, so the next
+            // save cannot quietly carry on growing a history the user asked to bound.
+            const QString p = hs.filePath(QStringLiteral("oversize.json"));
+            const QDateTime base(QDate(2026, 10, 22), QTime(12, 0, 0));
+            QVector<HistoryEntry> rows;
+            for (int i = 0; i < 25; ++i) {
+                HistoryEntry e;
+                e.timestamp = base.addSecs(i);
+                e.host = QStringLiteral("h%1.io").arg(i);
+                rows << e;
+            }
+            check(writeFile(p, HistoryStore::toJson(rows)), "an oversized history file was written");
+            HistoryStore s(p);
+            s.setMaxEntries(10);
+            check(s.load() && s.count() == 10, "a file grown past the cap is trimmed on the way in");
+            check(s.entries().first().host == QStringLiteral("h15.io")
+                      && s.entries().last().host == QStringLiteral("h24.io"),
+                  "and the rows that go are the oldest: the newest ten survive");
+        }
+    }
+
+    // (i) Where the store cannot write at all, it must say so rather than pretend. Two shapes: no path
+    //     chosen, and a path that is not a file.
+    {
+        HistoryStore s;
+        int saves = 0;
+        QObject::connect(&s, &HistoryStore::saved, [&](bool, const QString &) { ++saves; });
+
+        check(s.appendResult(QStringLiteral("preset"), QStringLiteral("mem.io"), true, 1)
+                  && s.count() == 1 && s.isDirty(),
+              "with no file chosen the row is still recorded in memory");
+        pumpFor(60);
+        check(saves == 0 && s.lastError().contains(QStringLiteral("no file")),
+              "and the missing destination is reported through lastError, not as a write that succeeded");
+        QString err;
+        check(!s.flush() && !s.load(&err) && err.contains(QStringLiteral("no file")),
+              "flush() and load() both refuse a store with nowhere to read or write");
+
+        QTemporaryDir bad;
+        HistoryStore dir(bad.path());   // the temporary directory itself: a directory, not a file
+        dir.setSaveDelayMs(0);
+        int dirSaves = 0;
+        bool dirOk = true;
+        QObject::connect(&dir, &HistoryStore::saved, [&](bool ok, const QString &) {
+            ++dirSaves; dirOk = ok;
+        });
+        dir.appendResult(QStringLiteral("preset"), QStringLiteral("x.io"), true, 1);
+        check(pumpUntil([&] { return dirSaves >= 1 && !dir.isWriting(); }, 5000),
+              "a write that cannot land still reports back");
+        check(!dirOk && !dir.lastError().isEmpty(),
+              "and it reports the failure rather than a history nobody can read");
+        check(dir.isDirty(),
+              "rows whose write failed stay unsaved — isDirty() does not call a rejected write a success");
+        check(!dir.flush(), "and retrying the impossible destination fails again instead of pretending");
+    }
+
+    // (j) The cap at its real size, and clear(). Both are about the file, so both go through a full
+    //     write-and-read cycle rather than only the in-memory view.
+    {
+        QTemporaryDir hs;
+        const QString p = hs.filePath(QStringLiteral("full.json"));
+        {
+            HistoryStore s(p);
+            s.setSaveDelayMs(0);
+
+            QElapsedTimer clock;
+            clock.start();
+            for (int i = 0; i < HistoryStore::kDefaultMaxEntries; ++i)
+                s.appendResult(QStringLiteral("preset"), QStringLiteral("h%1.io").arg(i), true, i);
+            check(s.count() == HistoryStore::kDefaultMaxEntries,
+                  "1000 rows fit the default cap exactly");
+            check(s.appendResult(QStringLiteral("preset"), QStringLiteral("h1000.io"), true, 1000)
+                      && s.count() == HistoryStore::kDefaultMaxEntries
+                      && s.entries().last().host == QStringLiteral("h1000.io")
+                      && s.entries().first().host == QStringLiteral("h1.io"),
+                  "the 1001st row evicts the oldest, never the newest");
+            check(clock.elapsed() < 5000,
+                  "a full store appends and trims in milliseconds — the UI never waits on it");
+
+            check(s.flush(20000), "a full history writes");
+            check(s.count() == HistoryStore::kDefaultMaxEntries && !s.isDirty(),
+                  "flushing loses nothing and leaves nothing pending");
+        }
+
+        HistoryStore r(p);
+        const qint64 bytes = QFileInfo(p).size();
+        check(r.load() && r.count() == HistoryStore::kDefaultMaxEntries,
+              "and a full history reads back at the cap");
+        check(r.entries().first().host == QStringLiteral("h1.io")
+                  && r.entries().last().host == QStringLiteral("h1000.io"),
+              "in the same order it was written");
+        check(bytes > 0 && bytes < 2 * 1024 * 1024,
+              "a thousand records stay a small file, which is the whole reason a scan beats a database");
+
+        r.setSaveDelayMs(0);
+        r.clear();
+        check(r.count() == 0 && r.isDirty(), "clear() empties memory and marks the file for the same");
+        check(pumpUntil([&] { return !r.isDirty() && !r.isWriting(); }, 5000),
+              "the cleared state is written");
+        HistoryStore v(p);
+        check(v.load() && v.count() == 0, "and it reads back as nothing");
+        check(QJsonDocument::fromJson(readFileOrNull(p).toUtf8()).isArray(),
+              "an empty history is an empty array on disk, not an absent or malformed file");
+    }
+
+    // (k) The first write into a fresh location creates the directory it needs. The path is a caller's
+    //     argument, so a store pointed below a folder nothing has made yet must write rather than fail —
+    //     and the failure it avoids is the silent kind, one history row at a time.
+    {
+        QTemporaryDir hs;
+        const QString p = hs.filePath(QStringLiteral("state/nested/history.json"));
+        check(!QFileInfo(p).dir().exists(), "the directory the store is pointed at does not exist yet");
+        HistoryStore s(p);
+        s.setSaveDelayMs(0);
+        s.appendResult(QStringLiteral("preset"), QStringLiteral("mk.io"), true, 2);
+        check(s.flush(10000), "the first write makes the parent directory instead of failing");
+        check(QFile::exists(p), "and the record lands where it was promised");
+        HistoryStore r(p);
+        check(r.load() && r.count() == 1 && r.entries().at(0).latency == 2,
+              "which reads back like any other file");
+
+        // The temporary-plus-rename contract, observable from the outside: a write that goes through a
+        // QSaveFile leaves nothing stranded next to the record it replaced.
+        const QStringList leftovers = QDir(QFileInfo(p).absolutePath())
+                                          .entryList(QDir::Files, QDir::Name);
+        check(leftovers.count() == 1 && leftovers.first() == QLatin1String("history.json"),
+              "the atomic replace leaves no temporary file behind");
+    }
 
     out << "\n=== " << (g_failures ? "FAILED" : "ALL PASS") << " (" << g_failures << " failures) ===\n";
     out.flush();

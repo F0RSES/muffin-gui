@@ -65,6 +65,19 @@ public:
     // OS gives us nothing): callers must treat that as "no managed install", not as "the root dir".
     static QString managedInstallDir();
 
+    // The per-user directory this identity's data lives in — exactly the base managedInstallDir() hangs
+    // "zapret" off, without that folder. Anything the application records about itself (the check
+    // history) belongs here rather than inside the payload tree, because that tree is a download: a
+    // re-download replaces it, and the root helper promotes a copy of it over a root-owned one.
+    // Empty for the same reason managedInstallDir() is.
+    static QString appDataDir();
+    static QString appDataDirFor(const QString &organizationName);
+
+    // "<AppDataLocation>/history.json": the past bypass checks, as HistoryStore reads and writes them.
+    // Empty when there is no app-data directory to put it in; a HistoryStore with an empty path keeps
+    // its rows in memory and says so through lastError().
+    static QString historyFilePath();
+
     // managedInstallDir() as it resolves under an explicitly chosen organization, ignoring what the
     // application identity currently says. The one-off identity migration below needs to ask the same
     // question about a name the process no longer uses, and QStandardPaths has no other way to answer

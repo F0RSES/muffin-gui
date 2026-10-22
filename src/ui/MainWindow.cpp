@@ -2,6 +2,7 @@
 
 #include "BlockcheckEngine.h"
 #include "DownloadDialog.h"
+#include "HistoryStore.h"
 #include "LanguageManager.h"
 #include "LogPanel.h"
 #include "PingIndicator.h"
@@ -12,6 +13,7 @@
 #include "SettingsPage.h"
 #include "Theme.h"
 #include "ZapretManager.h"
+#include "ZapretPaths.h"
 
 #include <QAction>
 #include <QApplication>
@@ -142,6 +144,24 @@ MainWindow::MainWindow(QWidget *parent)
     m_blockcheck = new BlockcheckEngine(this);
     m_blockcheck->setManager(m_manager);
 
+    // The record of every check this window measures, kept in the per-user data directory next to — and
+    // deliberately not inside — the payload tree a re-download replaces. load() is the one synchronous
+    // read at startup: the file is bounded by the store's own cap, so the cost is a few tens of
+    // milliseconds before the first paint, and every write after that is debounced and off-thread.
+    //
+    // A store that cannot read its file is not a window that cannot start: the checks still work, the
+    // history simply begins again, and what was wrong goes to the journal once buildCentral() has made
+    // one. Nothing is written over the unreadable file until a verdict actually arrives.
+    m_history = new HistoryStore(ZapretPaths::historyFilePath(), this);
+    QString historyError;
+    const bool historyLoaded = m_history->load(&historyError);
+    // A history that stopped saving is worth one journal line and no dialog: the user asked for a
+    // check, and the check is what the sheet and the verdict answer.
+    connect(m_history, &HistoryStore::saved, this, [this](bool ok, const QString &error) {
+        if (!ok && m_log)
+            m_log->appendLine(error, LogPanel::Warn);
+    });
+
     // A fixed 900x700 canvas with no system frame at all. The dashboard is laid out around a 200 px ring
     // and a footer that must stay centred, so a maximised or resized window is a different design that
     // nobody drew — hence setFixedSize. And because the mock draws its own header, the platform title bar
@@ -155,6 +175,10 @@ MainWindow::MainWindow(QWidget *parent)
     setFixedSize(kWindowWidth, kWindowHeight);
 
     buildCentral();
+    // Only now can the history's own trouble be said: m_log is built by buildCentral(), and a store that
+    // could not read its file deserves a journal line rather than a silent restart of the record.
+    if (!historyLoaded)
+        m_log->appendLine(historyError, LogPanel::Warn);
     updateLanguageButton();
     const bool trayUp = ensureTray();
     if (!trayUp)
@@ -237,6 +261,14 @@ MainWindow::~MainWindow()
         // its testFinished must not re-enter UI slots (a modal verdict sheet) from inside a teardown.
         m_blockcheck->disconnect(this);
         m_blockcheck->cancel();
+    }
+    if (m_history) {
+        // The same rule as the engine's, and the reason flush() is called here rather than left to the
+        // child's own destructor: a save that lands during teardown would emit saved() into a window
+        // that is no longer listening, and the checks of the last seconds are the rows most worth
+        // keeping. flush() writes what is pending on this thread and returns once the file matches.
+        m_history->disconnect(this);
+        m_history->flush();
     }
     if (m_ping) {
         m_ping->stop();
@@ -1102,6 +1134,19 @@ void MainWindow::wire()
     });
     connect(m_blockcheck, &BlockcheckEngine::hostChecked, this,
             [this](const QString &host, const HostCheckResult &r) {
+        // Recorded before the watchdog's silence, because history is data rather than noise: a quiet
+        // cycle is the one that answers "did it still work at 3 a.m.", and dropping it would leave the
+        // record full of the checks the user happened to ask for. What the mute covers is the journal,
+        // the meter and the toast — not the file.
+        //
+        // The certificate verdict travels with the row, because it is the half of the answer that a
+        // TCP-level pass hides: a substituted cert is the interception the user is trying to detect, and
+        // a history that recorded it as an OK would read as "it worked yesterday" precisely when it
+        // did not.
+        if (m_history)
+            m_history->appendResult(m_blockcheckPreset, host, r.success, r.avgLatency,
+                                    r.isCertificateValid);
+
         if (m_watchdogRun)
             return;
         // A journal line per host, in the engine's own vocabulary rather than a translated sentence:
@@ -1939,6 +1984,9 @@ void MainWindow::onBlockcheckRequested()
     }
 
     beginBlockcheck();
+    // The name the history rows get, kept for the whole cycle: the engine reports a host and a verdict,
+    // and the preset that produced them is this window's to know.
+    m_blockcheckPreset = s->name;
     m_log->appendLine(LanguageManager::tr(QStringLiteral("log.blockcheck_started")).arg(s->name),
                       LogPanel::Info);
     // The row's two hosts, not the dashboard's three: this check is about the path the profile
@@ -1962,6 +2010,9 @@ void MainWindow::beginBlockcheck()
 void MainWindow::endBlockcheck()
 {
     m_blockcheckActive = false;
+    // The cycle is over, so no later verdict may claim this preset. Cleared rather than left: an
+    // unsolicited hostChecked after this point would otherwise be recorded against the wrong profile.
+    m_blockcheckPreset.clear();
     if (m_blockcheckButton) {
         m_blockcheckButton->setEnabled(true);
         i18nText(m_blockcheckButton, QStringLiteral("action.blockcheck"));
@@ -2176,6 +2227,7 @@ void MainWindow::startWatchdogProbe(const Strategy &strategy)
     // stops what it started), so a quiet cycle costs a settle and a probe — not a teardown of the very
     // profile the user is relying on. m_watchdogRun is cleared by onWatchdogResult(), and testFinished
     // is contractually the last word of every run, including the ones the engine refuses.
+    m_blockcheckPreset = strategy.name;
     m_blockcheck->startTest(strategy, QStringList{watchdogQuickHost()});
 }
 
@@ -2187,6 +2239,7 @@ void MainWindow::onWatchdogResult(const QJsonObject &results)
     const bool voided = m_watchdogVerdictVoid;
     m_watchdogRun = false;
     m_watchdogVerdictVoid = false;
+    m_blockcheckPreset.clear();   // the same reason endBlockcheck() clears it: this cycle is finished
     if (voided)
         return;   // the run this measured came down on the way; see m_watchdogVerdictVoid
 

@@ -154,14 +154,31 @@ QString ZapretPaths::nativeArchDirName()
     return QString();
 }
 
-QString ZapretPaths::managedInstallDirFor(const QString &organizationName)
+QString ZapretPaths::appDataDirFor(const QString &organizationName)
 {
     const ScopedOrganization org(organizationName);
-    const QString base =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+}
+
+QString ZapretPaths::appDataDir()
+{
+    return appDataDirFor(QCoreApplication::organizationName());
+}
+
+QString ZapretPaths::managedInstallDirFor(const QString &organizationName)
+{
+    const QString base = appDataDirFor(organizationName);
     if (base.isEmpty())
         return QString();
     return rel(base, QStringLiteral("zapret"));
+}
+
+QString ZapretPaths::historyFilePath()
+{
+    const QString base = appDataDir();
+    if (base.isEmpty())
+        return QString();
+    return rel(base, QStringLiteral("history.json"));
 }
 
 QString ZapretPaths::managedInstallDir()

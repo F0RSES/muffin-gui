@@ -34,6 +34,7 @@ add_library(zapretcore STATIC
     src/core/ZapretManager.cpp
     src/core/PingService.cpp
     src/core/BlockcheckEngine.cpp
+    src/core/HistoryStore.cpp
     src/platform/WindowsBackend.cpp
     src/platform/LinuxBackend.cpp
 )
@@ -48,6 +49,7 @@ target_sources(zapretcore PRIVATE
     src/core/ZapretManager.h
     src/core/PingService.h
     src/core/BlockcheckEngine.h
+    src/core/HistoryStore.h
     src/platform/WindowsBackend.h
     src/platform/LinuxBackend.h
 )

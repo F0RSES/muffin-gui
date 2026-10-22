@@ -34,6 +34,7 @@ class QWidget;
 namespace zapret {
 
 class BlockcheckEngine;
+class HistoryStore;
 class LogPanel;
 class PingIndicator;
 class PingService;
@@ -426,6 +427,13 @@ private:
     // The real-bypass check's engine. A child of the window — it lives on this thread, and only its
     // internal probe worker does not — wired to the same manager the power button drives.
     BlockcheckEngine *m_blockcheck = nullptr;
+    // Every verdict the engine returns is recorded here, so "when did this last work" has an answer
+    // after the window is gone. A child too: it lives on this thread and only moves its file write off
+    // it. See core/HistoryStore.h for the cap and the format.
+    HistoryStore *m_history = nullptr;
+    // Which profile the cycle in flight is measuring, kept because hostChecked names the host and not
+    // the preset, and a history row without its preset is half a record.
+    QString m_blockcheckPreset;
     LogPanel *m_log = nullptr;
 
     QWidget *m_sidebar = nullptr;          // the rail: brand, the journal glyph, settings and version
