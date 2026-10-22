@@ -18,6 +18,8 @@
 #include "BlockcheckEngine.h"
 #include "IZapretBackend.h"
 #include "DownloadDialog.h"
+#include "HistoryPage.h"
+#include "HistoryStore.h"
 #include "LanguageManager.h"
 #include "LogPanel.h"
 #include "MainWindow.h"
@@ -35,13 +37,18 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
+#include <QAbstractItemModel>
+#include <QBrush>
 #include <QComboBox>
+#include <QDate>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
 #include <QLabel>
+#include <QLayout>
 #include <QMenu>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -52,6 +59,7 @@
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
+#include <QTableView>
 #include <QTemporaryDir>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -1171,6 +1179,11 @@ static void testTheme(QApplication &app)
     check(app.styleSheet().contains(QStringLiteral("#0B0C10")), "dashboard background present in the sheet");
     check(app.styleSheet().contains(QStringLiteral("profileCard")), "profile row rules present");
     check(app.styleSheet().contains(QStringLiteral("settingsPage")), "settings page rules present");
+    // The history page is sheet-styled apart from its row tints: the panel, the headline, the table and
+    // the rate bar all need rules, or the page renders as loose labels on a black canvas.
+    check(app.styleSheet().contains(QStringLiteral("historySummary")), "history summary rules present");
+    check(app.styleSheet().contains(QStringLiteral("historyTable")), "history table rules present");
+    check(app.styleSheet().contains(QStringLiteral("historyRateBar")), "history rate bar rules present");
     check(app.styleSheet().contains(QStringLiteral("windowButton")), "window chrome rules present");
     // The rail and the page stack are the window's skeleton: if their rules go missing, the nav buttons
     // render as default raised buttons and the pages composite onto black.
@@ -1250,6 +1263,19 @@ static void testTheme(QApplication &app)
         check(sheet.contains(QStringLiteral("navButton")),
               QStringLiteral("%1 sheet styles the rail").arg(dark ? QStringLiteral("dark")
                                                                  : QStringLiteral("light")));
+        // The history page's rate bar is coloured by a dynamic property the code stamps and the sheet
+        // reads; a band missing from one theme leaves that theme's summary a colourless thread.
+        check(sheet.contains(QStringLiteral("historyRateBar[rateLevel=\"good\"]")),
+              QStringLiteral("%1 sheet colours a healthy bypass").arg(dark ? QStringLiteral("dark")
+                                                                          : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("historyRateBar[rateLevel=\"poor\"]")),
+              QStringLiteral("%1 sheet colours a failing one").arg(dark ? QStringLiteral("dark")
+                                                                       : QStringLiteral("light")));
+        // The row tints are model data, and only the absence of an item background rule lets them
+        // through: this is the sheet promising not to override them.
+        check(!sheet.contains(QStringLiteral("historyTable::item { background")),
+              QStringLiteral("%1 sheet leaves the row colours to the model").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
         // The dashboard's painted circles read their colours from C++ tokens, but everything framing them
         // is sheet styling — and both sheets must carry it, or the light theme shows an unstyled rail.
         for (const QString &name : {QStringLiteral("mainArea"), QStringLiteral("statusDot"),
@@ -1334,8 +1360,9 @@ static void testTheme(QApplication &app)
                                 QStringLiteral("tray"), QStringLiteral("clear"), QStringLiteral("copy"),
                                 QStringLiteral("ping-ok"), QStringLiteral("ping-fail"),
                                 QStringLiteral("ping-wait"), QStringLiteral("error"),
-                                // The rail's own set: brand, the two pages and the foot action.
+                                // The rail's own set: brand, the page glyphs and the foot action.
                                 QStringLiteral("home"), QStringLiteral("logs"),
+                                QStringLiteral("chart"),
                                 QStringLiteral("power"),
                                 // The dashboard's set: a ping badge's clock and the marks inside its ring.
                                 QStringLiteral("clock"), QStringLiteral("globe"),
@@ -1374,7 +1401,8 @@ static void testTheme(QApplication &app)
     Theme::apply(app, true);
     for (const QString &g : {QStringLiteral("home"), QStringLiteral("logs"), QStringLiteral("power"),
                              QStringLiteral("app"), QStringLiteral("clock"), QStringLiteral("globe"),
-                             QStringLiteral("youtube"), QStringLiteral("discord")}) {
+                             QStringLiteral("youtube"), QStringLiteral("discord"),
+                             QStringLiteral("chart")}) {
         const QPixmap pm = Theme::icon(g, Theme::accent(), 20).pixmap(20, 20);
         check(!pm.isNull(), QStringLiteral("rail glyph rasterises: %1").arg(g));
         bool inked = false;
@@ -1518,6 +1546,362 @@ static void testDownloadDialog()
     check(DownloadDialog::humanSize(-1) == QStringLiteral("неизвестно"),
           "an unannounced size is called unknown, not zero");
 }
+
+// ---------------------------------------------------------------- History page ----
+//
+// The page is the record's face: a summary of everything the store holds, and the rows themselves with
+// their verdict painted on. Half of that is arithmetic and mapping — what colour is an intercepted row,
+// what percent is two of three — which is checked on the class without a widget at all; the other half
+// is "does the table follow the store", checked on a live page over a real temporary file.
+
+namespace {
+
+// A history page that answers its own confirmation. The default one opens a modal, and a suite has no
+// pointer to click and nobody to press Escape; what is worth checking is the decision on either side of
+// the answer, so the answer is data here.
+class ClearProbe : public HistoryPage
+{
+public:
+    using HistoryPage::HistoryPage;
+
+    bool answerYes = true;
+    int asked = 0;
+    int lastTotal = -1;
+
+protected:
+    bool confirmClear(int totalRows) override
+    {
+        ++asked;
+        lastTotal = totalRows;
+        return answerYes;
+    }
+};
+
+// What a rendered row strip is mostly made of: its background. Averaged over the strip rather than
+// sampled, because the text in it is a few hundred pixels against twenty thousand of tint.
+QColor rowAverage(const QImage &shot, int row, int rowHeight)
+{
+    const int top = row * rowHeight + 4;
+    const int bottom = qMin(shot.height(), top + qMax(1, rowHeight - 10));
+    qint64 r = 0, g = 0, b = 0, n = 0;
+    for (int y = top; y < bottom; ++y) {
+        for (int x = 4; x + 4 < shot.width(); ++x) {
+            const QColor c = shot.pixelColor(x, y);
+            r += c.red(); g += c.green(); b += c.blue(); ++n;
+        }
+    }
+    if (n == 0)
+        return QColor();
+    return QColor(int(r / n), int(g / n), int(b / n));
+}
+
+} // namespace
+
+static void testHistoryPage()
+{
+    std::printf("\n[HistoryPage]\n");
+
+    // ---- the three verdicts, from the two booleans a row carries ----
+    HistoryEntry passed;   passed.host = QStringLiteral("a.example");   passed.success = true;
+    HistoryEntry intercepted; intercepted.host = QStringLiteral("b.example");
+    intercepted.success = true; intercepted.certValid = false;
+    HistoryEntry failed;   failed.host = QStringLiteral("c.example");   failed.success = false;
+    HistoryEntry failedWithBadCert = failed;
+    failedWithBadCert.certValid = false;
+
+    check(HistoryPage::verdictFor(passed) == HistoryVerdict::Passed,
+          "a clean pass is the boring green");
+    check(HistoryPage::verdictFor(intercepted) == HistoryVerdict::Intercepted,
+          "a pass whose certificate was rejected is the amber one — that is why the field exists");
+    check(HistoryPage::verdictFor(failed) == HistoryVerdict::Failed, "no connection is a failure");
+    check(HistoryPage::verdictFor(failedWithBadCert) == HistoryVerdict::Failed,
+          "…and stays one when the TLS half failed too: a check that never connected has no "
+          "interception to accuse anybody of");
+
+    check(HistoryPage::verdictColor(HistoryVerdict::Passed) == Theme::success(),
+          "the passed word is the theme's green, not a second green");
+    check(HistoryPage::verdictColor(HistoryVerdict::Failed) == Theme::error(),
+          "the failed word is the theme's red");
+    check(HistoryPage::verdictColor(HistoryVerdict::Intercepted) == Theme::warning(),
+          "the intercepted word is the theme's amber");
+
+    const QColor tint = HistoryPage::verdictTint(HistoryVerdict::Intercepted);
+    check(tint.red() == Theme::warning().red() && tint.green() == Theme::warning().green()
+              && tint.blue() == Theme::warning().blue(),
+          "a row's background is its verdict's colour, not an unrelated one");
+    check(tint.alpha() > 0 && tint.alpha() < 90,
+          QStringLiteral("…and kept a wash rather than a fill (alpha %1)").arg(tint.alpha()));
+
+    // The words themselves are catalog entries; a missing row falls back to the key, which is exactly
+    // what a status column must never show.
+    for (const QString &key : {QStringLiteral("history.verdict.passed"),
+                               QStringLiteral("history.verdict.failed"),
+                               QStringLiteral("history.verdict.intercepted")})
+        check(LanguageManager::tr(key) != key,
+              QStringLiteral("the status column's word '%1' is translated").arg(key));
+    check(HistoryPage::verdictText(HistoryVerdict::Intercepted)
+              == QStringLiteral("Подмена сертификата"),
+          "the amber row says what happened to the certificate, in Russian");
+
+    // ---- the arithmetic behind the headline ----
+    check(HistoryPage::Tally().successRate() == -1,
+          "an empty record has no percentage, and 0% is a different claim");
+
+    QVector<HistoryEntry> mixed;
+    mixed << passed << passed << intercepted << failed;
+    const HistoryPage::Tally t = HistoryPage::tallyOf(mixed);
+    check(t.total == 4 && t.passed == 2 && t.intercepted == 1 && t.failed == 1,
+          "one pass over the rows counts each verdict once");
+    check(t.successRate() == 50, "two of four is 50%");
+    check(HistoryPage::tallyOf(QVector<HistoryEntry>{failed}).successRate() == 0,
+          "none of one is 0%, and that is not the same sentence as -1");
+
+    QVector<HistoryEntry> twoOfThree;
+    twoOfThree << passed << passed << failed;
+    check(HistoryPage::tallyOf(twoOfThree).successRate() == 67,
+          "two of three rounds to 67% — a truncated 66% undersells the record it summarises");
+    // ---- the live page over a real store ----
+    QTemporaryDir dir;
+    check(dir.isValid(), "temporary directory for the history file");
+    HistoryStore store(dir.filePath(QStringLiteral("history.json")));
+    store.setSaveDelayMs(0);
+
+    ClearProbe page(&store);
+    check(page.rowCount() == 0, "a fresh record shows an empty table");
+    check(page.showsEmptyNotice(), "…and says so, instead of drawing a bare grid of headings");
+    check(page.successRate() == -1, "with no number to show");
+    check(!page.clearButton()->isEnabled(), "and nothing to clear, so the button says so");
+
+    // Timestamps spelled out rather than left to the store's "stamp it now": the ordering checks below
+    // are about which row the page picks first, and two appends inside the same millisecond would make
+    // that a race instead of a fact.
+    const QDateTime t0(QDate(2026, 10, 22), QTime(12, 0, 0));
+    store.appendResult(QStringLiteral("nfqws (portable)"), QStringLiteral("first.example"),
+                       true, 42, true, t0);
+    check(page.rowCount() == 1,
+          "the store's changed() moves the table by itself — nobody had to tell the page");
+    check(!page.showsEmptyNotice(), "and the notice steps aside for it");
+    check(page.clearButton()->isEnabled(), "…while clearing becomes a thing you can do");
+
+    store.appendResult(QStringLiteral("nfqws (portable)"), QStringLiteral("second.example"),
+                       false, -1, true, t0.addSecs(60));
+    store.appendResult(QStringLiteral("str192-domain"), QStringLiteral("third.example"),
+                       true, 10, false, t0.addSecs(120));
+    check(page.rowCount() == 3, "one refresh per recorded check");
+
+    QAbstractItemModel *model = page.table()->model();
+    const int colHost = HistoryTableModel::ColumnHost;
+    const int colVerdict = HistoryTableModel::ColumnVerdict;
+    const int colLatency = HistoryTableModel::ColumnLatency;
+    const int colTime = HistoryTableModel::ColumnTime;
+    check(model->columnCount(QModelIndex()) == HistoryTableModel::ColumnCount,
+          "the table has the five columns it was drawn with");
+    check(model->data(model->index(0, colHost), Qt::DisplayRole).toString()
+              == QStringLiteral("third.example"),
+          "newest first: the row the user just watched happen is at the top");
+    check(model->data(model->index(2, colHost), Qt::DisplayRole).toString()
+              == QStringLiteral("first.example"), "…and the oldest is at the bottom");
+
+    check(model->data(model->index(0, colVerdict), Qt::DisplayRole).toString()
+              == HistoryPage::verdictText(HistoryVerdict::Intercepted),
+          "the newest row is the amber one, and says so in words as well as in colour");
+    check(model->data(model->index(1, colVerdict), Qt::DisplayRole).toString()
+              == HistoryPage::verdictText(HistoryVerdict::Failed), "the middle row is the failure");
+    check(model->data(model->index(2, colVerdict), Qt::DisplayRole).toString()
+              == HistoryPage::verdictText(HistoryVerdict::Passed), "the oldest row passed");
+
+    check(model->data(model->index(1, colLatency), Qt::DisplayRole).toString()
+              == QStringLiteral("—"),
+          "a check that never connected shows a dash, not the 0 it was measured as");
+    check(model->data(model->index(2, colLatency), Qt::DisplayRole).toString()
+              == QStringLiteral("42"), "a measured latency shows as whole milliseconds");
+    check(model->data(model->index(2, colTime), Qt::DisplayRole).toString()
+              .contains(QStringLiteral("22.10.2026")), "the time column carries the date too");
+
+    // The colour coding, as the view is told it: every cell of the row wears the verdict, and the status
+    // word wears it at full strength.
+    check(model->data(model->index(0, colHost), Qt::BackgroundRole).value<QBrush>().color()
+              == HistoryPage::verdictTint(HistoryVerdict::Intercepted),
+          "an intercepted row's background is the amber wash");
+    check(model->data(model->index(1, colTime), Qt::BackgroundRole).value<QBrush>().color()
+              == HistoryPage::verdictTint(HistoryVerdict::Failed),
+          "…a failed row's is the red one, on every column of the row");
+    check(model->data(model->index(0, colVerdict), Qt::ForegroundRole).value<QBrush>().color()
+              == HistoryPage::verdictColor(HistoryVerdict::Intercepted),
+          "and the status word is its verdict's colour at full strength");
+    check(!model->data(model->index(0, colHost), Qt::ForegroundRole).isValid(),
+          "…which the rest of the row deliberately does not take, or the page would be a palette");
+
+    // ---- the summary ----
+    check(page.successRate() == 33, "one clean check in three is 33%");
+    check(page.headline()->text() == LanguageManager::tr(QStringLiteral("history.headline"),
+                                                        QStringLiteral("33")),
+          "and the headline says exactly that");
+    check(page.counts()->text() == LanguageManager::tr(QStringLiteral("history.counts"))
+                                       .arg(3).arg(1).arg(1),
+          "the small line names the total, the failures and the interceptions");
+    check(page.table()->model()->rowCount() == page.rowCount(),
+          "the hook the suite reads is the table's own row count, not a second number");
+
+    // ---- do the row colours survive the stylesheet? ----
+    //
+    // Everything above is the model's side of the promise. The sheet is the other half, and it is the
+    // half that breaks silently: the tint is a brush on the model, and a styled item view only puts it on
+    // screen because the page installs a delegate that fills it (see VerdictDelegate). Drop that delegate,
+    // or let the sheet declare a background of its own for ::item, and the table keeps its words, its
+    // columns and its order while losing the one thing that makes a failed night findable at a glance.
+    // So the table is rendered, and its pixels are read.
+    page.resize(840, 460);
+    if (QLayout *l = page.layout())
+        l->activate();
+    const QImage shot = page.table()->viewport()->grab().toImage()
+                           .convertToFormat(QImage::Format_ARGB32);
+    check(shot.width() > 300 && shot.height() > 80,
+          QStringLiteral("the table renders at %1x%2").arg(shot.width()).arg(shot.height()));
+    if (shot.width() > 300 && shot.height() > 80) {
+        // Redness is where the red and the amber rows part company from the green one, greenness is
+        // where the amber parts from the red: amber is a green that ran out of blue, and red is not.
+        auto redness = [&](int row) {
+            const QColor c = rowAverage(shot, row, 30);
+            return c.red() - c.green();
+        };
+        auto greenness = [&](int row) {
+            const QColor c = rowAverage(shot, row, 30);
+            return c.green() - c.blue();
+        };
+        check(redness(2) < redness(0) - 4 && redness(0) < redness(1) - 4,
+              QStringLiteral("rendered: the passed row (%1) is less red than the intercepted (%2), "
+                             "which is less red than the failed one (%3)")
+                  .arg(redness(2)).arg(redness(0)).arg(redness(1)));
+        check(greenness(1) < greenness(2) - 4 && greenness(2) < greenness(0) - 4,
+              QStringLiteral("rendered: the failed row (%1) is less green than the passed (%2), "
+                             "which is less green than the amber one (%3)")
+                  .arg(greenness(1)).arg(greenness(2)).arg(greenness(0)));
+
+        // The word, not only the row. An inherited `color` from the sheet would paint every status word
+        // in the page's text colour and leave the verdict in the background alone — a page that reads as
+        // three grey words on three coloured stripes is one edit away from reading as nothing.
+        auto inkCount = [&](int row, const QColor &want) {
+            int n = 0;
+            const int top = row * 30 + 4;
+            const int bottom = qMin(shot.height(), top + 20);
+            for (int y = top; y < bottom; ++y)
+                for (int x = 4; x + 4 < shot.width(); ++x) {
+                    const QColor c = shot.pixelColor(x, y);
+                    const int d = qAbs(c.red() - want.red()) + qAbs(c.green() - want.green())
+                                  + qAbs(c.blue() - want.blue());
+                    if (d < 90)
+                        ++n;
+                }
+            return n;
+        };
+        check(inkCount(0, Theme::warning()) > 20, "the amber row's status word is amber");
+        check(inkCount(1, Theme::error()) > 20, "the failed row's status word is red");
+        check(inkCount(2, Theme::success()) > 20, "the passed row's status word is green");
+    }
+
+    // ---- sorting ----
+    // The unmeasured row has to land at the far end of an ascending latency sort, not at the front: a
+    // reader clicking the latency header is asking what is slowest to answer, and "it never answered" is
+    // not the fastest possible answer.
+    page.table()->sortByColumn(HistoryTableModel::ColumnLatency, Qt::AscendingOrder);
+    check(model->data(model->index(0, colLatency), Qt::DisplayRole).toString()
+              == QStringLiteral("10"),
+          "sorting by latency puts the quickest answer first");
+    check(model->data(model->index(2, colHost), Qt::DisplayRole).toString()
+              == QStringLiteral("second.example"),
+          "…and the check that never connected last, not first");
+    page.table()->sortByColumn(colTime, Qt::DescendingOrder);
+    check(model->data(model->index(0, colHost), Qt::DisplayRole).toString()
+              == QStringLiteral("third.example"),
+          "the newest-first reading order comes back on the click that asks for it");
+
+    // ---- the clear, both answers ----
+    QSignalSpy clearedSpy(&page, &HistoryPage::cleared);
+    page.answerYes = false;
+    page.clearButton()->click();
+    check(page.asked == 1, "the press asks before it destroys");
+    check(page.lastTotal == 3, "and says how much is at stake while asking");
+    check(store.count() == 3 && page.rowCount() == 3,
+          "a no leaves every row where it was, in the file and on the screen alike");
+    check(clearedSpy.count() == 0, "…and is not reported as a clearing");
+
+    page.answerYes = true;
+    page.clearButton()->click();
+    check(page.asked == 2, "a second press asks again rather than remembering the last answer");
+    check(store.count() == 0, "a yes empties the record");
+    check(page.rowCount() == 0, "…and the table follows the record, not a copy of it");
+    check(page.showsEmptyNotice(), "the notice comes back into its own");
+    check(page.successRate() == -1, "with the percentage taken away rather than set to zero");
+    check(!page.clearButton()->isEnabled(), "…and nothing left to clear");
+    check(clearedSpy.count() == 1 && clearedSpy.at(0).at(0).toInt() == 3,
+          "the page says how many rows went, so the window can put the number in the journal");
+    check(page.headline()->text() == LanguageManager::tr(QStringLiteral("history.headline.empty")),
+          "the headline switches to the sentence an empty record deserves");
+    check(page.counts()->text().isEmpty(),
+          "…and the counts line goes quiet rather than reciting three zeroes at it");
+    // The bar's band is a dynamic property the sheet colours. "none" is the point: an empty record must
+    // not be painted as a verdict, and a grey thread is the only honest thing to show for it.
+    check(page.rateLevel() == QStringLiteral("none"),
+          "…and the indicator shows no verdict at all rather than a zero percent one");
+
+    // ---- language ----
+    // Headers and verdict words are derived from the catalog rather than tagged on a widget, so they are
+    // the part a language switch can leave behind. The page is asked to re-read them, and does.
+    LanguageManager::instance().setCode(QStringLiteral("en"));
+    page.retranslateUi();
+    check(model->headerData(colVerdict, Qt::Horizontal, Qt::DisplayRole).toString()
+              == QStringLiteral("Status"),
+          "the header row follows the language");
+    store.appendResult(QStringLiteral("nfqws"), QStringLiteral("en.example"), true, 5, true, t0);
+    check(model->data(model->index(0, colVerdict), Qt::DisplayRole).toString()
+              == QStringLiteral("Passed"),
+          "…and so does a row's verdict word, on a row the page was not rebuilt for");
+    check(!page.showsEmptyNotice(), "the one new row is enough to put the table back");
+    LanguageManager::instance().setCode(QStringLiteral("ru"));
+    page.retranslateUi();
+    check(model->headerData(colVerdict, Qt::Horizontal, Qt::DisplayRole).toString()
+              == QStringLiteral("Статус"), "switching back re-says them again");
+    check(page.headline()->text() == LanguageManager::tr(QStringLiteral("history.headline"),
+                                                        QStringLiteral("100")),
+          "the summary re-says itself in the new language too");
+
+    // Every text-bearing control on the page carries a catalog key — the contract the window's
+    // retranslate walk reads. A button with a hardcoded sentence on it is invisible to a language switch
+    // and to this check.
+    const auto buttons = page.findChildren<QPushButton *>();
+    int tagged = 0;
+    for (QPushButton *b : buttons) {
+        const QString key = b->property("i18nKey").toString();
+        if (key.isEmpty())
+            continue;
+        ++tagged;
+        check(LanguageManager::keys().contains(key),
+              QStringLiteral("history page button key '%1' is in the catalog").arg(key));
+        check(b->text() == LanguageManager::tr(key),
+              QStringLiteral("history page button '%1' says what its key says").arg(key));
+    }
+    check(tagged >= 1, "the page's own controls are tagged for retranslation");
+
+    // ---- the indicator's bands ----
+    // Where the headline's colour turns is a policy of its own, and it is the policy the whole summary
+    // exists to state: a bypass that passes one check in two is not working, and painting it green
+    // because the bar moved at all is the page lying about the one number it was built to show.
+    check(page.rateLevel() == QStringLiteral("good"), "one clean check in one is the healthy band");
+    store.appendResult(QStringLiteral("nfqws"), QStringLiteral("bad.example"), false, -1, true,
+                       t0.addSecs(600));
+    check(page.rateLevel() == QStringLiteral("poor"),
+          "…and it falls to the failing band at half, not at zero");
+    store.appendResult(QStringLiteral("nfqws"), QStringLiteral("ok.example"), true, 7, true,
+                       t0.addSecs(660));
+    check(page.rateLevel() == QStringLiteral("fair"),
+          "two of three is its own amber band, because it is neither working nor broken");
+}
+
+
+
+
+
 
 // ------------------------------------------------------------------- Watchdog ----
 //
@@ -1753,6 +2137,26 @@ static void testWatchdog()
         check(window.watchdogTimerInterval() == 7 * 60 * 1000,
               "and it beats on the stored cadence, not on a literal in the window");
 
+        // ---- the history page, on the real window ----
+        // The page follows its store by itself, so what the window has to get right is narrower and
+        // worth pinning: that the page exists in the stack, that it was handed the store the window
+        // records into rather than a second one of its own, and that its rail glyph reaches it.
+        check(window.historyPage() != nullptr, "the window builds a history page");
+        check(window.historyPage()->store() == window.historyStore(),
+              "…and shows the record the window writes, not a copy of it");
+        const int rowsBefore = window.historyPage()->rowCount();
+        window.historyStore()->appendResult(QStringLiteral("fixture"),
+                                            QStringLiteral("watch.example"), true, 11, true,
+                                            QDateTime::currentDateTime());
+        check(window.historyPage()->rowCount() == rowsBefore + 1,
+              "a verdict recorded by the window reaches the page without anybody refreshing it");
+        window.setCurrentPage(MainWindow::PageHistory);
+        check(window.currentPage() == MainWindow::PageHistory,
+              "the rail's history glyph has a page to switch to");
+        window.showDashboard();
+        check(window.currentPage() == MainWindow::PageDashboard,
+              "…and the way back is the one every other full-screen page uses");
+
         // The other half of startWatchdog()'s rule: Settings::changed() answers every write, and the
         // one a start makes must not push the next check further out. Written through the window's own
         // model — which is the same object SettingsPage holds a reference to — because that is the only
@@ -1867,6 +2271,7 @@ int main(int argc, char **argv)
     testTheme(app);
     testPingService();
     testDownloadDialog();
+    testHistoryPage();
     testWatchdog();
 
     std::printf("\n=== %s (%d failures) ===\n", g_failures ? "FAILED" : "ALL PASS", g_failures);

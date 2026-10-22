@@ -34,6 +34,7 @@ class QWidget;
 namespace zapret {
 
 class BlockcheckEngine;
+class HistoryPage;
 class HistoryStore;
 class LogPanel;
 class PingIndicator;
@@ -46,12 +47,12 @@ class ZapretManager;
 // The application window: a narrow icon rail down the left, one full-width page at a time to its right,
 // everything driven through ZapretManager + Settings.
 //
-// The rail is 70 px of glyphs only — brand at the top, the profiles and the journal in the middle, the
-// settings glyph and the version at the foot. The page beside it is the dashboard: a header naming the
-// app and its connection state, one enormous power button that starts and stops the chosen profile, and a
-// row of neon ping badges. Profile rows are the list you pick from — one row per strategy, each carrying
-// the services it exists to unblock and a menu for the two things that act on the entry itself — and
-// starting is the dashboard's job alone, so a row never carries a second power button.
+// The rail is 70 px of glyphs only — brand at the top, the profiles, the journal and the history in the
+// middle, the settings glyph and the version at the foot. The page beside it is the dashboard: a header
+// naming the app and its connection state, one enormous power button that starts and stops the chosen
+// profile, and a row of neon ping badges. Profile rows are the list you pick from — one row per strategy,
+// each carrying the services it exists to unblock and a menu for the two things that act on the entry
+// itself — and starting is the dashboard's job alone, so a row never carries a second power button.
 //
 // It owns no domain logic. Rows come from the manager's catalog (which is the parser's output), the
 // start/stop path is the manager's, and persisted values are Settings'. What lives here is presentation
@@ -186,6 +187,11 @@ public:
     int cardCount() const { return static_cast<int>(m_cards.size()); }
     // True when a tray icon was actually created (a DE without a tray host leaves this false).
     bool hasTray() const { return m_tray != nullptr; }
+    // The record and the page that shows it. Hooks for the same reason as cardCount(): the promise of the
+    // history page is that it follows the store, and a suite cannot prove that about two objects it has
+    // no way to name.
+    HistoryStore *historyStore() const { return m_history; }
+    HistoryPage *historyPage() const { return m_historyPage; }
     // The card a failure was pinned to ("" when none). Test hook for the inline error badge.
     QString errorCardId() const;
     // The watchdog's live cadence, and whether it is armed. Hooks for the same reason as cardCount():
@@ -197,17 +203,19 @@ public:
     // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
     // one without walking the widget tree.
     //
-    // PageProfiles is not reachable from the rail as its own glyph: the rail is three glyphs and the
-    // mock has no room for a fourth. It opens from the dashboard's route pill, which is where the choice
-    // belongs — you pick a profile in order to run it. PageSettings, by contrast, IS a rail glyph: the
-    // settings sheet became a page in this same stack so that the rail's settings icon navigates rather
-    // than popping a modal, which is the whole argument of the rail.
+    // PageProfiles is not reachable from the rail as its own glyph: it opens from the dashboard's route
+    // pill, which is where the choice belongs — you pick a profile in order to run it. PageSettings, by
+    // contrast, IS a rail glyph: the settings sheet became a page in this same stack so that the rail's
+    // settings icon navigates rather than popping a modal, which is the whole argument of the rail.
+    // PageHistory is a glyph for the same reason: the record of past checks is a place a user goes to
+    // answer a question, not a dialog to dismiss.
     enum Page : int
     {
         PageDashboard  = 0,
         PageProfiles   = 1,
         PageLogs       = 2,
-        PageSettings   = 3
+        PageHistory    = 3,
+        PageSettings   = 4
     };
     int currentPage() const;
     void setCurrentPage(int page);
@@ -324,6 +332,10 @@ private:
     QWidget *buildDashboardPage();
     QWidget *buildProfilesPage();
     QWidget *buildLogsPage();
+    // The history and statistics page. Like the journal it is a whole-screen view of a record the window
+    // already keeps; unlike the journal it is derived, so it needs the store handed to it and re-read
+    // whenever the store says it moved.
+    QWidget *buildHistoryPage();
     // The settings page, added to the same stack as the others. It owns its own widgets and reads/writes
     // Settings directly, so this only constructs it once and remembers the pointer for retranslate/theme.
     QWidget *buildSettingsPage();
@@ -436,11 +448,12 @@ private:
     QString m_blockcheckPreset;
     LogPanel *m_log = nullptr;
 
-    QWidget *m_sidebar = nullptr;          // the rail: brand, the journal glyph, settings and version
+    QWidget *m_sidebar = nullptr;          // the rail: brand, the page glyphs, settings and version
     QFrame *m_mainArea = nullptr;          // header, page stack, footer
-    QStackedWidget *m_pages = nullptr;     // PageDashboard <-> PageProfiles <-> PageLogs <-> PageSettings
+    QStackedWidget *m_pages = nullptr;     // dashboard <-> profiles <-> logs <-> history <-> settings
     QPushButton *m_navLogs = nullptr;      // carries the [alert="true"] property
     QPushButton *m_navStrategies = nullptr;
+    QPushButton *m_navHistory = nullptr;   // the record of past checks, beside the journal's lines
     QPushButton *m_navSettings = nullptr;  // the settings glyph; checked while PageSettings is up
     QToolButton *m_minButton = nullptr;    // frameless-window chrome
     QToolButton *m_closeButton = nullptr;
@@ -454,6 +467,7 @@ private:
     QWidget *m_dashboardPage = nullptr;
     QWidget *m_profilesPage = nullptr;
     QWidget *m_logsPage = nullptr;
+    HistoryPage *m_historyPage = nullptr;   // PageHistory's content, without the way back around it
     SettingsPage *m_settingsPage = nullptr;
     QScrollArea *m_scroll = nullptr;
     QStackedWidget *m_stack = nullptr;      // profiles list <-> "no strategies found" placeholder

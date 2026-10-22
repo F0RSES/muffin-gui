@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rail "История": three bars rising off a baseline. The journal says what happened, in order; this
+     page answers the question a journal cannot — how much of it worked — so its glyph is an aggregate
+     rather than another list. Three strokes and an axis, because the rail draws it at 24 px beside
+     glyphs of the same weight.
+     Monochrome currentColor + declared 24px box — see icons/app.svg for the contract. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.2 4.2v15.2h15.6"/>
+    <path d="M8.2 19.4v-4.6"/>
+    <path d="M12.4 19.4V11"/>
+    <path d="M16.6 19.4V7.4"/>
+</svg>

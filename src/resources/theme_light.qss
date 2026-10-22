@@ -255,6 +255,53 @@ QPlainTextEdit#logView {
 QFrame#logPanel { background-color: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 12px; }
 QFrame#logHeader { background: transparent; border: none; }
 
+/* ---------- history and statistics page ----------
+   Same three-colour vocabulary as the dark sheet: the row is green, amber or red before it is a word.
+   The light canvas needs the state colours darkened to their sheet values (#059669/#D97706/#DC2626) and
+   a much fainter tint than the dark one — the same alpha that reads as a wash on #0B0C10 reads as a
+   sticker on white. The tint itself is applied in C++ from Theme::, so only the panel and table colours
+   live here.
+
+   The row's colour is model data and the delegate paints it: this sheet's ::item rule moves item
+   painting into the stylesheet style, which then paints only what the rule declares. What the sheet must
+   not do is declare a background or a colour for `::item` — that would outrank the verdict and flatten
+   the colour coding. */
+QWidget#historyPage { background-color: #F3F4F6; }
+QFrame#historySummary {
+    background-color: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 12px;
+}
+QLabel#historyHeadline {
+    background-color: transparent; color: #1F2937; font-size: 16pt; font-weight: 700;
+}
+QProgressBar#historyRateBar {
+    border: none; border-radius: 4px; background-color: #F9FAFB;
+    min-height: 8px; max-height: 8px;
+}
+/* The band is a dynamic property stamped by HistoryPage::setRateLevel(), which re-polishes the widget
+   because QSS never re-reads a property on its own. "none" is the empty history: a grey thread, because
+   an untouched record has not earned a verdict. */
+QProgressBar#historyRateBar[rateLevel="good"]::chunk { background-color: #059669; border-radius: 4px; }
+QProgressBar#historyRateBar[rateLevel="fair"]::chunk { background-color: #D97706; border-radius: 4px; }
+QProgressBar#historyRateBar[rateLevel="poor"]::chunk { background-color: #DC2626; border-radius: 4px; }
+QProgressBar#historyRateBar[rateLevel="none"]::chunk { background-color: #D1D5DB; border-radius: 4px; }
+QTableView#historyTable {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D5DB; border-radius: 12px;
+    gridline-color: #E5E7EB;
+    selection-background-color: #EDE9FE; selection-color: #1F2937;
+    outline: none;
+}
+QTableView#historyTable::item { padding: 2px 10px; border: none; }
+QHeaderView#historyHeader::section {
+    background-color: #F3F4F6; color: #4B5563; border: none;
+    border-bottom: 1px solid #D1D5DB; padding: 7px 10px; font-weight: 600;
+}
+QHeaderView#historyHeader::section:hover { color: #1F2937; }
+QHeaderView#historyHeader::up-arrow { image: none; width: 0px; height: 0px; }
+QHeaderView#historyHeader::down-arrow { image: none; width: 0px; height: 0px; }
+QWidget#historyEmpty { background-color: transparent; }
+QLabel#historyEmptyGlyph { background-color: transparent; }
+
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
@@ -300,7 +347,8 @@ QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
 QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
 QScrollArea > QWidget > QWidget, QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel,
 QWidget#logHeader, QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage,
-QWidget#placeholderPage, QWidget#settingsPageHost, QWidget#settingsPage, QWidget#headerBar {
+QWidget#placeholderPage, QWidget#settingsPageHost, QWidget#settingsPage, QWidget#historyPage,
+QWidget#headerBar {
     background-color: #F3F4F6;
 }
 QFrame#sidebar { background-color: #E5E7EB; }

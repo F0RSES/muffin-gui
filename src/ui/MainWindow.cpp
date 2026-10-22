@@ -2,6 +2,7 @@
 
 #include "BlockcheckEngine.h"
 #include "DownloadDialog.h"
+#include "HistoryPage.h"
 #include "HistoryStore.h"
 #include "LanguageManager.h"
 #include "LogPanel.h"
@@ -316,9 +317,9 @@ QWidget *MainWindow::buildSidebar()
 
     box->addStretch(1);
 
-    // The bottom group, in the order the design asks for: the catalog, then the journal directly above
-    // settings, then settings, then the language. Both page glyphs are checkable so a second press puts
-    // the dashboard back — with one icon per page it has to work both ways.
+    // The bottom group, in the order the design asks for: the catalog, then the journal and the history
+    // directly above settings, then settings, then the language. Every page glyph is checkable so a
+    // second press puts the dashboard back — with one icon per page it has to work both ways.
     m_navStrategies = addRailButton(box, QStringLiteral("cards"), QStringLiteral("nav.profiles"));
     m_navStrategies->setCheckable(true);
     connect(m_navStrategies, &QPushButton::clicked, this, [this] {
@@ -331,9 +332,19 @@ QWidget *MainWindow::buildSidebar()
         setCurrentPage(currentPage() == PageLogs ? PageDashboard : PageLogs);
     });
 
+    // The record beside the journal: one glyph for the lines as they arrived, one for what they add up
+    // to. Checkable like its neighbours so a second press puts the dashboard back and the glyphs stay
+    // mutually exclusive.
+    m_navHistory = addRailButton(box, QStringLiteral("chart"), QStringLiteral("nav.history"));
+    m_navHistory->setCheckable(true);
+    i18nTip(m_navHistory, QStringLiteral("nav.history_tip"));
+    connect(m_navHistory, &QPushButton::clicked, this, [this] {
+        setCurrentPage(currentPage() == PageHistory ? PageDashboard : PageHistory);
+    });
+
     // Settings is a page of this stack, not a modal sheet: a rail glyph that popped a dialog would be two
-    // ways of navigating where the design wants one. Checkable like the other two, so a second press puts
-    // the dashboard back and the three glyphs stay mutually exclusive.
+    // ways of navigating where the design wants one. Checkable like the other three, so a second press
+    // puts the dashboard back and the four glyphs stay mutually exclusive.
     m_navSettings = addRailButton(box, QStringLiteral("settings"), QStringLiteral("nav.settings"));
     m_navSettings->setCheckable(true);
     i18nTip(m_navSettings, QStringLiteral("nav.settings_tip"));
@@ -475,6 +486,7 @@ QWidget *MainWindow::buildMainArea()
     m_pages->addWidget(buildDashboardPage());
     m_pages->addWidget(buildProfilesPage());
     m_pages->addWidget(buildLogsPage());
+    m_pages->addWidget(buildHistoryPage());
     m_pages->addWidget(buildSettingsPage());
     m_pages->setCurrentIndex(PageDashboard);
     box->addWidget(m_pages, 1);
@@ -833,6 +845,35 @@ QWidget *MainWindow::buildLogsPage()
     return page;
 }
 
+// The record of every check, with the arithmetic above it. The window contributes the way back and the
+// page's place in the stack; everything else — the summary, the rows, the placeholder, the destructive
+// button and the confirmation in front of it — belongs to HistoryPage, which is why the page can be
+// built and filled by a test without a window at all.
+//
+// The store is handed over rather than copied: it is the one owner of the rows, it says when they move,
+// and a page holding a second copy of a bounded log would be a page that can be wrong.
+QWidget *MainWindow::buildHistoryPage()
+{
+    auto *page = new QWidget(m_pages);
+    m_historyPage = new HistoryPage(m_history, page);
+
+    auto *box = new QVBoxLayout(page);
+    box->setContentsMargins(28, 14, 28, 22);
+    box->setSpacing(10);
+
+    auto *back = new QPushButton(page);
+    back->setObjectName(QStringLiteral("ghostButton"));
+    back->setCursor(Qt::PointingHandCursor);
+    back->setAutoDefault(false);
+    i18nText(back, QStringLiteral("page.back"));
+    i18nTip(back, QStringLiteral("page.back_tip"));
+    connect(back, &QPushButton::clicked, this, &MainWindow::showDashboard);
+    box->addWidget(back, 0, Qt::AlignLeft);
+
+    box->addWidget(m_historyPage, 1);
+    return page;
+}
+
 int MainWindow::currentPage() const
 {
     return m_pages ? m_pages->currentIndex() : PageDashboard;
@@ -843,6 +884,7 @@ void MainWindow::setCurrentPage(int page)
     if (!m_pages)
         return;
     const int target = (page == PageLogs)     ? PageLogs
+                       : (page == PageHistory) ? PageHistory
                        : (page == PageProfiles) ? PageProfiles
                        : (page == PageSettings) ? PageSettings
                                                 : PageDashboard;
@@ -850,12 +892,14 @@ void MainWindow::setCurrentPage(int page)
 
     // The rail's glyphs are the only page indicator left, so they have to follow the stack even when the
     // page was chosen from code — a lit journal icon over the dashboard is worse than no icon at all. The
-    // three are mutually exclusive by construction: exactly one is checked for the three pages, none for
+    // four are mutually exclusive by construction: exactly one is checked for the four pages, none for
     // the dashboard, which is why the settings glyph can now stand in for what used to be a modal.
     if (m_navLogs)
         m_navLogs->setChecked(target == PageLogs);
     if (m_navStrategies)
         m_navStrategies->setChecked(target == PageProfiles);
+    if (m_navHistory)
+        m_navHistory->setChecked(target == PageHistory);
     if (m_navSettings)
         m_navSettings->setChecked(target == PageSettings);
     // Opening the journal is what acknowledges whatever made it light up.
@@ -1096,6 +1140,16 @@ void MainWindow::wire()
 
     connect(m_settings, &Settings::changed, this, &MainWindow::onSettingsChanged);
     connect(m_ping, &PingService::pingUpdated, this, &MainWindow::onPingUpdated);
+
+    // The history page owns its own store connection (it re-reads on changed() by itself), so the window
+    // listens only for the one thing it has to hear: that the record was thrown away. That is a fact
+    // about the whole tool, and it belongs in the journal that outlives the page.
+    if (m_historyPage)
+        connect(m_historyPage, &HistoryPage::cleared, this, [this](int removedRows) {
+            m_log->appendLine(LanguageManager::tr(QStringLiteral("history.cleared"))
+                                  .arg(removedRows),
+                              LogPanel::Info);
+        });
 
     // The bypass-check cycle reports through five channels, and each has exactly one job here: the
     // log lines into the journal, the stage into the meter's mode, progress into its value, per-host
@@ -1514,6 +1568,11 @@ void MainWindow::applyTheme()
     // #FFFFFF page the three service marks are simply invisible.
     for (PingIndicator *chip : findChildren<PingIndicator *>())
         chip->retheme();
+    // The history page paints its row tints, its status words and its placeholder glyph from Theme
+    // tokens rather than from the sheet, so it has to be told the palette moved like any other
+    // code-coloured widget.
+    if (m_historyPage)
+        m_historyPage->retheme();
 
     // No setWindowIcon() here: the title bar is deliberately iconless, and a theme switch that
     // re-attached the muffin would put it back the first time anyone changed the colour scheme.
@@ -1539,6 +1598,11 @@ void MainWindow::retranslateUi()
     // The rail's flag, the menu tick, and any text the status machine writes rather than the builders.
     updateLanguageButton();
     updateStatusUi();
+
+    // The history page's headers, verdict words and summary sentence are derived rather than tagged, so
+    // the tree walk above cannot reach them and the page has to re-read them itself.
+    if (m_historyPage)
+        m_historyPage->retranslateUi();
 }
 
 void MainWindow::refreshStrategies()

@@ -72,6 +72,8 @@ const QVector<Row> &catalog()
         ROW("nav.logs", "Логи", "Logs", "Registros", "Protokolle", "日志", "Journaux", "लॉग"),
         ROW("nav.profiles", "Профили", "Profiles", "Perfiles", "Profile", "档案",
             "Profils", "प्रोफ़ाइलें"),
+        ROW("nav.history", "История", "History", "Historial", "Verlauf", "历史",
+            "Historique", "इतिहास"),
         ROW("nav.settings", "Настройки", "Settings", "Ajustes", "Einstellungen", "设置",
             "Paramètres", "सेटिंग्स"),
         ROW("nav.settings_tip", "Настройки (Ctrl+S)", "Settings (Ctrl+S)", "Ajustes (Ctrl+S)",
@@ -247,6 +249,106 @@ const QVector<Row> &catalog()
             "后台绕过检查已在进行——请等待其结果",
             "Une vérification en arrière-plan est déjà en cours — attendez sa réponse",
             "पृष्ठभूमि में बाईपास जाँच पहले से चल है — इसके उत्तर का इंतज़ार करें"),
+
+
+        // ---- the history and statistics page ----
+        // The page's own voice: one aggregate the reader acts on, five column names, and the three words
+        // a row can be. The verdict words are short on purpose — they sit in a column the width of the
+        // longest of them, and a sentence there would push the record off the screen.
+        ROW("nav.history_tip", "Статистика и история проверок обхода",
+            "Bypass-check statistics and history", "Estadísticas e historial de las comprobaciones",
+            "Statistik und Verlauf der Bypass-Prüfungen", "绕过检查统计与历史",
+            "Statistiques et historique des contrôles", "बाईपास जाँच के आँकड़े और इतिहास"),
+        ROW("history.title", "Статистика и История", "Statistics & History",
+            "Estadísticas e historial", "Statistik & Verlauf", "统计与历史",
+            "Statistiques et historique", "आँकड़े और इतिहास"),
+        ROW("history.headline", "Успешных проверок: %1%", "Successful checks: %1%",
+            "Comprobaciones exitosas: %1 %", "Erfolgreiche Prüfungen: %1 %", "检查成功率：%1%",
+            "Contrôles réussis : %1 %", "उत्तीर्ण जाँच: %1%"),
+        // Said instead of a percentage. "0%" would be a claim about checks that never happened, and the
+        // difference between "not yet" and "all of them failed" is the whole reason to open this page.
+        ROW("history.headline.empty", "Проверок ещё не было", "No checks yet",
+            "Todavía no hay comprobaciones", "Noch keine Prüfungen", "尚无检查记录",
+            "Aucun contrôle pour l'instant", "अभी कोई जाँच नहीं हुई"),
+        ROW("history.counts", "Всего: %1 · Ошибок: %2 · Подмен сертификата: %3",
+            "Total: %1 · Failed: %2 · Certificates substituted: %3",
+            "Total: %1 · Errores: %2 · Certificados sustituidos: %3",
+            "Gesamt: %1 · Fehler: %2 · Ausgetauschte Zertifikate: %3",
+            "总数：%1 · 失败：%2 · 证书替换：%3",
+            "Total : %1 · Échecs : %2 · Certificats substitués : %3",
+            "कुल: %1 · विफल: %2 · प्रतिस्थापित प्रमाणपत्र: %3"),
+        ROW("history.col.time", "Время", "Time", "Hora", "Zeit", "时间", "Heure", "समय"),
+        ROW("history.col.preset", "Профиль", "Profile", "Perfil", "Profil", "配置文件",
+            "Profil", "प्रोफ़ाइल"),
+        ROW("history.col.host", "Хост", "Host", "Servidor", "Host", "主机", "Hôte", "होस्ट"),
+        ROW("history.col.verdict", "Статус", "Status", "Estado", "Status", "状态", "État",
+            "स्थिति"),
+        ROW("history.col.latency", "Задержка", "Latency", "Retardo", "Latenz", "延迟",
+            "Latence", "विलंब"),
+        ROW("history.verdict.passed", "Успех", "Passed", "Superada", "Bestanden", "通过",
+            "Réussi", "उत्तीर्ण"),
+        ROW("history.verdict.failed", "Ошибка", "Failed", "Fallida", "Fehlgeschlagen", "失败",
+            "Échoué", "विफल"),
+        // Not "cert invalid": the row's whole point is that the certificate was somebody else's, and
+        // saying "invalid" lets the reader blame the service instead of the path in the middle.
+        ROW("history.verdict.intercepted", "Подмена сертификата", "Certificate substituted",
+            "Certificado sustituido", "Zertifikat ausgetauscht", "证书被替换",
+            "Certificat substitué", "प्रमाणपत्र प्रतिस्थापित"),
+        ROW("history.verdict.intercepted_tip",
+            "Соединение прошло, но сертификат сервиса не подтверждён — возможен перехват трафика",
+            "The connection went through, but the service's certificate was not the expected one — "
+            "the traffic may be intercepted",
+            "La conexión pasó, pero el certificado del servicio no fue el esperado: el tráfico "
+            "podría estar interceptado",
+            "Die Verbindung kam durch, aber das Zertifikat des Dienstes war nicht das erwartete — "
+            "der Verkehr könnte abgefangen werden",
+            "连接已建立，但服务证书未通过验证——流量可能被劫持",
+            "La connexion est passée, mais le certificat du service n'était pas celui attendu — "
+            "le trafic est peut-être intercepté",
+            "कनेक्शन हो गई, पर सेवा का प्रमाणपत्र अपेक्षित नहीं था — ट्रैफ़िक अवरोधित हो सकता है"),
+        ROW("history.verdict.failed_tip", "Соединение не установлено", "No connection was made",
+            "No se estableció conexión", "Es wurde keine Verbindung hergestellt", "未建立连接",
+            "Aucune connexion n'a été établie", "कोई कनेक्शन नहीं बना"),
+        ROW("history.empty",
+            "История пока пуста. Запустите проверку обхода или включите Watchdog",
+            "The history is empty so far. Run a bypass check, or let the Watchdog run one for you",
+            "El historial está vacío por ahora. Ejecute una comprobación de evasión o deje que "
+            "Watchdog la ejecute",
+            "Der Verlauf ist noch leer. Führen Sie eine Bypass-Prüfung aus oder überlassen Sie "
+            "das dem Watchdog",
+            "历史目前为空。请运行绕过检查，或启用看门狗",
+            "L'historique est vide pour l'instant. Lancez une vérification de contournement, ou "
+            "laissez Watchdog en lancer une",
+            "इतिहास अभी खाली है। एक बाईपास जाँच चलाएँ, या वॉचडॉग को चलने दें"),
+        ROW("history.clear", "Очистить историю", "Clear history", "Borrar historial",
+            "Verlauf löschen", "清除历史", "Effacer l'historique", "इतिहास साफ़ करें"),
+        ROW("history.clear_tip", "Забыть все записанные проверки", "Forget every recorded check",
+            "Olvidar todas las comprobaciones registradas",
+            "Alle aufgezeichneten Prüfungen vergessen", "忘记所有已记录的检查",
+            "Oublier tous les contrôles enregistrés", "दर्ज की गई सारी जाँचें भूल जाएँ"),
+        ROW("history.clear.title", "Очистить историю?", "Clear the history?",
+            "¿Borrar el historial?", "Verlauf löschen?", "清除历史？", "Effacer l'historique ?",
+            "इतिहास साफ़ करें?"),
+        // The warning names how much is about to go, and why it is worth keeping: for a tool whose whole
+        // job is to remember whether the path worked, the record is the evidence, not a cache.
+        ROW("history.clear.confirm",
+            "Будет удалено %1 записей. Это действие нельзя отменить — история и есть доказательство "
+            "того, что обход раньше работал.",
+            "%1 records will be removed. This cannot be undone — the history is the evidence that the "
+            "bypass used to work.",
+            "Se eliminarán %1 registros. No se puede deshacer: el historial es la prueba de que la "
+            "evasión funcionaba antes.",
+            "%1 Einträge werden entfernt. Das ist nicht rückgängig zu machen — der Verlauf ist der "
+            "Beleg dafür, dass der Bypass früher funktionierte.",
+            "将删除 %1 条记录。此操作无法撤销——历史记录正是绕过曾经有效的证据。",
+            "%1 entrées seront supprimées. C'est irréversible : l'historique est la preuve que le "
+            "contournement fonctionnait avant.",
+            "%1 रिकॉर्ड हट जाएँगे। यह वापस नहीं होगा — इतिहास ही यह प्रमाण है कि बाईपास पहले चलता था।"),
+        ROW("history.cleared", "История очищена: удалено %1 записей",
+            "History cleared: %1 records removed", "Historial borrado: %1 registros eliminados",
+            "Verlauf gelöscht: %1 Einträge entfernt", "历史已清除：删除 %1 条记录",
+            "Historique effacé : %1 entrées supprimées", "इतिहास साफ़ हुआ: %1 रिकॉर्ड हटे"),
+
 
         // ---- the profile row's menu ----
         ROW("profile.copy", "Скопировать", "Copy", "Copiar", "Kopieren", "复制", "Copier",

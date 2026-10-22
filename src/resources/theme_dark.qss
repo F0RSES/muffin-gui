@@ -295,6 +295,58 @@ QPlainTextEdit#logView {
 QFrame#logPanel { background-color: #12131A; border: 1px solid #262A36; border-radius: 14px; }
 QFrame#logHeader { background: transparent; border: none; }
 
+/* ---------- history and statistics page ----------
+   The one screen in the app that reports an outcome rather than offering an action, so it gets the
+   sheet's three state colours as its whole vocabulary: a row is green, amber or red before it is a word,
+   and the aggregate above it repeats the newest verdict as a length.
+
+   The row's colour is model data, and this sheet's ::item rule is why the page needs a delegate to put
+   it on the screen: an item rule moves item painting into the stylesheet style, which paints what the
+   rule says — padding, here, and nothing else — instead of the BackgroundRole brush. VerdictDelegate
+   fills it. What the sheet must never do is declare a background or a colour for `::item`: that would
+   outrank the verdict and flatten the colour coding this page exists to show. */
+QWidget#historyPage { background-color: #0B0C10; }
+QFrame#historySummary {
+    background-color: #15161C; border: 1px solid #262A36; border-radius: 14px;
+}
+/* The headline is the number a user comes here for, so it is the largest text on the page and it is the
+   only place the accent purple is not the answer: this is a measurement, not an action. */
+QLabel#historyHeadline {
+    background-color: transparent; color: #E7E9F2; font-size: 16pt; font-weight: 700;
+}
+QProgressBar#historyRateBar {
+    border: none; border-radius: 4px; background-color: #0F1116;
+    min-height: 8px; max-height: 8px;
+}
+/* The band is a dynamic property stamped by HistoryPage::setRateLevel(), which unpolishes and re-polishes
+   for the same reason a profile row does: QSS never re-reads a property on its own. "none" is the empty
+   history — a grey thread, because an untouched record has not earned a verdict. */
+QProgressBar#historyRateBar[rateLevel="good"]::chunk { background-color: #34D399; border-radius: 4px; }
+QProgressBar#historyRateBar[rateLevel="fair"]::chunk { background-color: #FBBF24; border-radius: 4px; }
+QProgressBar#historyRateBar[rateLevel="poor"]::chunk { background-color: #F87171; border-radius: 4px; }
+QProgressBar#historyRateBar[rateLevel="none"]::chunk { background-color: #262A36; border-radius: 4px; }
+QTableView#historyTable {
+    background-color: #12131A;
+    border: 1px solid #262A36; border-radius: 12px;
+    gridline-color: #1F2230;
+    selection-background-color: #1C1727; selection-color: #E7E9F2;
+    outline: none;
+}
+/* No `color:` here on purpose. The sheet's own text hue would outrank the model's ForegroundRole in the
+   item delegate, and the status word's colour is the row's verdict — the claim this page exists to make.
+   uitest renders a tinted table and counts the verdict's pixels, so flattening it is caught rather than
+   noticed a release later. */
+QTableView#historyTable::item { padding: 2px 10px; border: none; }
+QHeaderView#historyHeader::section {
+    background-color: #15161C; color: #8A91A6; border: none;
+    border-bottom: 1px solid #262A36; padding: 7px 10px; font-weight: 600;
+}
+QHeaderView#historyHeader::section:hover { color: #E7E9F2; }
+QHeaderView#historyHeader::up-arrow { image: none; width: 0px; height: 0px; }
+QHeaderView#historyHeader::down-arrow { image: none; width: 0px; height: 0px; }
+QWidget#historyEmpty { background-color: transparent; }
+QLabel#historyEmptyGlyph { background-color: transparent; }
+
 /* ---------- scroll ---------- */
 QScrollArea, QScrollArea#cardScroll { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
@@ -362,7 +414,7 @@ QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
 QScrollArea, QScrollArea > QWidget > QWidget,
 QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,
 QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage, QWidget#placeholderPage,
-QWidget#settingsPageHost, QWidget#settingsPage,
+QWidget#settingsPageHost, QWidget#settingsPage, QWidget#historyPage,
 QWidget#headerBar {
     background-color: #0B0C10;
 }
