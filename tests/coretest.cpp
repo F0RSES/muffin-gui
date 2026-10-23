@@ -347,7 +347,8 @@ private:
 // live on some other thread with a running event loop of its own — the same shape the GUI's async path
 // reaches by running the probes on a private QThread. This stands one up on 127.0.0.1 at an ephemeral
 // port in either plain-TCP or TLS mode; TLS always presents the self-signed blockcheck_testcert.h pair,
-// which VerifyPeer must reject — the substitution shape the engine exists to catch. accepted() counts
+// which the engine's certificate veto must reject — the substitution shape the engine exists to catch.
+// accepted() counts
 // the connections it took, so a test can prove the probe actually landed instead of merely "not failed".
 class MockBlockServer : public QTcpServer
 {
@@ -3853,7 +3854,7 @@ int main(int argc, char **argv)
                 const int tlsPort = int(tls.port());
 
                 // 1) Untrusted (the substitution shape): the default CA store knows nothing about
-                //    this self-signed cert, so VerifyPeer must reject the handshake and name the
+                //    this self-signed cert, so the engine's veto must reject the probe and name the
                 //    certificate — the exact reading that catches a DPI handing back its own cert.
                 //    This runs before the trust injection below, while the store is untouched.
                 {
@@ -3861,6 +3862,13 @@ int main(int argc, char **argv)
                     e.setAttempts(1);
                     e.setAttemptTimeoutMs(4000);
                     const HostCheckResult r = e.checkHost(QStringLiteral("127.0.0.1"), tlsPort, true);
+                    // When the verdict does NOT come through the certificate channel, the text that
+                    // displaced it is platform-specific and is the whole story — so state it in the log
+                    // rather than leave the next reader to guess. The CI's annotation step forwards any
+                    // "  info" line, which makes a regression on a runner nobody has visible self-evident.
+                    if (!r.lastError.startsWith(QStringLiteral("TLS certificate rejected")))
+                        out << "  info  untrusted-TLS came through as: [" << r.lastError
+                            << "] certValid=" << (r.isCertificateValid ? "true" : "false") << '\n';
                     check(!r.success, "TLS handshake to an untrusted cert fails the check");
                     check(!r.isCertificateValid,
                           "an untrusted cert is reported certificate-invalid (the substitution case)");

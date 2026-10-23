@@ -218,9 +218,20 @@ bool BlockcheckEngine::probeOnce(const QString &host, quint16 port, bool useTls,
 
     QList<QSslError> sslErrors;
     if (useTls) {
-        // VerifyPeer makes an untrusted chain fatal to the handshake instead of advisory: the whole
-        // point of this probe is that a substituted certificate must read as a failure.
-        sslSock.setPeerVerifyMode(QSslSocket::VerifyPeer);
+        // QueryPeer, and the veto is applied here rather than by the TLS backend.
+        //
+        // VerifyPeer makes Qt ask the backend to verify inside the handshake, so the connection dies
+        // in SSL_do_handshake and QSslSocket::sslErrors is never emitted at all on some platforms —
+        // observed: it fires on Linux, it does not on Windows/MSVC. A substituted certificate then
+        // reads as an opaque "TLS handshake failed: <words that vary per OS and per OpenSSL build>",
+        // which is the one verdict this engine must never be vague about: the whole point of the probe
+        // is that a DPI handing back its own certificate is named as such.
+        //
+        // QueryPeer lets the handshake complete and leaves Qt to verify the chain afterwards, which
+        // emits sslErrors with structured QSslError objects on every backend. The probe then fails the
+        // try itself, so the certificate case is reported identically everywhere and no longer depends
+        // on whether a given backend chose to abort.
+        sslSock.setPeerVerifyMode(QSslSocket::QueryPeer);
         QObject::connect(&sslSock, &QSslSocket::sslErrors, &sslSock,
                          [&sslErrors](const QList<QSslError> &errors) { sslErrors.append(errors); });
     }
@@ -260,8 +271,9 @@ bool BlockcheckEngine::probeOnce(const QString &host, quint16 port, bool useTls,
                 break;
             if (sslSock.isEncrypted())
                 break;
-            // A set error is the handshake having failed for good (certificate rejections land
-            // here); a bare false with no error is only this slice's timeout, so loop on.
+            // A set error is the handshake having failed for good (no certificate arrived, the peer
+            // went away, the cipher suites disagree); a bare false with no error is only this slice's
+            // timeout, so loop on.
             if (sslSock.error() != QAbstractSocket::UnknownSocketError)
                 break;
             if (hsClock.elapsed() >= budget)
@@ -278,7 +290,9 @@ bool BlockcheckEngine::probeOnce(const QString &host, quint16 port, bool useTls,
                 return false;
             }
             if (!sslErrors.isEmpty()) {
-                // The substitution shape: the handshake died on the certificate itself.
+                // Belt and braces: QueryPeer leaves the certificate verdict to the veto below, but a
+                // backend that aborts anyway still leaves the errors on record, and a certificate is
+                // the reason that outranks every other — keep naming it here too.
                 if (certValid) *certValid = false;
                 if (error)
                     *error = QStringLiteral("TLS certificate rejected: %1")
@@ -292,10 +306,19 @@ bool BlockcheckEngine::probeOnce(const QString &host, quint16 port, bool useTls,
             }
             return false;
         }
-        // A completed handshake with errors on record cannot happen under VerifyPeer (they are
-        // fatal), but should the mode ever be relaxed the verdict stays honest.
-        if (!sslErrors.isEmpty() && certValid)
-            *certValid = false;
+        // The certificate veto (see QueryPeer above). A handshake that completed with verification
+        // errors on record is a failed probe, not a passed one: an untrusted or substituted chain is
+        // the event this engine exists to report. This returns before latency is recorded, so a
+        // rejected certificate claims no transport — the same shape as a refused handshake.
+        if (!sslErrors.isEmpty()) {
+            if (certValid)
+                *certValid = false;
+            if (error)
+                *error = QStringLiteral("TLS certificate rejected: %1")
+                             .arg(sslErrors.first().errorString());
+            sslSock.abort();
+            return false;
+        }
     }
 
     // "Transport up" — the number the latency claim is about. DNS, SYN/ACK and, when asked, the
