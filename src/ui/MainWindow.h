@@ -60,7 +60,9 @@ class ZapretManager;
 // state and cadence: which row is selected, what the title says, whether closing hides to the tray, which
 // page the rail is showing, and the watchdog that re-asks a live profile every few minutes whether it
 // still bypasses — the one thing here that acts without being asked to. The window is frameless, so the
-// header's two chrome buttons and the drag that starts on the header are drawn and driven here too.
+// header's two chrome buttons and the drag that starts on the header are drawn and driven here too, and so
+// is the window's shape: a rounded shell with a transparent band around it, since a frameless window with a
+// background is still a rectangle.
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -211,6 +213,27 @@ public:
     // The entrance cascade needs that order — the third row has to rise third — and a test that wants to
     // prove a row finished where the layout put it needs the same list to walk.
     QList<ProfileCard *> cardRows() const;
+
+    // ---- the rounded shell --------------------------------------------------------------
+    //
+    // The window carries no system frame and, since the shell below, no background of its own either:
+    // #mainWindowFrame in both sheets IS the silhouette the user sees. These three numbers are that
+    // silhouette's geometry, and both sheets read them the way they read the palette — the card declares
+    // kWindowFrameRadiusPx of arc and kWindowFrameBorderPx of stroke, and every surface that reaches a
+    // window corner carries the arc's INNER edge (radius minus border) itself, because Qt does not clip a
+    // child to its parent's radius: a square child corner paints over the stroke and out past the
+    // silhouette, which under a translucent window is a nub on the desktop rather than a wrong colour
+    // inside the app.
+    static constexpr int kWindowFrameRadiusPx = 12;
+    static constexpr int kWindowFrameBorderPx = 1;
+    // The transparent band between the card and the surface's own edge. The stroke is drawing, and drawing
+    // that begins on the window's last pixel is drawing cut in half — this is the frameless equivalent of
+    // the square corners WA_TranslucentBackground exists to remove.
+    static constexpr int kWindowFrameMarginPx = 2;
+
+    // The shell itself. A hook for the same reason powerButton() is one: the rounded silhouette is the
+    // window's claim about its own shape, and a suite cannot read the pixels of a widget it cannot name.
+    QFrame *windowFrame() const { return m_windowFrame; }
 
     // ---- the release check --------------------------------------------------------------
     //
@@ -514,6 +537,10 @@ private:
     QString m_blockcheckPreset;
     LogPanel *m_log = nullptr;
 
+    // The rounded shell: everything else in the window lives inside it, and it is the thing the window's
+    // shape is drawn by — neither the window nor the canvas holding it paints a background (see
+    // buildCentral(), and QMainWindow#mainWindow / QWidget#rootCanvas in both sheets).
+    QFrame *m_windowFrame = nullptr;
     QWidget *m_sidebar = nullptr;          // the rail: brand, the page glyphs, settings and version
     QFrame *m_mainArea = nullptr;          // header, page stack, footer
     QStackedWidget *m_pages = nullptr;     // dashboard <-> profiles <-> logs <-> history <-> settings

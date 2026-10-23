@@ -12,7 +12,11 @@
    Deliberately not black-on-white: the canvas is a soft grey-white, surfaces are white behind a grey
    hairline so they read as raised, and the darkest text is #1F2937 — eyes on this screen all day.
    ==========================================================================*/
-QMainWindow, QDialog { background-color: #F3F4F6; }
+/* Dialogs keep an opaque rectangle; the main window must not paint one. Same reasoning as the dark sheet:
+   it is frameless and WA_TranslucentBackground, so a background here is a light grey square over the whole
+   surface, corners included, hiding the rounded silhouette #mainWindowFrame draws inside it. */
+QDialog { background-color: #F3F4F6; }
+QMainWindow#mainWindow { background-color: transparent; }
 
 QWidget {
     background-color: transparent;
@@ -36,13 +40,37 @@ QToolButton:hover  { background-color: #E5E7EB; border-color: #9CA3AF; }
 QToolButton:pressed { background-color: #D1D5DB; }
 QToolButton:disabled { color: #A7ABBB; }
 
+/* ---------- shell: the window's own silhouette ---------------------------------
+   The window paints nothing (QMainWindow#mainWindow above), so this card is the shape: the same 12 px arc,
+   1 px stroke in the sheet's hairline and 2 px of transparent band as the dark sheet declares, all three
+   read off MainWindow::kWindowFrameRadiusPx / kWindowFrameBorderPx / kWindowFrameMarginPx by the tests.
+   The corner list is in that sheet's shell block; the arithmetic is the same here — the surfaces that
+   reach a window corner carry 12 - 1 = 11 px.
+
+   The light theme is the one that proves it. In the dark sheet the rail, the header band and the footer are
+   all #0B0C10, the same as the shell's own fill, so a square corner there is invisible in the pixels and
+   only the broken stroke gives it away; here the rail is #E5E7EB against a #F3F4F6 shell, so an unrounded
+   corner is a grey nub sitting outside the arc on the desktop. Checked corner by corner, in both themes, in
+   tests/uitest.cpp. */
+QFrame#mainWindowFrame {
+    background-color: #F3F4F6;
+    border: 1px solid #D1D5DB;
+    border-radius: 12px;
+}
+
 /* ---------- shell: rail + main area -------------------------------------------
    The same 70 px rail of glyphs as the dark sheet, in daylight tokens. */
 QFrame#sidebar {
     background-color: #E5E7EB;
     border-right: 1px solid #D1D5DB;
+    border-top-left-radius: 11px;
+    border-bottom-left-radius: 11px;
 }
-QFrame#mainArea { background-color: #F3F4F6; }
+QFrame#mainArea {
+    background-color: #F3F4F6;
+    border-top-right-radius: 11px;
+    border-bottom-right-radius: 11px;
+}
 QLabel#brandLogo { background-color: transparent; }
 
 /* One rounded plate for every rail glyph — hover, press, and the page currently on screen. Journal and
@@ -93,7 +121,9 @@ QToolButton#windowButton[role="update"]:hover { background-color: #ECFEFF; borde
 QToolButton#windowButton[role="update"]:pressed { background-color: #CFFAFE; border-color: #0891B2; }
 
 /* ---------- header ---------- */
-QWidget#headerBar { background-color: #F3F4F6; }
+/* The band is the top of the main column, so it is also the window's top-right corner: 11 px, the shell's
+   arc minus its stroke (see the shell block). */
+QWidget#headerBar { background-color: #F3F4F6; border-top-right-radius: 11px; }
 QLabel#appTitle {
     background-color: transparent;
     font-family: "Montserrat", "Outfit", "Segoe UI", "Inter", sans-serif;
@@ -336,7 +366,8 @@ QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: no
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 /* ---------- footer + ping badges ---------- */
-QFrame#footerBar { background-color: #F3F4F6; border-top: 1px solid #D1D5DB; }
+/* Its bottom-right corner is the window's own, hence the radius the shell block above explains. */
+QFrame#footerBar { background-color: #F3F4F6; border-top: 1px solid #D1D5DB; border-bottom-right-radius: 11px; }
 QLabel#footerHint { background-color: transparent; color: #4B5563; font-size: 8pt; }
 QLabel#pingNumber { background-color: transparent; color: #1F2937; }
 QLabel#pingClock  { background-color: transparent; }
@@ -365,14 +396,25 @@ QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
 
 /* ---------- window surfaces (keep this block last) ---------------------------
    Same cascade trap as the dark sheet: the generic transparent QWidget rule outranks the window rule at
-   the top of the file, so anything with nothing behind it (the window itself, the stacked widget, the
-   card list's viewport) painted black instead of the light background. */
-QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
-QScrollArea > QWidget > QWidget, QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel,
+   the top of the file, so anything with nothing behind it (the stacked widget, the card list's viewport)
+   painted black instead of the light background.
+
+   TWO surfaces are deliberately left out and stay transparent — the window and the canvas it holds —
+   because together they are the band around #mainWindowFrame. Fill either one on this sheet and the
+   rounded card is a rounding behind an opaque light square: glaring here, where the dark sheet at least
+   hides the mistake in matching colour. */
+QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
+QScrollArea > QWidget > QWidget, QWidget#cardHost, QWidget#logPanel,
 QWidget#logHeader, QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage,
 QWidget#placeholderPage, QWidget#settingsPageHost, QWidget#settingsPage, QWidget#historyPage,
 QWidget#headerBar {
     background-color: #F3F4F6;
+}
+QMainWindow#mainWindow, QWidget#rootCanvas { background-color: transparent; }
+QFrame#mainWindowFrame {
+    background-color: #F3F4F6;
+    border: 1px solid #D1D5DB;
+    border-radius: 12px;
 }
 QFrame#sidebar { background-color: #E5E7EB; }
 QFrame#mainArea, QFrame#footerBar { background-color: #F3F4F6; }

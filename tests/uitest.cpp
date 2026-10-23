@@ -10,15 +10,17 @@
 // depend on that answer. UpdateChecker::check() is the release feed's one socket and is likewise never
 // called — the badge section hands the window the answer it would have carried instead.
 //
-// A constructed MainWindow is covered in two places: the watchdog section, which needs the real catalog
-// and journal to prove that a dead bypass turns into an offer, and the release-badge section, which needs
-// the header the badge lives in. Both are built without a window manager (offscreen) — the watchdog's
-// three seams that would need a desktop, a network or a root prompt are overridden — and both read the
-// redirected test identity, skipping themselves when the harness has not redirected it. Neither one asks
-// the release feed anything: the GitHub lookup is armed by main.cpp, which is not part of this binary, so
-// a window here cannot reach the network however the suite drives it. Motion is the one thing in the
-// suite that has to put a window on screen: a page behind another page has nothing to appear on, so a
-// fade can only be watched on a visible window — and so can a badge that breathes.
+// A constructed MainWindow is covered in three places: the watchdog section, which needs the real catalog
+// and journal to prove that a dead bypass turns into an offer; the release-badge section, which needs the
+// header the badge lives in; and the rounded-shell section, which needs the window's own pixels. All are
+// built without a window manager (offscreen) — the watchdog's three seams that would need a desktop, a
+// network or a root prompt are overridden — and all read the redirected test identity, skipping themselves
+// when the harness has not redirected it. Neither the watchdog nor the badge section asks the release feed
+// anything: the GitHub lookup is armed by main.cpp, which is not part of this binary, so a window here
+// cannot reach the network however the suite drives it. Motion is the one thing in the suite that has to
+// put a window on screen: a page behind another page has nothing to appear on, so a fade can only be
+// watched on a visible window — and so can a badge that breathes, and so can the corners of the window
+// itself, which the shell section reads out of a rendered grab.
 
 #include "BlockcheckEngine.h"
 #include "IZapretBackend.h"
@@ -70,6 +72,7 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
 #include <QTableView>
@@ -118,6 +121,99 @@ static void check(bool cond, const QString &what)
     std::printf(cond ? "  PASS  %s\n" : "  FAIL  %s\n", qUtf8Printable(what));
     if (!cond)
         ++g_failures;
+}
+
+// The sheet with every /* … */ block removed.
+//
+// Both files name selectors inside their comments to explain what a rule is for ("a plain
+// `QMainWindow { … }` rule would match this window too", "the surfaces that reach a corner are
+// QFrame#sidebar …"). A scan that looks for a selector's first match would then read that prose as the
+// declaration and return the body of whatever rule happens to follow the sentence — so every structural
+// read of a sheet goes through this first. Comment-free text is where a declaration can only ever live.
+static QString sheetWithoutComments(const QString &sheet)
+{
+    QString code;
+    code.reserve(sheet.size());
+    bool inComment = false;
+    for (int i = 0; i < sheet.size(); ++i) {
+        if (!inComment && sheet.at(i) == QLatin1Char('/') && i + 1 < sheet.size()
+            && sheet.at(i + 1) == QLatin1Char('*')) {
+            inComment = true;
+            ++i;
+            continue;
+        }
+        if (inComment && sheet.at(i) == QLatin1Char('*') && i + 1 < sheet.size()
+            && sheet.at(i + 1) == QLatin1Char('/')) {
+            inComment = false;
+            ++i;
+            continue;
+        }
+        if (!inComment)
+            code.append(sheet.at(i));
+    }
+    return code;
+}
+
+// True when some rule in `code` names QMainWindow as a bare TYPE (`QMainWindow {`, `QMainWindow, QDialog`).
+// That is the shape of the bug the rounded shell dies of: a background on the window is an opaque
+// rectangle over every pixel of a WA_TranslucentBackground surface, corners included, and the rounded card
+// under it is a rounding nobody can see. Takes comment-free text, so a comment may name the type freely.
+static bool hasUnqualifiedQMainWindowRule(const QString &code)
+{
+    static const QLatin1String type("QMainWindow");
+    int at = code.indexOf(type);
+    while (at >= 0) {
+        const int after = at + type.size();
+        const QChar next = after < code.size() ? code.at(after) : QLatin1Char(' ');
+        if (!next.isLetterOrNumber() && next != QLatin1Char('_') && next != QLatin1Char('#'))
+            return true;                       // not `QMainWindow#mainWindow` — the type itself
+        at = code.indexOf(type, after);
+    }
+    return false;
+}
+
+// The colour one rule of one sheet declares, out of comment-free text (see sheetWithoutComments), or an
+// invalid colour when nothing matches. Kept next to the helpers that read a sheet rather than a pixel
+// because every check that wants to know what the SHEET says goes through it: hardcoding the same hexes
+// here would be a test of this file, not of a theme.
+static QColor sheetRuleColor(const QString &sheet, const QString &selector, const QString &prop)
+{
+    const QString code = sheetWithoutComments(sheet);
+    const int at = code.indexOf(selector);
+    const int open = at < 0 ? -1 : code.indexOf(QLatin1Char('{'), at);
+    const int close = open < 0 ? -1 : code.indexOf(QLatin1Char('}'), open);
+    if (close < 0)
+        return QColor();
+    const QStringList decls = code.mid(open + 1, close - open - 1).split(QLatin1Char(';'));
+    for (const QString &d : decls) {
+        const int colon = d.indexOf(QLatin1Char(':'));
+        if (colon > 0 && d.left(colon).trimmed().compare(prop, Qt::CaseInsensitive) == 0)
+            return QColor(d.mid(colon + 1).trimmed());
+    }
+    return QColor();
+}
+
+// The first hex inside one declaration of one rule — the form a border takes ("1px solid #262A36"), where
+// the colour is not the whole value and sheetRuleColor would hand back an unparseable string.
+static QColor sheetRuleHex(const QString &sheet, const QString &selector, const QString &prop)
+{
+    const QString code = sheetWithoutComments(sheet);
+    const int at = code.indexOf(selector);
+    const int open = at < 0 ? -1 : code.indexOf(QLatin1Char('{'), at);
+    const int close = open < 0 ? -1 : code.indexOf(QLatin1Char('}'), open);
+    if (close < 0)
+        return QColor();
+    const QString body = code.mid(open + 1, close - open - 1);
+    for (const QString &d : body.split(QLatin1Char(';'))) {
+        const int colon = d.indexOf(QLatin1Char(':'));
+        if (colon <= 0 || d.left(colon).trimmed().compare(prop, Qt::CaseInsensitive) != 0)
+            continue;
+        const QRegularExpression hex(QStringLiteral("#[0-9a-fA-F]{6}"));
+        const QRegularExpressionMatch m = hex.match(d.mid(colon + 1));
+        if (m.hasMatch())
+            return QColor(m.captured(0));
+    }
+    return QColor();
 }
 
 // ---------------------------------------------------------------- Settings ----
@@ -1299,8 +1395,11 @@ static void testTheme(QApplication &app)
     // Read one declaration out of one selector's rule. Needed because "does the sheet contain this hex"
     // is a much weaker question than it looks: #1F2937 is the light sheet's general text colour as well
     // as its old log colour, so a whole-sheet search stays green after the log rule alone stops
-    // matching the token the code paints with. Scoping to the selector is what makes the check a check.
-    auto ruleProperty = [](const QString &sheet, const QString &selector, const QString &prop) {
+    // matching the token the code paints with. Scoping to the selector is what makes the check a check —
+    // and stripping the comments first is what makes the scope mean the DECLARATION, since these files
+    // name selectors in prose to explain them (see sheetWithoutComments).
+    auto ruleProperty = [](const QString &sheetIn, const QString &selector, const QString &prop) {
+        const QString sheet = sheetWithoutComments(sheetIn);
         const int at = sheet.indexOf(selector);
         const int open = at < 0 ? -1 : sheet.indexOf(QLatin1Char('{'), at);
         const int close = open < 0 ? -1 : sheet.indexOf(QLatin1Char('}'), open);
@@ -1395,6 +1494,76 @@ static void testTheme(QApplication &app)
         check(sheet.contains(QStringLiteral("historyBadge[badgeKind=\"warning\"]")),
               QStringLiteral("%1 sheet colours a chip that counted substitutions").arg(
                   dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        // ---- the window's own shell ----
+        //
+        // The rounded window is a shape, and a shape is only ever visible as pixels — those are read off a
+        // shown window in testWindowFrame(). What belongs here, in the sheet, is the OTHER half: that both
+        // themes declare the shape at all, in the numbers MainWindow names, and that nothing in either
+        // theme paints the rectangle that would hide it.
+        const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+        const QString code = sheetWithoutComments(sheet);
+        // The bug this file's whole cascade exists around, in one line: a `QMainWindow { … }` type rule puts
+        // an opaque square over every pixel of a translucent surface, corners included, and the rounded
+        // card below it becomes a rounding nobody can see. Structural, because "the sheet contains #0B0C10"
+        // is true whether or not the window paints it.
+        check(!hasUnqualifiedQMainWindowRule(code),
+              QStringLiteral("%1 sheet gives the main window no rectangle of its own").arg(theme));
+        check(ruleProperty(sheet, QStringLiteral("QMainWindow#mainWindow"),
+                           QStringLiteral("background-color"))
+                  == QStringLiteral("transparent"),
+              QStringLiteral("%1 sheet's window rule is the transparent one").arg(theme));
+        // The canvas between the window and the card is the transparent band, and is named here because a
+        // reader who "completed" the window-surfaces block with it would undo the corners.
+        check(ruleProperty(sheet, QStringLiteral("QWidget#rootCanvas"),
+                           QStringLiteral("background-color"))
+                  == QStringLiteral("transparent"),
+              QStringLiteral("%1 sheet leaves the band around the shell unpainted").arg(theme));
+        // The card itself: the arc, the stroke, the fill — all three read out of the constants the C++
+        // side and the pixel test both use, so the sheets, the code and the pixels are one design.
+        check(ruleProperty(sheet, QStringLiteral("QFrame#mainWindowFrame"),
+                           QStringLiteral("border-radius"))
+                  == QStringLiteral("%1px").arg(MainWindow::kWindowFrameRadiusPx),
+              QStringLiteral("%1 sheet rounds the window shell by %2px")
+                  .arg(theme).arg(MainWindow::kWindowFrameRadiusPx));
+        check(sheetRuleHex(sheet, QStringLiteral("QFrame#mainWindowFrame"), QStringLiteral("border"))
+                  == Theme::border(),
+              QStringLiteral("%1 sheet strokes the shell in the sheet's own border token")
+                  .arg(theme));
+        check(sheetRuleColor(sheet, QStringLiteral("QFrame#mainWindowFrame"),
+                             QStringLiteral("background-color"))
+                  == Theme::windowBackground(),
+              QStringLiteral("%1 sheet fills the shell with the window background").arg(theme));
+        check(sheetRuleColor(sheet, QStringLiteral("QFrame#mainWindowFrame"),
+                             QStringLiteral("background-color"))
+                  != sheetRuleColor(sheet, QStringLiteral("QFrame#sidebar"),
+                                    QStringLiteral("background-color"))
+                      || dark,
+              QStringLiteral("%1 sheet's shell and rail are distinguishable, so a corner that leaks the "
+                             "rail is a pixel that disagrees").arg(theme));
+        // Qt does not clip a child to its parent's radius, so every surface that reaches a window corner
+        // carries the arc's INNER edge — one pixel less than the radius, because the pixel it would
+        // otherwise cover is the stroke. An unrounded one is a square of the app outside the silhouette.
+        const QString inner = QStringLiteral("%1px").arg(MainWindow::kWindowFrameRadiusPx
+                                                         - MainWindow::kWindowFrameBorderPx);
+        struct CornerRule {
+            const char *selector;
+            const char *property;
+        };
+        const CornerRule kCornerRules[] = {
+            {"QFrame#sidebar", "border-top-left-radius"},
+            {"QFrame#sidebar", "border-bottom-left-radius"},
+            {"QFrame#mainArea", "border-top-right-radius"},
+            {"QFrame#mainArea", "border-bottom-right-radius"},
+            {"QWidget#headerBar", "border-top-right-radius"},
+            {"QFrame#footerBar", "border-bottom-right-radius"},
+        };
+        for (const CornerRule &c : kCornerRules) {
+            check(ruleProperty(sheet, QLatin1String(c.selector), QLatin1String(c.property))
+                      == inner,
+                  QStringLiteral("%1 sheet rounds %2's %3 to the shell's inner arc (%4)")
+                      .arg(theme, QLatin1String(c.selector), QLatin1String(c.property), inner));
+        }
+
         // The dashboard's painted circles read their colours from C++ tokens, but everything framing them
         // is sheet styling — and both sheets must carry it, or the light theme shows an unstyled rail.
         for (const QString &name : {QStringLiteral("mainArea"), QStringLiteral("statusDot"),
@@ -2927,10 +3096,374 @@ static void testUpdateNotice()
     store.setZapretPath(savedPath);
 }
 
+// ------------------------------------------------------------- rounded shell ----
+//
+// The window's own corners. Everything above asks what the window contains; this asks what the window IS —
+// a rounded rectangle with no system frame and, since the shell, no background of its own. A shape cannot
+// be checked by reading a property, so the window is rendered and the rendering is read: the shell paints
+// an arc, and what lies outside it is not a colour at all. That last part is the whole trick —
+// QWidget::grab() fills its target with Qt::transparent before rendering, so an alpha of 0 in the image is
+// the desktop showing through, which is exactly the fact this section turns on.
+//
+// Four ways it can be wrong, each with its own reading:
+//   * no band — a card flush with the surface edge has its 1 px stroke cut in half by that edge, so the
+//     window's own outline is a smudge instead of a line;
+//   * a painted window or canvas — an opaque rectangle again, corners and all, with the rounding hidden
+//     behind it: the black squares this feature exists to remove, in whatever colour the theme uses;
+//   * a square corner inside the arc — the rail, the main column, the header band and the footer are
+//     children, and Qt does not clip a child to its parent's radius, so an unrounded one paints a nub of
+//     the app outside the silhouette and over the stroke;
+//   * the hierarchy — the shell sits between the window and everything the suite finds by name, so a page,
+//     a rail glyph or a chrome control that stopped being reachable, or a header press that stopped
+//     reaching the window that drags on it, is the same feature failing quietly.
+// As with the stats panel, the light theme proves what the dark one cannot: there the rail is #E5E7EB
+// against a #F3F4F6 shell, so a leaked corner is a grey pixel outside the arc, while the dark sheet paints
+// both #0B0C10 and hides the mistake in a matching colour. Every reading below therefore runs in both
+// themes, against the colours each sheet declares rather than colours written here.
+static void testWindowFrame()
+{
+    std::printf("\n[Rounded shell]\n");
+
+    QApplication &app = *static_cast<QApplication *>(qApp);
+    const int r = MainWindow::kWindowFrameRadiusPx;
+    const int m = MainWindow::kWindowFrameMarginPx;
+    const int b = MainWindow::kWindowFrameBorderPx;
+
+    // The three numbers the shell is made of, spelled once more here so a change to one of them has to pass
+    // two places that would otherwise disagree quietly.
+    check(r == 12 && b == 1, "the shell is 12 px of arc over a 1 px stroke");
+    check(m >= 1 && m <= 2, "…inside 1-2 px of transparent window, so the stroke is drawn rather than cut");
+
+    if (!configRedirectedIntoBuildTree()) {
+        std::printf("  SKIP  the shell belongs to a window, and constructing one needs XDG_CONFIG_HOME "
+                    "redirected into the build tree (run it through ctest)\n");
+        return;
+    }
+
+    QTemporaryDir dir;
+    check(dir.isValid(), "temporary directory for the fixture tree");
+    const QString root = dir.filePath(QStringLiteral("zapret/linux"));
+    check(makeWatchdogTree(root), "a two-profile linux tree written");
+
+    Settings store;
+    const QString savedPath = store.zapretPath();
+    const QString savedLast = store.lastStrategyId();
+    const bool savedStart = store.startLastOnLaunch();
+    store.setStartLastOnLaunch(false);   // nothing may start itself while its corners are being read
+    store.setLastStrategyId(QString());
+    store.setZapretPath(root);
+
+    {
+        MainWindow window;
+        // ---- the hierarchy the rest of the suite reads through ----
+        QWidget *canvas = window.findChild<QWidget *>(QStringLiteral("rootCanvas"));
+        QFrame *shell = window.windowFrame();
+        check(canvas != nullptr && canvas->parentWidget() == &window,
+              "the central widget is still the window's own canvas");
+        check(shell != nullptr, "the window builds a rounded shell");
+        if (!canvas || !shell) {
+            store.setZapretPath(savedPath);
+            store.setLastStrategyId(savedLast);
+            store.setStartLastOnLaunch(savedStart);
+            return;
+        }
+        check(shell->objectName() == QLatin1String("mainWindowFrame"),
+              "…under the name both sheets style it by");
+        check(shell->parentWidget() == canvas,
+              "…between that canvas and everything else, which is the one thing the new layer changes");
+        // The claim Task 3 makes is that findChild() still reaches everything, because it walks the tree
+        // rather than naming a parent. Four kinds of thing the suite leans on: the page stack, a rail
+        // glyph, the footer at the bottom of the column, and a page built several levels below the shell.
+        check(window.findChild<QStackedWidget *>(QStringLiteral("pageStack")) != nullptr,
+              "the page stack is reachable through the shell");
+        check(window.findChild<QPushButton *>(QStringLiteral("navButton")) != nullptr,
+              "…and so is a rail glyph");
+        check(window.findChild<QFrame *>(QStringLiteral("footerBar")) != nullptr,
+              "…and the footer at the bottom of the column");
+        check(window.findChild<QWidget *>(QStringLiteral("historyPage")) != nullptr,
+              "…and a page several levels below the shell");
+
+        // A claim about a shape needs the window on screen and rendered. The offscreen platform is enough:
+        // grab() draws the widget tree into its own image and asks no compositor for anything. Showing it
+        // is also what puts the layout to work, so every geometry read below comes after it.
+        window.show();
+        QTest::qWait(60);
+
+        // ---- the band, as geometry ----
+        check(shell->pos() == QPoint(m, m),
+              QStringLiteral("the shell starts %1 px in from the surface on both axes (%2,%3)")
+                  .arg(m).arg(shell->pos().x()).arg(shell->pos().y()));
+        check(shell->width() == window.width() - 2 * m
+                  && shell->height() == window.height() - 2 * m,
+              QStringLiteral("…and stops %1 px before it again (%2x%3 inside a %4x%5 window)")
+                  .arg(m).arg(shell->width()).arg(shell->height())
+                  .arg(window.width()).arg(window.height()));
+
+        // ---- the chrome controls, where the design puts them ----
+        QToolButton *closeBtn = nullptr;
+        QToolButton *minBtn = nullptr;
+        const auto chromeButtons = window.findChildren<QToolButton *>();
+        for (QToolButton *btn : chromeButtons) {
+            const QString role = btn->property("role").toString();
+            if (role == QLatin1String("close"))
+                closeBtn = btn;
+            else if (role == QLatin1String("min"))
+                minBtn = btn;
+        }
+        check(closeBtn != nullptr && minBtn != nullptr,
+              "the minimise and close controls are still built into the header");
+        // Inside the card, clear of its stroke: a control that overlapped the 1 px border would be the
+        // design's top-right corner cut away by its own button.
+        const QRect shellInner = QRect(shell->pos(), shell->size())
+                                     .adjusted(b, b, -b - 1, -b - 1);
+        for (QToolButton *btn : {closeBtn, minBtn}) {
+            if (!btn)
+                continue;
+            const QRect g(btn->mapTo(&window, QPoint(0, 0)), btn->size());
+            check(shellInner.contains(g),
+                  QStringLiteral("the %1 control sits inside the shell, clear of its stroke")
+                      .arg(btn->property("role").toString()));
+            check(g.center().x() > window.width() / 2 && g.center().y() < window.height() / 4,
+                  QStringLiteral("…and still in the top-right corner, where window furniture goes (%1,%2)")
+                      .arg(g.x()).arg(g.y()));
+        }
+        const int w = window.width();
+        const int h = window.height();
+        // One mirrored coordinate for all four corners: (lx, ly) counts away from the corner in question,
+        // which puts every corner's arc centre at (m + r, m + r) and lets one arithmetic read all of them.
+        struct Corner {
+            const char *name;
+            int x0;   // the window x of the corner's own pixel
+            int dx;   // …and the direction that goes into the window
+            int y0;
+            int dy;
+            const char *surface;   // the selector whose colour must be found inside the arc
+        };
+        const Corner corners[] = {
+            {"top-left",      0, 1,      0,  1, "QFrame#sidebar"},
+            {"top-right",  w - 1, -1,     0,  1, "QFrame#mainArea"},
+            {"bottom-left",   0, 1,   h - 1, -1, "QFrame#sidebar"},
+            {"bottom-right", w - 1, -1, h - 1, -1, "QFrame#mainArea"},
+        };
+        auto at = [](const Corner &c, int lx, int ly) {
+            return QPoint(c.x0 + c.dx * lx, c.y0 + c.dy * ly);
+        };
+        // A pixel of the corner box is painted by the shell exactly when its centre falls inside the outer
+        // arc. A square corner paints every one of them, which is what the count below tells apart.
+        auto arcPaints = [&](int lx, int ly) {
+            const double dx = lx + 0.5 - (m + r);
+            const double dy = ly + 0.5 - (m + r);
+            return dx * dx + dy * dy <= double(r * r);
+        };
+        // How far in from the corner the 45° diagonal crosses the arc, in that mirrored coordinate: the
+        // pixel that must be nothing if the corner is round, and something if any child left it square.
+        const int diagOut = m + r - int((r + 1) / 1.4142135623730951) - 1;
+        auto rgbWithin = [](const QColor &x, const QColor &y, int tol) {
+            return qAbs(x.red() - y.red()) <= tol && qAbs(x.green() - y.green()) <= tol
+                   && qAbs(x.blue() - y.blue()) <= tol;
+        };
+
+        for (const bool dark : {true, false}) {
+            const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+            Theme::apply(app, dark);
+            QTest::qWait(30);
+            const QImage shot = window.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+            check(shot.hasAlphaChannel() && shot.width() == w && shot.height() == h,
+                  QStringLiteral("%1: the window renders %2x%3 with an alpha channel for corners to hide in")
+                      .arg(theme).arg(shot.width()).arg(shot.height()));
+            if (!shot.hasAlphaChannel() || shot.width() != w || shot.height() != h)
+                continue;
+
+            const QString sheet = app.styleSheet();
+            const QColor stroke = sheetRuleHex(sheet, QStringLiteral("QFrame#mainWindowFrame"),
+                                               QStringLiteral("border"));
+            check(stroke.isValid(),
+                  QStringLiteral("%1: the sheet declares the shell's stroke colour").arg(theme));
+
+            // ---- the four corners ----
+            for (const Corner &c : corners) {
+                const QColor wantFill = sheetRuleColor(sheet, QLatin1String(c.surface),
+                                                       QStringLiteral("background-color"));
+                check(wantFill.isValid(),
+                      QStringLiteral("%1: the sheet says what %2 paints at a corner")
+                          .arg(theme, QLatin1String(c.surface)));
+
+                // Nothing of the app may be at the window's very corner pixel…
+                check(qAlpha(shot.pixel(at(c, 0, 0))) == 0,
+                      QStringLiteral("%1: the window's %2 corner pixel is empty, not %3")
+                          .arg(theme, QLatin1String(c.name))
+                          .arg(shot.pixelColor(at(c, 0, 0)).name(QColor::HexRgb)));
+                // …nor one step further in along the diagonal, which is exactly where a square child
+                // corner — an unrounded rail, band or footer — would still be reaching.
+                const QPoint out = at(c, diagOut, diagOut);
+                check(qAlpha(shot.pixel(out)) == 0,
+                      QStringLiteral("%1: nothing is painted at (%3,%4) of the %2 corner, so the corner is "
+                                     "an arc and not a child that forgot to round")
+                          .arg(theme, QLatin1String(c.name)).arg(out.x()).arg(out.y()));
+                // And the corner is filled with its own surface, not a hole in the shell: proof the clean
+                // diagonal is a shape rather than a window that stopped drawing. r - 4 in from the corner
+                // along each axis puts the sample well inside the arc, clear of the stroke and of the
+                // antialiased edge alike.
+                const QPoint inside = at(c, r - 4, r - 4);
+                check(rgbWithin(shot.pixelColor(inside), wantFill, 12),
+                      QStringLiteral("%1: the %2 corner is painted by %3 (%4 at (%5,%6), wanted %7)")
+                          .arg(theme, QLatin1String(c.name), QLatin1String(c.surface))
+                          .arg(shot.pixelColor(inside).name(QColor::HexRgb))
+                          .arg(inside.x()).arg(inside.y())
+                          .arg(wantFill.name(QColor::HexRgb)));
+
+                int painted = 0;
+                int expected = 0;
+                for (int ly = 0; ly < r; ++ly) {
+                    for (int lx = 0; lx < r; ++lx) {
+                        if (qAlpha(shot.pixel(at(c, lx, ly))) > 128)
+                            ++painted;
+                        if (arcPaints(lx, ly))
+                            ++expected;
+                    }
+                }
+                check(qAbs(painted - expected) <= 14,
+                      QStringLiteral("%1: the %2 corner is the arc, not a square — %3 of the %4x%4 box "
+                                     "painted, the arc says %5 and a square would be %6")
+                          .arg(theme, QLatin1String(c.name)).arg(painted).arg(r)
+                          .arg(expected).arg(r * r));
+            }
+            // ---- the four straight edges: the band, as pixels ----
+            // Nothing antialiased to argue with here, and this is the reading that proves the margin: the
+            // first pixel the window paints on an edge has to be the shell's stroke, one band in from the
+            // surface's own edge. Flush against that edge, the same stroke is half a pixel of smudge.
+            struct Edge {
+                const char *name;
+                int dx;   // which axis is the surface normal, and in which direction
+                int dy;
+            };
+            const Edge edges[] = {{"top", 0, -1}, {"bottom", 0, 1}, {"left", -1, 0}, {"right", 1, 0}};
+            for (const Edge &e : edges) {
+                // The stroke pixel, and the one before it on the way out of the window.
+                const QPoint on(e.dx < 0 ? m : (e.dx > 0 ? w - 1 - m : w / 2),
+                                e.dy < 0 ? m : (e.dy > 0 ? h - 1 - m : h / 2));
+                const QPoint out(on.x() + e.dx, on.y() + e.dy);
+                check(shot.rect().contains(out) && qAlpha(shot.pixel(out)) == 0,
+                      QStringLiteral("%1: the %2 edge is transparent for the whole %3 px band, so the "
+                                     "window really is inset from its own surface")
+                          .arg(theme, QLatin1String(e.name)).arg(m));
+                check(qAlpha(shot.pixel(on)) > 200 && rgbWithin(shot.pixelColor(on), stroke, 16),
+                      QStringLiteral("%1: the %2 edge draws the shell's stroke at (%3,%4) — %5, wanted %6")
+                          .arg(theme, QLatin1String(e.name)).arg(on.x()).arg(on.y())
+                          .arg(shot.pixelColor(on).name(QColor::HexRgb))
+                          .arg(stroke.isValid() ? stroke.name(QColor::HexRgb)
+                                                : QStringLiteral("<none>")));
+            }
+
+            // ---- the chrome controls, inside the silhouette ----
+            // Geometry proved they are clear of the stroke; this proves it in the same pixels the corners
+            // are judged by: every corner of every control lands on a painted pixel, so none of them is
+            // sticking out past the arc the window is made of.
+            for (QToolButton *btn : {closeBtn, minBtn}) {
+                if (!btn)
+                    continue;
+                const QRect g(btn->mapTo(&window, QPoint(0, 0)), btn->size());
+                bool allPainted = true;
+                for (const QPoint &p : {g.topLeft(), g.topRight(), g.bottomLeft(), g.bottomRight()}) {
+                    if (!shot.rect().contains(p) || qAlpha(shot.pixel(p)) == 0)
+                        allPainted = false;
+                }
+                check(allPainted,
+                      QStringLiteral("%1: every corner of the %2 control lands on painted pixels, so it is "
+                                     "inside the rounded area")
+                          .arg(theme, btn->property("role").toString()));
+            }
+
+            // The shell as the user sees it, kept for the eye to check the arc it cannot measure.
+            shot.save(dark ? QStringLiteral("/tmp/shell-dark.png")
+                           : QStringLiteral("/tmp/shell-light.png"));
+        }
+
+        // ---- the drag, across the new layer ----
+        //
+        // A press on bare header space is not a press on the window: it lands on the band, is ignored
+        // there, and travels up through the shell to the window that starts a drag from it. The shell put
+        // a layer into that journey, and a frameless window that cannot be dragged is a window that cannot
+        // be moved at all — a much worse failure than a wrong colour. So the press is delivered to a child
+        // and the window's own position is what is measured.
+        Theme::apply(app, true);
+        QTest::qWait(30);
+        QWidget *band = window.findChild<QWidget *>(QStringLiteral("headerBar"));
+        check(band != nullptr, "the header band is reachable by name for the drag to start on");
+        if (band) {
+            check(band->width() > 200 && band->height() > 24,
+                  QStringLiteral("…and is big enough to grab by (%1x%2)").arg(band->width())
+                      .arg(band->height()));
+            const QPoint grabPoint(band->width() / 2, 20);   // between the title and the status chip
+            const QRect closeInBand = closeBtn
+                                          ? QRect(closeBtn->mapTo(band, QPoint(0, 0)), closeBtn->size())
+                                          : QRect();
+            check(!closeInBand.contains(grabPoint),
+                  "…the grab point is bare header space, not one of the controls sitting on it");
+
+            const QPoint before = window.pos();
+            const QPoint p1 = band->mapTo(&window, grabPoint);
+            QTest::mousePress(band, Qt::LeftButton, Qt::NoModifier, grabPoint);
+            const QPoint p2 = p1 + QPoint(27, 7);
+            QTest::mouseMove(&window, p2);
+            const QPoint moved = window.pos();
+            check(moved != before,
+                  QStringLiteral("a press on the header and a drag move the frameless window ((%1,%2) -> "
+                                 "(%3,%4))").arg(before.x()).arg(before.y())
+                      .arg(moved.x()).arg(moved.y()));
+            check(moved - before == p2 - p1,
+                  QStringLiteral("…by exactly as far as the pointer went, so the extra layer did not shift "
+                                 "the grab point (window moved (%1,%2), pointer (%3,%4))")
+                      .arg(moved.x() - before.x()).arg(moved.y() - before.y())
+                      .arg(p2.x() - p1.x()).arg(p2.y() - p1.y()));
+            QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, p2);
+
+            // A second drag, measured from a second press. If the release had left the window mid-drag, or
+            // the offset had carried over from the first press point, this jump would not be the
+            // pointer's own.
+            const QPoint againFrom = window.pos();
+            const QPoint q1 = band->mapTo(&window, grabPoint);
+            QTest::mousePress(band, Qt::LeftButton, Qt::NoModifier, grabPoint);
+            QTest::mouseMove(&window, q1 + QPoint(-19, 11));
+            const QPoint againTo = window.pos();
+            check(againTo - againFrom == QPoint(-19, 11),
+                  QStringLiteral("…and the next drag is its own, not a carry-over from the last (moved "
+                                 "(%1,%2), expected (-19,11))")
+                      .arg(againTo.x() - againFrom.x()).arg(againTo.y() - againFrom.y()));
+            QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, q1 + QPoint(-19, 11));
+
+            // And below the band a press belongs to the page rather than to the window: the same journey
+            // up ends with the drag handler refusing it, so clicking anything never drags the app about.
+            const QPoint still = window.pos();
+            QWidget *page = window.findChild<QWidget *>(QStringLiteral("dashboardPage"));
+            if (page && page->height() > 60) {
+                const QPoint onPage(page->width() / 2, page->height() - 30);
+                const QPoint onWindow = page->mapTo(&window, onPage);
+                check(onWindow.y() > 64 + m + b,
+                      QStringLiteral("…that press is below the drag band (%1 px into a %2 px window)")
+                          .arg(onWindow.y()).arg(window.height()));
+                QTest::mousePress(page, Qt::LeftButton, Qt::NoModifier, onPage);
+                QTest::mouseMove(&window, onWindow + QPoint(30, 30));
+                check(window.pos() == still,
+                      "…and dragging from the page leaves the window where it was");
+                QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier,
+                                    onWindow + QPoint(30, 30));
+            }
+        }
+
+        // Back on the theme the rest of the binary — and the application itself — expects.
+        Theme::apply(app, true);
+        window.hide();
+    }
+
+    store.setZapretPath(savedPath);
+    store.setLastStrategyId(savedLast);
+    store.setStartLastOnLaunch(savedStart);
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
-
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("MuffinTest"));
@@ -2957,6 +3490,7 @@ int main(int argc, char **argv)
     testMotion();
     testWatchdog();
     testUpdateNotice();
+    testWindowFrame();
 
     std::printf("\n=== %s (%d failures) ===\n", g_failures ? "FAILED" : "ALL PASS", g_failures);
     return g_failures ? 1 : 0;

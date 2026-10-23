@@ -22,7 +22,14 @@
    renaming one silently unstyles the widget it targets.
    ==========================================================================*/
 
-QMainWindow, QDialog { background-color: #0B0C10; }
+/* Dialogs keep an opaque rectangle: they have a system frame, square corners by right of birth, and a
+   surface the window manager filled in before we got it. The main window must NOT paint one — it is
+   frameless and WA_TranslucentBackground, so a background on it is a theme-coloured square drawn over the
+   whole surface, corners included, and the rounded silhouette #mainWindowFrame draws inside it becomes a
+   rounding nobody can see. Id-scoped, because the last matching rule wins in this sheet's cascade and a
+   plain `QMainWindow { … }` type rule would match that window too. */
+QDialog { background-color: #0B0C10; }
+QMainWindow#mainWindow { background-color: transparent; }
 
 QWidget {
     background-color: transparent;
@@ -35,14 +42,42 @@ QToolTip {
     border: 1px solid #262A36; padding: 6px 9px; border-radius: 8px;
 }
 
+/* ---------- shell: the window's own silhouette ---------------------------------
+   The window paints nothing (QMainWindow#mainWindow above), so this card is the shape: a 12 px arc, a 1 px
+   stroke in the sheet's border token like every other framed surface in here, and 2 px of transparent
+   window around it so the stroke is drawn instead of cut by the surface's own edge. Those three numbers are
+   MainWindow::kWindowFrameRadiusPx, kWindowFrameBorderPx and kWindowFrameMarginPx, and tests/uitest.cpp
+   reads the corner pixels against them.
+
+   Qt does not clip a child to its parent's radius, and the card's contents rect is inset by exactly the
+   stroke — so the surfaces that reach a window corner carry the arc's INNER edge (12 - 1 = 11 px)
+   themselves. A square corner on any of them paints over the stroke and outside the silhouette, and on a
+   translucent surface "outside" is not a wrong colour inside the app: it is a nub of the app on the
+   desktop.
+
+     top-left, bottom-left   QFrame#sidebar
+     top-right               QFrame#mainArea, QWidget#headerBar
+     bottom-right            QFrame#mainArea, QFrame#footerBar                            */
+QFrame#mainWindowFrame {
+    background-color: #0B0C10;
+    border: 1px solid #262A36;
+    border-radius: 12px;
+}
+
 /* ---------- shell: rail + main area -------------------------------------------
-   Two columns, edge to edge, one hairline between them. The rail is 70 px of glyphs with no labels
-   anywhere; everything that carries text lives to its right. */
+   Two columns, edge to edge inside the card, one hairline between them. The rail is 70 px of glyphs with
+   no labels anywhere; everything that carries text lives to its right. */
 QFrame#sidebar {
     background-color: #0B0C10;
     border-right: 1px solid #1F2833;
+    border-top-left-radius: 11px;
+    border-bottom-left-radius: 11px;
 }
-QFrame#mainArea { background-color: #0B0C10; }
+QFrame#mainArea {
+    background-color: #0B0C10;
+    border-top-right-radius: 11px;
+    border-bottom-right-radius: 11px;
+}
 QLabel#brandLogo { background-color: transparent; }
 
 /* One rule for every rail glyph. They are icon-only QPushButtons — the accessible name and the tooltip
@@ -106,7 +141,9 @@ QToolButton#windowButton[role="update"]:hover { background-color: #10222B; borde
 QToolButton#windowButton[role="update"]:pressed { background-color: #16303B; border-color: #22D3EE; }
 
 /* ---------- header ---------- */
-QWidget#headerBar { background-color: #0B0C10; }
+/* The band is the top of the main column, so it is also the window's top-right corner: its radius is the
+   shell's arc minus the stroke, and the reason is spelled out in the shell block above. */
+QWidget#headerBar { background-color: #0B0C10; border-top-right-radius: 11px; }
 QLabel#appTitle {
     background-color: transparent;
     font-family: "Montserrat", "Outfit", "Inter", "Segoe UI", sans-serif;
@@ -398,8 +435,9 @@ QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: no
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 /* ---------- footer ---------- */
 /* The thin strip the status bar became. It carries the resolved zapret path on the left and the ping
-   cadence in the middle, and it is also where a transient sentence appears — see showTransientMessage(). */
-QFrame#footerBar { background-color: #0B0C10; border-top: 1px solid #1F2833; }
+   cadence in the middle, and it is also where a transient sentence appears — see showTransientMessage().
+   Its bottom-right corner is the window's own, hence the radius the shell block above explains. */
+QFrame#footerBar { background-color: #0B0C10; border-top: 1px solid #1F2833; border-bottom-right-radius: 11px; }
 QLabel#footerHint { background-color: transparent; color: #5A6175; font-size: 8pt; }
 
 /* ---------- ping badges ----------
@@ -446,18 +484,29 @@ QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
 /* ---------- window surfaces (keep this block last) ---------------------------
    The generic `QWidget { background-color: transparent }` near the top is what lets cards, rows and
    labels composite over their parents. It has the same specificity as a plain type rule, and in Qt's
-   stylesheet cascade the last match wins — so a top-level window, a stacked widget or a scroll
-   viewport left transparent composites onto *black*. Invisible in the dark theme, glaring in the light
-   one, so every surface meant to carry the app background is re-asserted here, after all generic
-   rules. The rail and the main area are id rules like these and must not lose the tie to the block
-   above; the header and footer are transparent-by-inheritance and must not gain one. */
-QMainWindow, QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
+   stylesheet cascade the last match wins — so a stacked widget or a scroll viewport left transparent
+   composites onto *black*. Invisible in the dark theme, glaring in the light one, so every surface meant
+   to carry the app background is re-asserted here, after all generic rules. The rail, the main area and
+   the shell are id rules like these and must not lose the tie to the block above; the header and footer
+   are transparent-by-inheritance and must not gain one.
+
+   TWO surfaces are deliberately NOT in that list, and are named here so the next person does not
+   "complete" it: the window and the canvas it holds. Both must stay transparent, because together they
+   are the band around #mainWindowFrame — fill either one and the rounded card becomes a rounding hidden
+   behind an opaque rectangle, which is the square-corner bug this shell exists to remove. */
+QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
 QScrollArea, QScrollArea > QWidget > QWidget,
-QWidget#rootCanvas, QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,
+QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,
 QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage, QWidget#placeholderPage,
 QWidget#settingsPageHost, QWidget#settingsPage, QWidget#historyPage,
 QWidget#headerBar {
     background-color: #0B0C10;
+}
+QMainWindow#mainWindow, QWidget#rootCanvas { background-color: transparent; }
+QFrame#mainWindowFrame {
+    background-color: #0B0C10;
+    border: 1px solid #262A36;
+    border-radius: 12px;
 }
 QFrame#sidebar, QFrame#mainArea { background-color: #0B0C10; }
 QFrame#footerBar { background-color: #0B0C10; }

@@ -114,10 +114,13 @@ constexpr int kStatusDotPx = 6;
 
 // How far down from the top the frameless window can be grabbed by (see mousePressEvent). The header band
 // is 18 px top margin + the tallest of its children (the 30 px chrome buttons / the 24 px title) + 16 px
-// bottom margin + the 1 px rule, so ~64 px covers the whole header and nothing below it. The two chrome
-// buttons and the rail glyphs are children that consume their own presses, so a press that reaches
-// MainWindow inside this band is on bare header space and safe to drag from.
-constexpr int kHeaderDragHeight = 64;
+// bottom margin + the 1 px rule, so 64 px covers the whole header and nothing below it. Everything the
+// header lives in now sits inside the rounded shell, so the band starts that many pixels lower: the
+// transparent margin and the card's stroke are window furniture as much as the title is, and a pointer
+// aiming at the header does not stop 3 px short of it. The two chrome buttons and the rail glyphs are
+// children that consume their own presses, so a press that reaches MainWindow inside this band is on bare
+// header space and safe to drag from.
+constexpr int kHeaderBandPx = 64 + MainWindow::kWindowFrameMarginPx + MainWindow::kWindowFrameBorderPx;
 
 // How long a manual ping round may hold the button. The service's own budgets bound a cycle at three
 // hosts × (3 s TCP + 5 s HTTP) = 24 s, and it leaves a stopped cycle without a final verdict — so the
@@ -186,6 +189,18 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral("Muffin"));
     setWindowIcon(QIcon());
     setWindowFlag(Qt::FramelessWindowHint, true);
+    // Frameless is half the story: a frameless window still owns an opaque rectangular surface, so the
+    // theme's background reached the surface's own corner and the app sat in a sharp box while its panels
+    // were being rounded one by one. WA_TranslucentBackground takes the surface down to nothing — the
+    // pixels no widget paints are the desktop showing through — which is what lets the rounded card
+    // buildCentral() installs be the window's SHAPE rather than a card inside it. Set here, before any
+    // widget exists and long before the first show(): the attribute chooses the surface's pixel format, and
+    // a surface already created without an alpha channel cannot grow one later.
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    // The name both sheets scope the window's own rule to. An id rule and not a type rule, because a plain
+    // `QMainWindow { background-color: … }` would paint the rectangle this attribute exists to unpaint, and
+    // dialogs — which keep their square corners and their system frame — still need the same colour.
+    setObjectName(QStringLiteral("mainWindow"));
     setFixedSize(kWindowWidth, kWindowHeight);
 
     buildCentral();
@@ -300,18 +315,39 @@ MainWindow::~MainWindow()
 
 void MainWindow::buildCentral()
 {
-    // Rail + main area, edge to edge. The design has no window chrome of its own, so the two columns are
-    // the whole window: any margin around them would show as a band of the wrong colour.
-    auto *root = new QWidget(this);
-    root->setObjectName(QStringLiteral("rootCanvas"));
+    // The shell, in two layers, and each layer exists for a reason the other cannot serve.
+    //
+    // The outer one is the transparent band: QMainWindowLayout puts the central widget in the window's
+    // contents rect, so the margin is what keeps the card's 1 px stroke off the surface's edge — a stroke
+    // drawn on the last pixel of the window is a stroke cut in half. That canvas paints NOTHING: with
+    // WA_TranslucentBackground, a background on it would be an opaque rectangle with square corners, which
+    // is precisely the thing this whole arrangement is here to remove. What you see in the band is the
+    // desktop, and the arc below is the window's silhouette.
+    auto *canvas = new QWidget(this);
+    canvas->setObjectName(QStringLiteral("rootCanvas"));
 
-    auto *rootBox = new QHBoxLayout(root);
-    rootBox->setContentsMargins(0, 0, 0, 0);
-    rootBox->setSpacing(0);
-    rootBox->addWidget(buildSidebar());
-    rootBox->addWidget(buildMainArea(), 1);
+    auto *canvasBox = new QVBoxLayout(canvas);
+    canvasBox->setContentsMargins(kWindowFrameMarginPx, kWindowFrameMarginPx,
+                                  kWindowFrameMarginPx, kWindowFrameMarginPx);
+    canvasBox->setSpacing(0);
 
-    setCentralWidget(root);
+    // The card itself: rail and main area, edge to edge inside it. The design has no window chrome, so the
+    // two columns are the whole of the card, and the card is the whole of the visible window — hence the
+    // layout margins below being zero. A stylesheet border is not a decoration drawn over the widget: it
+    // moves the contents rect in by its own width, so the columns land exactly on the arc's inner edge and
+    // round to radius-minus-border (see the corner rules in both sheets) instead of painting over the
+    // stroke.
+    m_windowFrame = new QFrame(canvas);
+    m_windowFrame->setObjectName(QStringLiteral("mainWindowFrame"));
+
+    auto *frameBox = new QHBoxLayout(m_windowFrame);
+    frameBox->setContentsMargins(0, 0, 0, 0);
+    frameBox->setSpacing(0);
+    frameBox->addWidget(buildSidebar());
+    frameBox->addWidget(buildMainArea(), 1);
+    canvasBox->addWidget(m_windowFrame);
+
+    setCentralWidget(canvas);
 }
 
 // The rail: 70 px of glyphs. Brand at the head, the pages and the two commit controls pinned to the
@@ -613,6 +649,12 @@ QWidget *MainWindow::buildHeader()
 {
     auto *header = new QWidget(m_mainArea);
     header->setObjectName(QStringLiteral("headerBar"));
+    // The band reaches the window's top-right corner, and a stylesheet radius only rounds something a
+    // widget actually paints — a bare QWidget draws no stylesheet background of its own without this
+    // attribute (the same reason #statusDot carries it). Without the rounding here, the band's square
+    // corner paints over the shell's stroke and outside its arc, and under a translucent surface that is a
+    // corner of the app floating on the desktop.
+    header->setAttribute(Qt::WA_StyledBackground, true);
 
     auto *row = new QHBoxLayout(header);
     row->setContentsMargins(28, 18, 28, 16);
@@ -2706,10 +2748,11 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
-    // The header bar occupies the top kHeaderDragHeight px of the window, spanning the full width minus
+    // The header bar occupies the top kHeaderBandPx px of the window, spanning the full width minus
     // nothing: the two chrome buttons are children that consume their own presses, so a press that reaches
-    // MainWindow here is on bare header space. Anywhere else in that band, start dragging.
-    if (event->button() == Qt::LeftButton && event->position().y() <= kHeaderDragHeight) {
+    // MainWindow here is on bare header space — or on the transparent band the rounded shell sits in, which
+    // is window furniture too. Anywhere else in that band, start dragging.
+    if (event->button() == Qt::LeftButton && event->position().y() <= kHeaderBandPx) {
         m_dragging = true;
         m_dragOffset = event->position().toPoint();
         event->accept();
