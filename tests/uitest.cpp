@@ -653,7 +653,21 @@ static void testPingIndicator()
     // setFont() left the figure proportional and its digits shifted as they changed — this is the regression
     // Theme::applyFontViaSheet() exists to stop. It runs against the real applied sheet (main() did
     // Theme::apply first), so it is exactly what the widget shows on screen.
+    //
+    // Print both fonts' resolved family and advance widths: on a runner whose fontconfig resolves
+    // QFontDatabase::FixedFont to a different concrete face than the dev box does (Fira Code vs DejaVu
+    // Sans Mono vs Liberation Mono), the numbers alone tell us whether a fail is a "the pin did not take"
+    // bug or a "this runner has no monospace face at all" environment fact. Without them, the log only
+    // says FAIL and the next investigation is a re-run.
     QLabel *number = chip.findChild<QLabel *>(QStringLiteral("pingNumber"));
+    if (number) number->ensurePolished();
+    const QFontMetrics fmNumber(number ? number->font() : QFont());
+    std::printf("  info  pingNumber family=\"%s\" i=%d W=%d l=%d M=%d\n",
+                number ? qUtf8Printable(number->font().family()) : "(null)",
+                fmNumber.horizontalAdvance(QLatin1Char('i')),
+                fmNumber.horizontalAdvance(QLatin1Char('W')),
+                fmNumber.horizontalAdvance(QLatin1Char('l')),
+                fmNumber.horizontalAdvance(QLatin1Char('M')));
     check(number != nullptr, "the badge carries a #pingNumber figure");
     check(resolvesMonospace(number), "and the figure resolves to a fixed-pitch face (no digit drift)");
     // Guard that the check above means something: the app's own UI family must be proportional, or the
@@ -661,6 +675,10 @@ static void testPingIndicator()
     QLabel uiSample;
     uiSample.ensurePolished();
     const QFontMetrics fmUi(uiSample.font());
+    std::printf("  info  UI sample family=\"%s\" i=%d W=%d\n",
+                qUtf8Printable(uiSample.font().family()),
+                fmUi.horizontalAdvance(QLatin1Char('i')),
+                fmUi.horizontalAdvance(QLatin1Char('W')));
     check(fmUi.horizontalAdvance(QLatin1Char('i')) != fmUi.horizontalAdvance(QLatin1Char('W')),
           "the UI text family really is proportional, so the monospace check discriminates");
 }
@@ -861,28 +879,53 @@ static void testProfileCard()
     // win here. The pinning machinery stays proven by the dashboard check above; this one proves the
     // chip opts out of it and inherits the proportional UI face.
     QLabel *chipVal = card.findChild<QLabel *>(QStringLiteral("miniPingValue"));
+    if (chipVal) chipVal->ensurePolished();
+    const QFontMetrics fmChip(chipVal ? chipVal->font() : QFont());
+    std::printf("  info  miniPingValue family=\"%s\" i=%d W=%d l=%d M=%d\n",
+                chipVal ? qUtf8Printable(chipVal->font().family()) : "(null)",
+                fmChip.horizontalAdvance(QLatin1Char('i')),
+                fmChip.horizontalAdvance(QLatin1Char('W')),
+                fmChip.horizontalAdvance(QLatin1Char('l')),
+                fmChip.horizontalAdvance(QLatin1Char('M')));
     check(chipVal != nullptr, "the chip carries a #miniPingValue figure");
     check(!resolvesMonospace(chipVal), "and the chip text inherits the proportional UI face");
 
     // ---- the row height FOLLOWS the font instead of clipping it ----
-    // It used to be a literal 52 px. Now it is max(52 px floor, layout size hint, name line + padding), so
-    // a larger theme/HiDPI text size grows the row rather than cutting the name's descenders or the ring.
-    // The shipped look is preserved exactly at the base font; growth is what the change buys.
-    check(card.height() >= 52, "the row keeps the design's 52 px floor at the base font");
-    check(card.height() >= card.nameLabel()->sizeHint().height(),
+    // It used to be a literal 52 px. Now it is max(52 px floor, layout size hint, name line + padding),
+    // so a larger theme/HiDPI text size grows the row rather than cutting the name's descenders or the
+    // ring. The floor only sets the shipped look on a host whose resolved 11pt UI face is short enough
+    // for line+padding to sit under it — on a runner whose sans-serif fallback is DejaVu Sans, 11pt
+    // gives ~24 px line height, 24+32=56 already exceeds the floor, and the row's natural base is that
+    // 56, not 52. Assert relative (base grows when the font grows, base returns when it is cleared)
+    // rather than pinning a pixel the environment chooses; print the actual values so a future drift
+    // in either direction is legible in the ctest --output-on-failure log without a re-run.
+    const int baseRowHeight = card.height();
+    const int baseNameSizeHint = card.nameLabel()->sizeHint().height();
+    const int baseNameLineHeight = QFontMetrics(card.nameLabel()->font()).height();
+    std::printf("  info  row base=%d, name sizeHint=%d, name line=%d, family=\"%s\"\n",
+                baseRowHeight, baseNameSizeHint, baseNameLineHeight,
+                qUtf8Printable(card.nameLabel()->font().family()));
+    check(baseRowHeight >= 52, "the row keeps the design's 52 px floor at the base font");
+    check(baseRowHeight >= baseNameSizeHint,
           "the row never clips the name's own height");
 
     card.nameLabel()->setStyleSheet(QStringLiteral("font-size: 42pt;"));   // a big-font stand-in
     card.nameLabel()->ensurePolished();
     card.setHosts(hosts);                                                   // re-runs the height maths
-    check(card.height() > 52, "a larger name font grows the row past the floor");
-    check(card.height() >= card.nameLabel()->sizeHint().height(),
+    const int grownRowHeight = card.height();
+    const int grownNameSizeHint = card.nameLabel()->sizeHint().height();
+    std::printf("  info  grown row=%d, name sizeHint=%d\n", grownRowHeight, grownNameSizeHint);
+    check(grownRowHeight > baseRowHeight,
+          "a larger name font grows the row past its base height");
+    check(grownRowHeight >= grownNameSizeHint,
           "...and still leaves the larger name fully inside the row");
 
     card.nameLabel()->setStyleSheet(QString());                            // back to the sheet's 11pt
     card.nameLabel()->ensurePolished();
     card.setHosts(hosts);
-    check(card.height() == 52, "clearing the override returns the shipped 52 px");
+    std::printf("  info  restored row=%d (expected %d)\n", card.height(), baseRowHeight);
+    check(card.height() == baseRowHeight,
+          "clearing the override returns the row to its base height");
 }
 
 // ------------------------------------------------------ tray + policy glue ----
