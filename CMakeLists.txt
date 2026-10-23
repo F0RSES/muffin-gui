@@ -29,6 +29,7 @@ add_library(zapretcore STATIC
     src/core/ZapretLocator.cpp
     src/core/ZapretSource.cpp
     src/core/ZapretDownloader.cpp
+    src/core/UpdateChecker.cpp
     src/core/MuffinInstallHelper.cpp
     src/core/PrivilegeHelper.cpp
     src/core/ZapretManager.cpp
@@ -46,6 +47,7 @@ target_sources(zapretcore PRIVATE
     src/core/IZapretBackend.h
     src/core/WindowsArgs.h
     src/core/ZapretDownloader.h
+    src/core/UpdateChecker.h
     src/core/ZapretManager.h
     src/core/PingService.h
     src/core/BlockcheckEngine.h
@@ -147,6 +149,13 @@ qt_add_executable(Muffin WIN32
 
 target_include_directories(Muffin PRIVATE src/ui)
 target_link_libraries(Muffin PRIVATE zapretcore Qt6::Widgets Qt6::Gui Qt6::Network)
+
+# The GUI reports its own version — in the rail, in the log's startup line, and to the release check,
+# which compares it against the newest tag the repository has published. Stamped from the same
+# MUFFIN_VERSION the helper and the CLI carry, so the number the running window shows is the number the
+# package is named after; before this the GUI alone read a literal out of main.cpp, and a release built
+# from a tag still reported the version that literal happened to hold.
+target_compile_definitions(Muffin PRIVATE MUFFIN_VERSION="${MUFFIN_VERSION}")
 
 # ---- Windows resources: icon + elevation manifest ---------------------------
 # Everything a Windows executable has to expose before its code runs lives in

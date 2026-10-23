@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- "A newer build exists, and it is above you": an arrow down inside a ring, with the line a download
+     lands on. The rail's other glyphs name places (profiles, logs, history) and one action (settings);
+     this one names an event that happened to the application itself, so it is the only glyph in the
+     column that arrives, leaves and pulses — which is why it is drawn as a ring rather than another
+     plate: a circle reads as "a thing you have been told", the squares read as "places you can go".
+     Monochrome currentColor + declared 24px box — see icons/app.svg for the contract. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.8"/>
+    <path d="M12 7.2v6.5"/>
+    <path d="M9.1 10.9 12 13.9 14.9 10.9"/>
+    <path d="M8.5 16.5h7"/>
+</svg>

@@ -7,14 +7,18 @@
 // Deliberately NOT covered here: anything that would spawn pkexec or winws, and real network
 // reachability (the ping test only asserts that a verdict arrives). DownloadDialog is constructed but
 // never started: startFetch() is the only thing in it that touches GitHub, and a test suite must not
-// depend on that answer.
+// depend on that answer. UpdateChecker::check() is the release feed's one socket and is likewise never
+// called — the badge section hands the window the answer it would have carried instead.
 //
-// A constructed MainWindow is covered in exactly one place — the watchdog section, which needs the real
-// catalog and journal to prove that a dead bypass turns into an offer. It is built without a window
-// manager (offscreen) and its three seams that would need a desktop, a network or a root prompt are
-// overridden; the store it reads is the redirected test identity, and that section skips itself when the
-// harness has not redirected it. Motion is the one thing in the suite that has to put it on screen: a
-// page behind another page has nothing to appear on, so a fade can only be watched on a visible window.
+// A constructed MainWindow is covered in two places: the watchdog section, which needs the real catalog
+// and journal to prove that a dead bypass turns into an offer, and the release-badge section, which needs
+// the header the badge lives in. Both are built without a window manager (offscreen) — the watchdog's
+// three seams that would need a desktop, a network or a root prompt are overridden — and both read the
+// redirected test identity, skipping themselves when the harness has not redirected it. Neither one asks
+// the release feed anything: the GitHub lookup is armed by main.cpp, which is not part of this binary, so
+// a window here cannot reach the network however the suite drives it. Motion is the one thing in the
+// suite that has to put a window on screen: a page behind another page has nothing to appear on, so a
+// fade can only be watched on a visible window — and so can a badge that breathes.
 
 #include "BlockcheckEngine.h"
 #include "IZapretBackend.h"
@@ -33,6 +37,7 @@
 #include "SettingsPage.h"
 #include "Strategy.h"
 #include "Theme.h"
+#include "UpdateChecker.h"
 #include "ZapretDownloader.h"
 #include "ZapretPaths.h"
 
@@ -2263,6 +2268,28 @@ protected:
 
 } // namespace
 
+// True when the harness has redirected the config location into the build tree. A window builds its own
+// Settings from the process identity and writes the path it locates into that store, so a section that
+// constructs one runs only where the redirect took effect — requiring the path to sit under the binary's
+// own directory is what makes that safe rather than merely likely: a developer running the suite from a
+// shell where XDG_CONFIG_HOME is just ~/.config has that variable set, and a check against it alone would
+// let the test write into their real config home. Anywhere else the section skips.
+//
+// Spelled once because two sections need it: the watchdog's acting half and the release badge.
+static bool configRedirectedIntoBuildTree()
+{
+    const QString buildTree = QCoreApplication::applicationDirPath();
+    const QString xdgConfig = qEnvironmentVariable("XDG_CONFIG_HOME");
+    const QString configBase =
+        QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    QDir().mkpath(xdgConfig);   // the store's directory is created on its first write anyway
+    const QString canonicalXdg = QDir(xdgConfig).canonicalPath();
+    const QString canonicalBuild = QDir(buildTree).canonicalPath();
+    return !xdgConfig.isEmpty() && !canonicalXdg.isEmpty()
+           && QDir::cleanPath(configBase) == QDir::cleanPath(xdgConfig)
+           && canonicalXdg.startsWith(canonicalBuild + QLatin1Char('/'));
+}
+
 static void testWatchdog()
 {
     std::printf("\n[Watchdog]\n");
@@ -2350,23 +2377,9 @@ static void testWatchdog()
 
     // ---- the acting half, on a real window ----
     //
-    // A window builds its own Settings from the process identity, so this section runs only where the
-    // harness has redirected the config location into the build tree (CMake sets XDG_CONFIG_HOME to
-    // <build>/test-home/config for uitest). Requiring the path to sit under the binary's own directory
-    // is what makes that safe rather than merely likely: a developer running the suite from a shell
-    // where XDG_CONFIG_HOME is just ~/.config has that variable set, and a check against it alone would
-    // let the test write into their real config home. Anywhere else it skips.
-    const QString buildTree = QCoreApplication::applicationDirPath();
-    const QString xdgConfig = qEnvironmentVariable("XDG_CONFIG_HOME");
-    const QString configBase =
-        QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
-    QDir().mkpath(xdgConfig);   // the store's directory is created on its first write anyway
-    const QString canonicalXdg = QDir(xdgConfig).canonicalPath();
-    const QString canonicalBuild = QDir(buildTree).canonicalPath();
-    const bool redirected = !xdgConfig.isEmpty() && !canonicalXdg.isEmpty()
-                            && QDir::cleanPath(configBase) == QDir::cleanPath(xdgConfig)
-                            && canonicalXdg.startsWith(canonicalBuild + QLatin1Char('/'));
-    if (!redirected) {
+    // See configRedirectedIntoBuildTree() for why this section, and any other that constructs a
+    // MainWindow, refuses to run outside a redirected config location.
+    if (!configRedirectedIntoBuildTree()) {
         std::printf("  SKIP  the window section needs XDG_CONFIG_HOME redirected into the build tree "
                     "(run it through ctest)\n");
         return;
@@ -2595,9 +2608,116 @@ static void testWatchdog()
     store.setWatchdogIntervalMin(savedInterval);
 }
 
+// A release answer has to become something a person can see, and the seeing is the window's claim
+// rather than the checker's: UpdateChecker decides whether a build is ahead, MainWindow decides what an
+// offer looks like. This section hands the window an answer by hand — the same way the watchdog section
+// hands it a verdict — because the one method that would produce an answer on its own opens a socket to
+// GitHub, and no suite can afford to be waiting on that.
+static void testUpdateNotice()
+{
+    std::printf("\n[Update notice]\n");
+
+    // The delay is a number the feature was specified with, and one a test can hold the code to.
+    check(MainWindow::kUpdateCheckDelayMs == 5000,
+          "the first lookup waits the five seconds the startup was specified for");
+
+    if (!configRedirectedIntoBuildTree()) {
+        std::printf("  SKIP  the notice belongs to a window, and constructing one needs XDG_CONFIG_HOME "
+                    "redirected into the build tree (run it through ctest)\n");
+        return;
+    }
+
+    // A two-profile tree, for the same reason the watchdog section wants one: pointed at nothing, the
+    // window opens its settings page instead of settling into the chrome this section is checking.
+    QTemporaryDir dir;
+    check(dir.isValid(), "temporary directory for the fixture tree");
+    const QString root = dir.filePath(QStringLiteral("zapret/linux"));
+    check(makeWatchdogTree(root), "a two-profile linux tree written");
+
+    Settings store;
+    const QString savedPath = store.zapretPath();
+    store.setZapretPath(root);
+
+    {
+        // Never shown at first, and never asking: scheduleUpdateCheck() is main.cpp's call, which is
+        // exactly why a window constructed here cannot reach the network.
+        MainWindow window;
+        QToolButton *badge = window.updateButton();
+        check(badge != nullptr, "the header carries the release badge");
+        if (!badge) {
+            store.setZapretPath(savedPath);
+            return;
+        }
+
+        check(badge->objectName() == QLatin1String("windowButton"),
+              "…as a control of the window chrome, which is where the design puts it");
+        check(badge->property("role").toString() == QLatin1String("update"),
+              "…told apart from minimise and close by a role, so both sheets can style it alone");
+        check(badge->property("glyph").toString() == QLatin1String("update-available"),
+              "…and carrying the glyph property applyTheme() re-bakes, so a theme change keeps it lit");
+
+        // ---- before any answer, nothing is offered ----
+        check(badge->isHidden(), "a window nobody has answered yet shows nothing");
+        check(!window.updateNoticeShown(), "…and says so through the window's own predicate");
+        check(window.updateVersion().isEmpty(), "…with no version on offer to name");
+
+        // ---- the answer arrives ----
+        const int lines = window.logPanel()->storedLineCount();
+        window.onUpdateAvailable(QStringLiteral("v0.5.0"),
+                                 QStringLiteral("https://example.invalid/releases/tag/v0.5.0"));
+        check(window.updateNoticeShown(),
+              "an answer naming a newer build raises the badge — the visible half of the feature");
+        check(!badge->isHidden(), "…which is on its way to being seen, window on screen or not");
+        check(window.updateVersion() == QLatin1String("v0.5.0"),
+              "…quoting the tag the feed published rather than a re-spelling of it");
+        check(window.logPanel()->storedLineCount() == lines + 1,
+              "…and recorded in the journal as well as shown, so the offer outlives the glance");
+
+        // The words the press will ask with, read out of the catalog rather than written here.
+        const QString question = LanguageManager::tr(QStringLiteral("update.question"),
+                                                     QStringLiteral("v0.5.0"));
+        check(question.contains(QStringLiteral("v0.5.0")),
+              "the question names the version it is offering");
+        check(!LanguageManager::tr(QStringLiteral("update.title")).isEmpty(),
+              "…and the dialog has a title to ask it under");
+        check(!LanguageManager::tr(QStringLiteral("update.badge_tip")).isEmpty(),
+              "…and the icon-only control has an accessible name, which is what a glyph with no label "
+              "leaves a screen reader to read");
+
+        // A second answer replaces the offer rather than stacking a second badge on it or losing the
+        // first: the feed can only be ahead by one release, and pressing it must open the newest page.
+        window.onUpdateAvailable(QStringLiteral("v0.6.0"),
+                                 QStringLiteral("https://example.invalid/releases/tag/v0.6.0"));
+        check(window.updateVersion() == QLatin1String("v0.6.0"),
+              "a newer answer replaces the version the badge is offering");
+        check(window.updateNoticeShown(), "…without taking the offer away");
+
+        // ---- the pulse, on a badge that can be seen ----
+        // Breathing is a claim about a widget on screen, so it is checked the way the motion section
+        // checks every other one: with the window actually shown, under the offscreen platform.
+        const bool motionWasOn = Motion::enabled();
+        Motion::setEnabled(true);
+        window.show();
+        QTest::qWait(40);
+        check(badge->isVisible(), "the badge is on screen once its window is");
+        check(Motion::isBreathing(badge),
+              "…and breathing, which is what tells a person an icon has just arrived rather than always "
+              "lived in that corner");
+        Motion::setEnabled(false);
+        window.onUpdateAvailable(QStringLiteral("v0.7.0"), QStringLiteral("https://example.invalid/r"));
+        check(!Motion::isBreathing(badge) && window.updateNoticeShown(),
+              "with motion off the offer still arrives: the switch governs the movement, never the news");
+        Motion::setEnabled(motionWasOn);
+        window.hide();
+    }
+
+    store.setZapretPath(savedPath);
+}
+
 int main(int argc, char **argv)
 {
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
+
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("MuffinTest"));
@@ -2623,6 +2743,7 @@ int main(int argc, char **argv)
     testHistoryPage();
     testMotion();
     testWatchdog();
+    testUpdateNotice();
 
     std::printf("\n=== %s (%d failures) ===\n", g_failures ? "FAILED" : "ALL PASS", g_failures);
     return g_failures ? 1 : 0;

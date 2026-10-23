@@ -23,6 +23,7 @@
 #include "ZapretManager.h"
 #include "PrivilegeHelper.h"
 #include "MuffinInstallHelper.h"
+#include "UpdateChecker.h"
 #include "IZapretBackend.h"
 #include "LinuxBackend.h"
 #include "WindowsBackend.h"
@@ -1817,6 +1818,127 @@ int main(int argc, char **argv)
         check(ZapretSource::preferredExtensions(Strategy::Platform::Linux).first()
                   == QLatin1String("tar.gz"),
               "and so is the linux one");
+    }
+
+    // ---- the application's own release check ----
+    //
+    // Only the pure half is exercised, and deliberately so: check() is the one method here that opens a
+    // socket, and a suite that calls it asserts whatever api.github.com feels like answering that day —
+    // offline, rate-limited, or mid-release. Everything below hands UpdateChecker a captured API body and
+    // checks the decision, exactly the way the ZapretSource sections above do for the payload feeds.
+    out << "\n[UpdateChecker]\n";
+    {
+        auto releaseJson = [](const QByteArray &json) {
+            return QJsonDocument::fromJson(json).object();
+        };
+
+        // The feed has to name THIS project. A copy-paste from the payload downloader's endpoints would
+        // leave the application asking bol-van whether it is up to date, and answering itself.
+        check(UpdateChecker::repository() == QLatin1String("F0RSES/zapret-muffin-gui"),
+              "the checker names the application's own repository");
+        check(UpdateChecker::apiUrl() ==
+                  QLatin1String("https://api.github.com/repos/F0RSES/zapret-muffin-gui/releases/latest"),
+              "and asks its latest release, and nothing else");
+        check(UpdateChecker::releasesPageUrl() ==
+                  QLatin1String("https://github.com/F0RSES/zapret-muffin-gui/releases"),
+              "…with the human page derived from the same repository, so the two cannot name different ones");
+
+        // A tag and a stamped version are the same number written two ways. Without this, "v0.4.9"
+        // against "0.4.9" is a difference, and the newest release the project has ever published would
+        // be announced as an update on every single start.
+        check(UpdateChecker::normalizeTag(QStringLiteral("v0.4.9")) == QLatin1String("0.4.9"),
+              "a leading v is the marker it looks like");
+        check(UpdateChecker::normalizeTag(QStringLiteral("V0.4.9")) == QLatin1String("0.4.9"),
+              "…in either case");
+        check(UpdateChecker::normalizeTag(QStringLiteral("  v0.4.9  ")) == QLatin1String("0.4.9"),
+              "whitespace around a tag is not part of it");
+        check(UpdateChecker::normalizeTag(QStringLiteral("0.4.9")) == QLatin1String("0.4.9"),
+              "a tag that never carried the marker is left alone");
+        check(UpdateChecker::normalizeTag(QStringLiteral("VS2019")) == QLatin1String("VS2019"),
+              "…and a name whose first letter is not a marker keeps it: stripping it would invent a "
+              "different version out of a real one");
+
+        // Numeric order, component by component. This is the entire reason compareVersions() exists
+        // rather than a QString comparison: as text, "0.4.10" sorts before "0.4.9", so the tenth patch
+        // release of the 0.4 line would be reported as OLDER than the ninth and never offered to anyone.
+        check(UpdateChecker::compareVersions(QStringLiteral("0.4.10"), QStringLiteral("0.4.9")) > 0,
+              "0.4.10 is ahead of 0.4.9, which a text comparison gets backwards");
+        check(UpdateChecker::compareVersions(QStringLiteral("0.4.9"), QStringLiteral("0.4.10")) < 0,
+              "…and the reverse reads the same way from the other side");
+        check(UpdateChecker::isNewer(QStringLiteral("v0.4.10"), QStringLiteral("0.4.9")),
+              "a published tag is compared the same way as a bare number");
+        check(!UpdateChecker::isNewer(QStringLiteral("v0.4.9"), QStringLiteral("0.4.9")),
+              "the version already running is not an update");
+        check(!UpdateChecker::isNewer(QStringLiteral("v0.4.8"), QStringLiteral("0.4.9")),
+              "nor is one behind it");
+        check(UpdateChecker::isNewer(QStringLiteral("v1.0.0"), QStringLiteral("0.9.9")),
+              "the next major line is ahead of the last one");
+        check(UpdateChecker::compareVersions(QStringLiteral("0.4"), QStringLiteral("0.4.0")) == 0,
+              "a component nobody wrote down is zero rather than smaller");
+        check(UpdateChecker::compareVersions(QStringLiteral("0.5"), QStringLiteral("0.4.9")) > 0,
+              "…which does not make a shorter version lose to a longer one");
+
+        // The answers a real release feed gives, captured rather than imagined. A release published with
+        // the marker the tag always carries has to be read against the version stamped without one.
+        const QJsonObject newest = releaseJson(QByteArrayLiteral(R"JSON({
+  "tag_name": "v0.5.0",
+  "name": "Muffin 0.5.0",
+  "html_url": "https://github.com/F0RSES/zapret-muffin-gui/releases/tag/v0.5.0",
+  "prerelease": false,
+  "assets": [
+    {"name": "muffin_0.5.0_amd64.deb", "browser_download_url": "https://example.invalid/muffin_0.5.0_amd64.deb"}
+  ]
+})JSON"));
+        check(UpdateChecker::tagFromRelease(newest) == QLatin1String("v0.5.0"),
+              "the tag is what names the version");
+        check(UpdateChecker::isNewer(UpdateChecker::tagFromRelease(newest),
+                                     QStringLiteral(MUFFIN_VERSION)),
+              QStringLiteral("and a 0.5.0 release is ahead of the %1 this build is stamped with")
+                  .arg(QStringLiteral(MUFFIN_VERSION)));
+        check(UpdateChecker::downloadUrlFromRelease(newest) ==
+                  QLatin1String("https://github.com/F0RSES/zapret-muffin-gui/releases/tag/v0.5.0"),
+              "…while the URL offered to the user is the release page, not an asset: the dialog asks "
+              "whether to go and download, and a single asset would pick the package for them");
+
+        // The two ways a release record can be incomplete, and the one way it can be no record at all.
+        check(UpdateChecker::tagFromRelease(releaseJson(QByteArrayLiteral(
+                  R"JSON({"name": "Release 2024-05"})JSON"))) == QLatin1String("Release 2024-05"),
+              "a release published with only a name still says which version it is");
+        check(UpdateChecker::downloadUrlFromRelease(releaseJson(QByteArrayLiteral(
+                  R"JSON({"tag_name": "v9.9.9"})JSON"))) == UpdateChecker::releasesPageUrl(),
+              "a body with no page of its own falls back to the releases list, so the dialog always "
+              "has a real address to open");
+        check(UpdateChecker::tagFromRelease(releaseJson(QByteArrayLiteral(
+                  R"JSON({"message": "Not Found"})JSON"))).isEmpty(),
+              "an API error body is not mistaken for a release");
+        check(UpdateChecker::tagFromRelease(QJsonObject()).isEmpty(),
+              "…and neither is no body at all");
+
+        // What cannot be a version cannot be an update either. Each of these is a way the feature could
+        // nag about a build that is not actually ahead, which is the failure mode that trains a user to
+        // dismiss the dialog without reading it.
+        check(!UpdateChecker::isNewer(QString(), QStringLiteral("0.4.9")),
+              "no tag at all is not an update");
+        check(!UpdateChecker::isNewer(QStringLiteral("banana"), QStringLiteral("0.4.9")),
+              "an unparseable tag is not one either");
+        check(!UpdateChecker::isNewer(QStringLiteral("v0.4.10-rc1"), QStringLiteral("0.4.10")),
+              "a pre-release tail orders by its numeric part, so a candidate of the version you run "
+              "does not claim to be ahead of it");
+        check(!UpdateChecker::isNewer(QStringLiteral("v9.9.9"), QString()),
+              "…and a build that does not know its own version is never offered one");
+
+        // The instance half, with no socket opened: what the answer will be judged against, and the
+        // state a caller can read before anything has been asked.
+        UpdateChecker checker;
+        // The default is read, never guessed: a checker nobody gave a version compares against whatever
+        // the process itself reports, which is the only number that can be true about the running build.
+        check(checker.currentVersion() == QCoreApplication::applicationVersion(),
+              "with no version set, the checker reads the one the process reports");
+        checker.setCurrentVersion(QStringLiteral("0.4.9"));
+        check(checker.currentVersion() == QLatin1String("0.4.9"),
+              "…unless the caller names one, which is what puts the decision under test");
+        check(!checker.isChecking(), "a checker nobody has asked is not holding a request");
+        check(checker.latestVersion().isEmpty(), "…and has learned nothing yet");
     }
 
     // ---- the pieces of an install that need neither a socket nor a subprocess ----

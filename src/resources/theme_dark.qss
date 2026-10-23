@@ -96,6 +96,14 @@ QToolButton#windowButton:pressed { background-color: #1F2833; border-color: #2A3
 QToolButton#windowButton:focus { outline: none; border-color: #2E2545; }
 QToolButton#windowButton[role="close"]:hover { background-color: #F87171; border-color: #F87171; color: #0B0C10; }
 QToolButton#windowButton[role="close"]:pressed { background-color: #E05B5B; border-color: #E05B5B; }
+/* The release badge is that row's one conditional control: absent until the feed names a build ahead of
+   this one, then shown breathing in the sheet's action colour. That colour is baked into the glyph by
+   applyTheme() — a rule cannot recolour a pixmap, the same reason the journal's alert lives on its frame —
+   so the sheet's job here is only the plate: hover answers the badge like it answers the two controls
+   beside it, in cyan rather than in the neutral grey of window furniture. */
+QToolButton#windowButton[role="update"] { border-color: transparent; }
+QToolButton#windowButton[role="update"]:hover { background-color: #10222B; border-color: #22D3EE; }
+QToolButton#windowButton[role="update"]:pressed { background-color: #16303B; border-color: #22D3EE; }
 
 /* ---------- header ---------- */
 QWidget#headerBar { background-color: #0B0C10; }

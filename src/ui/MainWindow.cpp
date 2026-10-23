@@ -14,6 +14,7 @@
 #include "Settings.h"
 #include "SettingsPage.h"
 #include "Theme.h"
+#include "UpdateChecker.h"
 #include "ZapretManager.h"
 #include "ZapretPaths.h"
 
@@ -21,6 +22,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -168,6 +170,12 @@ MainWindow::MainWindow(QWidget *parent)
             m_log->appendLine(error, LogPanel::Warn);
     });
 
+    // The release feed for the application itself. Constructed here and armed from outside — the window
+    // never asks on its own, because a GitHub lookup started by a constructor would be a constructor
+    // that only answers on a machine with a network, and this suite constructs windows on machines
+    // without one. scheduleUpdateCheck() is the seam, and main.cpp is the only caller.
+    m_update = new UpdateChecker(this);
+
     // A fixed 900x700 canvas with no system frame at all. The dashboard is laid out around a 200 px ring
     // and a footer that must stay centred, so a maximised or resized window is a different design that
     // nobody drew — hence setFixedSize. And because the mock draws its own header, the platform title bar
@@ -275,6 +283,13 @@ MainWindow::~MainWindow()
         // keeping. flush() writes what is pending on this thread and returns once the file matches.
         m_history->disconnect(this);
         m_history->flush();
+    }
+    if (m_update) {
+        // Also the same rule, with a sharper edge: the release feed is the one object here that answers
+        // on a clock nobody controls. A window closed inside the five-second wait, or while the request
+        // is in flight, must not be re-entered by an update offer raised on a half-deleted UI — and the
+        // badge it would try to show is a child being torn down with it.
+        m_update->disconnect(this);
     }
     if (m_ping) {
         m_ping->stop();
@@ -420,6 +435,100 @@ void MainWindow::updateLanguageButton()
     }
 }
 
+// ---- the release check ------------------------------------------------------
+//
+// Nothing in this block decides whether an update exists: UpdateChecker's own pure functions do that,
+// and this is the part that turns "the feed is ahead" into something a person can see and press.
+
+void MainWindow::tintUpdateBadge()
+{
+    if (!m_updateButton)
+        return;
+    // accentSecondary rather than iconColor: the badge's two neighbours are window furniture and take the
+    // neutral grey, and this one is an offer — drawn in the same grey it would read as a control that
+    // appeared out of nowhere. It is the sheet's own action colour, the one progress and links carry, and
+    // because the glyph is a baked pixmap the decision has to be made at bake time: no rule could reach
+    // it afterwards.
+    m_updateButton->setIcon(Theme::icon(QStringLiteral("update-available"),
+                                        Theme::accentSecondary(), 16));
+}
+
+void MainWindow::scheduleUpdateCheck()
+{
+    if (!m_update)
+        return;
+    // The wait is the whole design of this call. A lookup fired from the constructor lands in the same
+    // turn of the event loop as the first paint, the zapret scan and the ping service's opening cycle,
+    // and the user's first impression of the application would be a window that took its time appearing
+    // in order to ask a question about itself. Five seconds is after all of that, and before anybody has
+    // finished reading the journal's opening lines. The context object is the window, so closing it
+    // early takes the pending request along with it.
+    QTimer::singleShot(kUpdateCheckDelayMs, this, [this] { m_update->check(); });
+}
+
+bool MainWindow::updateNoticeShown() const
+{
+    // isHidden rather than isVisible, and deliberately so. "There is an offer to look at" is the
+    // window's claim and it stands whether or not a desktop is currently showing it: a badge raised on a
+    // window that lives in the tray is still an offer, and a test of the decision must not depend on
+    // whether a compositor exists to obey it.
+    return m_updateButton && !m_updateButton->isHidden();
+}
+
+void MainWindow::onUpdateAvailable(const QString &version, const QString &downloadUrl)
+{
+    m_updateVersion = version;
+    m_updateUrl = downloadUrl;
+
+    // Recorded as well as shown: the badge is a glance and the line is the record, and a person who was
+    // away from the window for the five seconds the check takes deserves to see that it ran.
+    if (m_log)
+        m_log->appendLine(LanguageManager::tr(QStringLiteral("update.log.found"), version),
+                          LogPanel::Info);
+    if (!m_updateButton)
+        return;
+
+    m_updateButton->show();
+    // The breath is what makes an icon that arrived say "this is new" rather than "this is chrome".
+    // Motion::startBreath() refuses a widget nobody can see and refuses everything when the user has
+    // turned animation off — both refusals are the right answer here, since a badge that breathes and a
+    // badge that simply sits there are both the offer. Asking Motion::enabled() first would only be a
+    // second spelling of a rule Motion already owns.
+    Motion::startBreath(m_updateButton);
+}
+
+void MainWindow::onUpdateBadgeClicked()
+{
+    const QString version = m_updateVersion;
+    // The checker always names a page, but the badge can only be raised by a signal — and a signal from
+    // anything other than the checker (a test, a future second caller) can name none. The repository's
+    // releases page is the answer that is right when nothing more specific is known.
+    const QString url = m_updateUrl.isEmpty() ? UpdateChecker::releasesPageUrl() : m_updateUrl;
+
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this, LanguageManager::tr(QStringLiteral("update.title")),
+        LanguageManager::tr(QStringLiteral("update.question"), version),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    // The offer has been taken up, so it stops breathing — but it stays on screen. A badge that vanished
+    // the moment it was pressed would claim the update had been installed, and that is a thing this
+    // feature does not do: the user is being sent to a browser with a download in it, not handed one.
+    Motion::stopBreath(m_updateButton);
+
+    // The desktop's own browser, because that answer is already written on every platform this
+    // application runs on, and naming a program here would be wrong on the next one. openUrl() reports
+    // false only when nothing is registered to handle a web address at all — a bare session, a stripped
+    // container — and a dead click deserves a line and a footer message rather than silence.
+    if (!QDesktopServices::openUrl(QUrl(url))) {
+        const QString reason = LanguageManager::tr(QStringLiteral("update.open_failed"));
+        if (m_log)
+            m_log->appendLine(reason + QStringLiteral(": ") + url, LogPanel::Warn);
+        showTransientMessage(reason, 8000);
+    }
+}
+
 // The rail's icon-only button. `textKey` names a catalog entry rather than a sentence: the button shows
 // a glyph and nothing else, so the key is what the accessible name, the tooltip and a later retranslate
 // all read off the same widget.
@@ -537,7 +646,18 @@ QWidget *MainWindow::buildHeader()
     // goes through close() and therefore closeEvent(), so the tray policy — hide when there is a tray to
     // hide into, quit when there is not — is the same one the X on a normal frame and Ctrl+Q follow. A
     // separate "hard quit" stays on Ctrl+Q / the tray menu; this button is the ordinary close.
+    // The release badge, in front of the two controls a framed window would have given us for free. It
+    // is a chrome button because it lives in their row, and it is the only one of the three that is not
+    // there to begin with: an offer can only be made after the feed has answered, and a greyed-out
+    // download glyph sitting in the header from the first frame would be the interface claiming a thing
+    // it does not yet know.
     row->addSpacing(6);
+    m_updateButton = addWindowButton(row, QStringLiteral("update-available"),
+                                     QStringLiteral("update.badge_tip"), "update");
+    m_updateButton->hide();
+    tintUpdateBadge();
+    connect(m_updateButton, &QToolButton::clicked, this, &MainWindow::onUpdateBadgeClicked);
+
     m_minButton = addWindowButton(row, QStringLiteral("window-minimize"),
                                   QStringLiteral("window.minimize"), "min");
     connect(m_minButton, &QToolButton::clicked, this, [this] { showMinimized(); });
@@ -1252,6 +1372,22 @@ void MainWindow::wire()
     connect(m_blockcheck, &BlockcheckEngine::testFinished, this,
             &MainWindow::onBlockcheckFinished);
 
+    // The release feed's three answers. Only the first one touches the interface: "you are current" and
+    // "I could not ask" are facts for the journal and nothing else. An updater that interrupted a person
+    // every time a cable was unplugged would be switched off within a week, and a check that says nothing
+    // on the ordinary answer leaves the user guessing whether it ran.
+    connect(m_update, &UpdateChecker::updateAvailable, this, &MainWindow::onUpdateAvailable);
+    connect(m_update, &UpdateChecker::upToDate, this, [this](const QString &version) {
+        if (m_log)
+            m_log->appendLine(LanguageManager::tr(QStringLiteral("update.log.current"), version),
+                              LogPanel::Info);
+    });
+    connect(m_update, &UpdateChecker::checkFailed, this, [this](const QString &message) {
+        if (m_log)
+            m_log->appendLine(LanguageManager::tr(QStringLiteral("update.log.failed"), message),
+                              LogPanel::Warn);
+    });
+
     // The language can move while this window is open (the rail's flag button), and nothing else tells
     // the widgets: one signal, one walk over the tree. updateStatusUi() is part of retranslateUi(), so
     // the state-derived strings move with it.
@@ -1625,6 +1761,11 @@ void MainWindow::applyTheme()
     if (QLabel *logo = findChild<QLabel *>(QStringLiteral("brandLogo")))
         logo->setPixmap(Theme::icon(QStringLiteral("app"), Theme::accent(), kBrandGlyphPx)
                             .pixmap(kBrandGlyphPx, kBrandGlyphPx));
+
+    // The release badge is the one chrome glyph whose colour is a statement rather than a tint, so it is
+    // re-baked after the neutral pass above rather than left in it. One spelling of that colour lives in
+    // tintUpdateBadge(), which the header also calls when it builds the badge.
+    tintUpdateBadge();
 
     // The power ring is painted from Theme::accent()/pingOk() rather than from the sheet, so it needs
     // telling that the palette moved. The profile rows bake their menu glyph and their ping chips the

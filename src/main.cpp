@@ -64,7 +64,18 @@ int main(int argc, char **argv)
     // is what the display name, the .desktop entry and the installer all use.
     QApplication::setOrganizationName(QStringLiteral("F0RSES"));
     QApplication::setApplicationDisplayName(QStringLiteral("Muffin"));
-    QApplication::setApplicationVersion(QStringLiteral("0.4.1"));
+    // The version CMake stamps in with MUFFIN_VERSION — the same value the .deb's Version field, the
+    // installer's AppVersion and the release tag are built from, and the one muffin-cli and
+    // muffin-install-helper already report. Reading a hardcoded literal instead would leave the running
+    // application naming a version that no package carries, which is exactly the number the release
+    // check has to be right about: an app that thinks it is 0.4.1 will go on announcing 0.4.9 forever.
+#ifdef MUFFIN_VERSION
+    QApplication::setApplicationVersion(QStringLiteral(MUFFIN_VERSION));
+#endif
+    // A build configured without the define — a compiler invoked by hand, an emscripten tree — leaves the
+    // version empty, and empty is the honest answer rather than a guess: the release check compares an
+    // unknown version as "no order to report", so an unstamped build never nags about an upgrade it
+    // cannot position itself against.
     // Linux desktop environments match a running app to its .desktop entry through this id.
     QApplication::setDesktopFileName(QStringLiteral("Muffin"));
     // Closing the window must not kill a running zapret unless the user chose "Выход" in the tray;
@@ -142,6 +153,14 @@ int main(int argc, char **argv)
                      });
 
     window.show();
+
+    // The release check, five seconds after the window is on screen rather than from inside its
+    // constructor. Two reasons and both matter: the startup turn already holds the first paint, the
+    // zapret scan and the ping service's opening cycle, and a GitHub round trip added to it costs the
+    // launch the very seconds it is meant to be quick about — while a lookup started by the constructor
+    // would be started by the test suite too, which is the one thing this project's tests refuse to
+    // depend on. The window owns the delay; main.cpp owns the decision to ask.
+    window.scheduleUpdateCheck();
 
     return app.exec();
 }

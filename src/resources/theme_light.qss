@@ -85,6 +85,12 @@ QToolButton#windowButton:pressed { background-color: #D1D5DB; }
 QToolButton#windowButton:focus { outline: none; border-color: #DDD6FE; }
 QToolButton#windowButton[role="close"]:hover { background-color: #DC2626; border-color: #DC2626; color: #FFFFFF; }
 QToolButton#windowButton[role="close"]:pressed { background-color: #B91C1C; border-color: #B91C1C; }
+/* The release badge, and the same note as the dark sheet: its colour is baked into the glyph by
+   applyTheme() (the light sheet's accent2, #0891B2 — cyan that works on a white page), and what the sheet
+   owns is the plate it lands on. */
+QToolButton#windowButton[role="update"] { border-color: transparent; }
+QToolButton#windowButton[role="update"]:hover { background-color: #ECFEFF; border-color: #0891B2; }
+QToolButton#windowButton[role="update"]:pressed { background-color: #CFFAFE; border-color: #0891B2; }
 
 /* ---------- header ---------- */
 QWidget#headerBar { background-color: #F3F4F6; }

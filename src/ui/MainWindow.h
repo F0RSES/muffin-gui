@@ -42,6 +42,7 @@ class PingService;
 class ProfileCard;
 class Settings;
 class SettingsPage;
+class UpdateChecker;
 class ZapretManager;
 
 // The application window: a narrow icon rail down the left, one full-width page at a time to its right,
@@ -211,6 +212,36 @@ public:
     // prove a row finished where the layout put it needs the same list to walk.
     QList<ProfileCard *> cardRows() const;
 
+    // ---- the release check --------------------------------------------------------------
+    //
+    // Whether the application itself is the newest thing its own repository has released. Zapret is
+    // downloaded and replaced by the download path; nothing until now ever asked about Muffin, so a
+    // user running 0.4.1 had no way to learn that 0.4.9 existed unless they went looking.
+    //
+    // The lookup is not started by the constructor, and that is deliberate rather than an oversight:
+    // the same rule DownloadDialog lives by is that the one method touching GitHub is only ever called
+    // by hand, so a suite that constructs a window can never be depending on an answer, a network or a
+    // rate limit. main.cpp arms the delay after the window is on screen; the delay exists because a
+    // lookup issued while the first paint is still happening costs the startup the seconds it was
+    // supposed to save.
+    //
+    // How long the window waits before asking the first time. Five seconds is after the interface has
+    // settled and before anybody has finished reading the log's opening lines.
+    static constexpr int kUpdateCheckDelayMs = 5000;
+    // Arm that wait. Called once, from main.cpp, after the window is shown; calling it again asks the
+    // feed again, which is the whole point of keeping it a method rather than a line in the constructor.
+    void scheduleUpdateCheck();
+    // The badge, for the same reason powerButton() is exposed: whether the offer is on screen is the
+    // window's claim, and a suite cannot check a claim it has no way to look at.
+    QToolButton *updateButton() const { return m_updateButton; }
+    // True when the window has decided to show the badge. Deliberately NOT the widget's isVisible():
+    // a badge on a window that is hidden in the tray is not "on screen" in Qt's sense even though the
+    // offer is live, and a test of the decision has to be independent of whether a desktop exists.
+    bool updateNoticeShown() const;
+    // The version on offer, "" until an answer names one. Also the window's hook for asserting that the
+    // number the badge was raised for is the number the dialog will name.
+    QString updateVersion() const { return m_updateVersion; }
+
     // ---- rail navigation ------------------------------------------------------------
     // Pages are addressed by index so a test — and the unread-log alert below — can name the visible
     // one without walking the widget tree.
@@ -263,6 +294,11 @@ public:
     void bringToFront();
 
 public slots:
+    // The release feed named a build ahead of this one. Raises the badge and puts it breathing; nothing
+    // else, because an offer is not an event and a dialog that arrives on its own is the difference
+    // between an updater and a nag. Public for the same reason onWatchdogResult is: the answer belongs
+    // to a network that a suite must not depend on, so the suite hands the verdict in by hand.
+    void onUpdateAvailable(const QString &version, const QString &downloadUrl);
     // The watchdog timer's answer. Guards first (watchdogShouldProbe), then asks the shared engine for
     // one quiet verdict on watchdogQuickHost() — quiet meaning the journal, the profiles-page meter and
     // the verdict sheet all stay out of it, because this cycle was not asked for and the window is most
@@ -310,6 +346,10 @@ protected:
 
 private slots:
     void onStopRequested();
+    // The badge was pressed. Asks the one question and, on yes, hands the release page to the desktop's
+    // browser — the extent of what this feature does without root, and the reason the answer is a
+    // question rather than an action.
+    void onUpdateBadgeClicked();
     // The power button: stop what is running, otherwise start what the route pill names. One slot for
     // both because the button is one control whose meaning the state decides.
     void onPowerClicked();
@@ -368,6 +408,11 @@ private:
     // property is what the QSS [alert="true"] rule keys off, so it needs the same unpolish/polish
     // dance ProfileCard uses for [selected] and [error].
     void setLogAlert(bool on);
+    // Bake the release badge's glyph in the current theme's action colour. One method because two
+    // places need it — the header builds the badge, and a theme change re-bakes every glyph in the
+    // window — and a colour spelled twice is a colour that drifts out of agreement between the first
+    // frame and the tenth.
+    void tintUpdateBadge();
     // The one line the header's chip is allowed to be built from: text plus colour from the state.
     void setConnectionChip(const QString &text, const QString &statusKind);
     // Create the tray icon if the platform has a tray host. Idempotent; returns whether one exists.
@@ -478,6 +523,13 @@ private:
     QPushButton *m_navSettings = nullptr;  // the settings glyph; checked while PageSettings is up
     QToolButton *m_minButton = nullptr;    // frameless-window chrome
     QToolButton *m_closeButton = nullptr;
+    // The release badge: a third windowButton that is hidden until an answer names a newer build. It is
+    // chrome-shaped for the same reason the two beside it are — it lives in the header's control row and
+    // has to read as part of it — but unlike them its press opens a question rather than the window.
+    QToolButton *m_updateButton = nullptr;
+    UpdateChecker *m_update = nullptr;      // the release feed, a child of the window
+    QString m_updateVersion;                // the tag on offer, "" until one arrives
+    QString m_updateUrl;                    // the page its press hands to the browser
     QToolButton *m_langButton = nullptr;   // the current language's flag, opening the language menu
     PowerButton *m_power = nullptr;        // the dashboard's one control
     QWidget *m_statusDot = nullptr;        // the 6 px chip beside the connection text
