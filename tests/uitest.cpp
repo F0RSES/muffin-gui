@@ -57,6 +57,7 @@
 #include <QFont>
 #include <QFontInfo>
 #include <QFontMetrics>
+#include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -3115,7 +3116,16 @@ static void testUpdateNotice()
 //     the app outside the silhouette and over the stroke;
 //   * the hierarchy — the shell sits between the window and everything the suite finds by name, so a page,
 //     a rail glyph or a chrome control that stopped being reachable, or a header press that stopped
-//     reaching the window that drags on it, is the same feature failing quietly.
+//     reaching the window that drags on it, is the same feature failing quietly;
+//   * the shadow — the band is the shadow's room, and the two readings that matter are that it fades instead
+//     of stepping, and that by the time it reaches the surface's own edge only a tail is left there. A band
+//     narrowed for any reason puts the body of the shadow against the window border instead: a hard line, and
+//     the cheapest of these to miss.
+//
+// The shape and the shadow cannot be read out of one render, because a drop shadow paints into the very band
+// the corner tests measure: "nothing is painted here" is only a claim about a shadow-free window. So the
+// window is drawn twice, once with the effect switched off and once with it on, and every reading below is
+// made from the picture it can be trusted in.
 // As with the stats panel, the light theme proves what the dark one cannot: there the rail is #E5E7EB
 // against a #F3F4F6 shell, so a leaked corner is a grey pixel outside the arc, while the dark sheet paints
 // both #0B0C10 and hides the mistake in a matching colour. Every reading below therefore runs in both
@@ -3129,10 +3139,20 @@ static void testWindowFrame()
     const int m = MainWindow::kWindowFrameMarginPx;
     const int b = MainWindow::kWindowFrameBorderPx;
 
-    // The three numbers the shell is made of, spelled once more here so a change to one of them has to pass
-    // two places that would otherwise disagree quietly.
+    // The numbers the shell and its shadow are made of, spelled once more here so a change to one of them
+    // has to pass two places that would otherwise disagree quietly.
     check(r == 12 && b == 1, "the shell is 12 px of arc over a 1 px stroke");
-    check(m >= 1 && m <= 2, "…inside 1-2 px of transparent window, so the stroke is drawn rather than cut");
+    // The band is not a free design value any more: it is the shadow's reach, and the shadow is the reason
+    // the surface's own edge no longer falls inside it. QGraphicsDropShadowEffect blurs with a radius of half
+    // its blurRadius and the offset pushes the whole curve down, so the band is that reach plus a pixel. The
+    // tail does keep going past the band — as a tail; the ring reading below is what says so.
+    const int reach = MainWindow::kWindowShadowBlurPx / 2;
+    check(m == reach + MainWindow::kWindowShadowOffsetYpx + 1,
+          QStringLiteral("…inside a band of exactly the reach the shadow needs (%1 px of blur radius, %2 px "
+                         "of offset, %3 px over the end of it = %4 px)")
+              .arg(reach).arg(MainWindow::kWindowShadowOffsetYpx).arg(1).arg(m));
+    check(m > reach, QStringLiteral("…which does mean the band is wider than the stroke it protects (%1 px "
+                                    "of it is only there for the shadow)").arg(m));
 
     if (!configRedirectedIntoBuildTree()) {
         std::printf("  SKIP  the shell belongs to a window, and constructing one needs XDG_CONFIG_HOME "
@@ -3171,6 +3191,28 @@ static void testWindowFrame()
               "…under the name both sheets style it by");
         check(shell->parentWidget() == canvas,
               "…between that canvas and everything else, which is the one thing the new layer changes");
+
+        // ---- the shadow, as an object ----
+        //
+        // Attached to the canvas, with the parameters the constants name. The pixels below can show that a
+        // shadow happened; only this can show that it is the shadow this file declares, and that it hangs off
+        // the one widget whose rect includes the band it has to fall through.
+        auto *shadow = qobject_cast<QGraphicsDropShadowEffect *>(canvas->graphicsEffect());
+        check(shadow != nullptr, "the window's canvas carries a drop shadow");
+        check(shadow && shadow->blurRadius() == MainWindow::kWindowShadowBlurPx,
+              QStringLiteral("…blurred by %1 px").arg(MainWindow::kWindowShadowBlurPx));
+        check(shadow && shadow->offset() == QPointF(0, MainWindow::kWindowShadowOffsetYpx),
+              QStringLiteral("…pushed %1 px down, so the window reads as lit from above")
+                  .arg(MainWindow::kWindowShadowOffsetYpx));
+        check(shadow && shadow->color().alpha() == MainWindow::kWindowShadowAlpha
+                      && shadow->color().red() == 0 && shadow->color().green() == 0
+                      && shadow->color().blue() == 0,
+              QStringLiteral("…in %1 of plain black rather than a colour of its own")
+                  .arg(MainWindow::kWindowShadowAlpha));
+        // Not on the card, and not on the window: a drop shadow paints outside the shape it came from, and
+        // the card's rect stops at the card. An effect moved there would be a shadow with nowhere to go.
+        check(shell->graphicsEffect() == nullptr, "…and the card itself owns no effect to clip it");
+        check(window.graphicsEffect() == nullptr, "…nor does the window, which is not the band's owner");
         // The claim Task 3 makes is that findChild() still reaches everything, because it walks the tree
         // rather than naming a parent. Four kinds of thing the suite leans on: the page stack, a rail
         // glyph, the footer at the bottom of the column, and a page built several levels below the shell.
@@ -3262,16 +3304,32 @@ static void testWindowFrame()
             return qAbs(x.red() - y.red()) <= tol && qAbs(x.green() - y.green()) <= tol
                    && qAbs(x.blue() - y.blue()) <= tol;
         };
+        // Two renders of the same window, told apart only by whether the shadow is switched on. Disabling a
+        // QGraphicsEffect makes Qt draw the source as though nothing were attached, which is the whole of
+        // what the shape tests need — and re-enabling it afterwards leaves the window as the user would see
+        // it, so no reading below can be the one that forgot to put the shadow back.
+        auto grabWindow = [&](bool withShadow) {
+            QGraphicsEffect *fx = canvas->graphicsEffect();
+            if (fx)
+                fx->setEnabled(withShadow);
+            const QImage img = window.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+            if (fx)
+                fx->setEnabled(true);
+            return img;
+        };
 
         for (const bool dark : {true, false}) {
             const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
             Theme::apply(app, dark);
             QTest::qWait(30);
-            const QImage shot = window.grab().toImage().convertToFormat(QImage::Format_ARGB32);
-            check(shot.hasAlphaChannel() && shot.width() == w && shot.height() == h,
+            const QImage shot = grabWindow(false);    // the silhouette, uncast
+            const QImage cast = grabWindow(true);     // …and the same window wearing its shadow
+            check(shot.hasAlphaChannel() && shot.width() == w && shot.height() == h
+                          && cast.width() == w && cast.height() == h,
                   QStringLiteral("%1: the window renders %2x%3 with an alpha channel for corners to hide in")
                       .arg(theme).arg(shot.width()).arg(shot.height()));
-            if (!shot.hasAlphaChannel() || shot.width() != w || shot.height() != h)
+            if (!shot.hasAlphaChannel() || shot.width() != w || shot.height() != h
+                || cast.width() != w || cast.height() != h)
                 continue;
 
             const QString sheet = app.styleSheet();
@@ -3301,10 +3359,11 @@ static void testWindowFrame()
                                      "an arc and not a child that forgot to round")
                           .arg(theme, QLatin1String(c.name)).arg(out.x()).arg(out.y()));
                 // And the corner is filled with its own surface, not a hole in the shell: proof the clean
-                // diagonal is a shape rather than a window that stopped drawing. r - 4 in from the corner
-                // along each axis puts the sample well inside the arc, clear of the stroke and of the
-                // antialiased edge alike.
-                const QPoint inside = at(c, r - 4, r - 4);
+                // diagonal is a shape rather than a window that stopped drawing. Four pixels short of the
+                // arc's own centre along each axis puts the sample well inside the arc, clear of the stroke
+                // and of the antialiased edge alike — counted from the corner of the CARD, since the band
+                // between the card and the surface is a window's worth of pixels that must not be measured.
+                const QPoint inside = at(c, m + r - 4, m + r - 4);
                 check(rgbWithin(shot.pixelColor(inside), wantFill, 12),
                       QStringLiteral("%1: the %2 corner is painted by %3 (%4 at (%5,%6), wanted %7)")
                           .arg(theme, QLatin1String(c.name), QLatin1String(c.surface))
@@ -3314,8 +3373,12 @@ static void testWindowFrame()
 
                 int painted = 0;
                 int expected = 0;
-                for (int ly = 0; ly < r; ++ly) {
-                    for (int lx = 0; lx < r; ++lx) {
+                // The r x r box between the arc's centre and the corner it rounds — the one box whose
+                // painted count separates an arc (about three quarters of it) from a square child (all of
+                // it). It starts at the band rather than at the surface, so widening the band moves the box
+                // with it instead of leaving it counting an empty margin twice over.
+                for (int ly = m; ly < m + r; ++ly) {
+                    for (int lx = m; lx < m + r; ++lx) {
                         if (qAlpha(shot.pixel(at(c, lx, ly))) > 128)
                             ++painted;
                         if (arcPaints(lx, ly))
@@ -3355,6 +3418,93 @@ static void testWindowFrame()
                                                 : QStringLiteral("<none>")));
             }
 
+            // ---- the shadow in that band ----
+            //
+            // The band is empty in `shot` by construction, and the claim of this block is that it stops being
+            // empty in `cast`. Three readings, in the order anyone notices them: that there is shadow at all,
+            // that it falls off instead of ending in a step, and that it is spent before it reaches the
+            // surface's own edge. The last is what the band's width exists for, and the first to fail if the
+            // blur grows or the margin shrinks without the other being asked.
+            auto bandAlpha = [&](const QPoint &p) { return qAlpha(cast.pixel(p)); };
+            int maxNear = 0;
+            for (const Edge &e : edges) {
+                // The same mid-edge column the band is measured on, walked outward from the stroke. Half a
+                // blur radius out is the far sample: still inside the fade on every edge, because the offset
+                // only ever lengthens the shadow's reach downward and never shortens it below the radius.
+                const QPoint on(e.dx < 0 ? m : (e.dx > 0 ? w - 1 - m : w / 2),
+                                e.dy < 0 ? m : (e.dy > 0 ? h - 1 - m : h / 2));
+                const QPoint near(on.x() + e.dx, on.y() + e.dy);
+                const QPoint far(on.x() + e.dx * (reach / 2), on.y() + e.dy * (reach / 2));
+                maxNear = qMax(maxNear, bandAlpha(near));
+                check(bandAlpha(near) >= 16,
+                      QStringLiteral("%1: the %2 edge casts into the band — %3 of alpha one pixel outside "
+                                     "the stroke").arg(theme, QLatin1String(e.name)).arg(bandAlpha(near)));
+                check(bandAlpha(near) <= MainWindow::kWindowShadowAlpha,
+                      QStringLiteral("%1: …and never more opaque than the %2 of black the shadow was given "
+                                     "(%3 here on the %4 edge)")
+                          .arg(theme).arg(MainWindow::kWindowShadowAlpha).arg(bandAlpha(near))
+                          .arg(QLatin1String(e.name)));
+                check(bandAlpha(near) > bandAlpha(far),
+                      QStringLiteral("%1: the %2 shadow fades rather than steps (%3 at the stroke, %4 half a "
+                                     "radius out)")
+                          .arg(theme, QLatin1String(e.name)).arg(bandAlpha(near)).arg(bandAlpha(far)));
+                const QColor ink = cast.pixelColor(near);
+                check(ink.red() <= 8 && ink.green() <= 8 && ink.blue() <= 8,
+                      QStringLiteral("%1: the %2 shadow is black, not a colour of the app's own (%3)")
+                          .arg(theme, QLatin1String(e.name)).arg(ink.name(QColor::HexArgb)));
+            }
+
+            // Every pixel of the surface's own outer ring, no exceptions, and no claim of exact zero: a
+            // Gaussian tail is still falling when it arrives, so what the band has to guarantee is that the
+            // shadow is *nothing there is a chance of seeing* by then — under a tenth of the black it was made
+            // of, and under an eighth of its own strength one pixel off the stroke. Measured, the band ends at
+            // four of alpha here and seventy-five at the stroke. Narrow it to six pixels and the ring stops
+            // being a tail and starts being the shadow's body — thirty-seven is a step you can see on a light
+            // desktop, and that is exactly the cut this reading is here to hear about.
+            int ringMax = 0;
+            for (int x = 0; x < w; ++x) {
+                ringMax = qMax(ringMax, bandAlpha(QPoint(x, 0)));
+                ringMax = qMax(ringMax, bandAlpha(QPoint(x, h - 1)));
+            }
+            for (int y = 0; y < h; ++y) {
+                ringMax = qMax(ringMax, bandAlpha(QPoint(0, y)));
+                ringMax = qMax(ringMax, bandAlpha(QPoint(w - 1, y)));
+            }
+            check(ringMax <= MainWindow::kWindowShadowAlpha / 10,
+                  QStringLiteral("%1: the shadow is spent at the surface edge — its strongest ring pixel is "
+                                 "%2 of the %3 it was given, and a cut would read as a step")
+                      .arg(theme).arg(ringMax).arg(MainWindow::kWindowShadowAlpha));
+            check(ringMax * 8 <= maxNear,
+                  QStringLiteral("%1: …and that ring pixel is a tail, not the shadow itself (%2 against the "
+                                 "%3 it carries one pixel off the stroke)")
+                      .arg(theme).arg(ringMax).arg(maxNear));
+
+            // The four corners of the cast window in particular: a shadow that pooled in the surface's corner
+            // would square the window again in the one place the whole shell exists to round it.
+            int cornerMax = 0;
+            for (const QPoint &p : {QPoint(0, 0), QPoint(w - 1, 0), QPoint(0, h - 1), QPoint(w - 1, h - 1)})
+                cornerMax = qMax(cornerMax, bandAlpha(p));
+            check(cornerMax <= MainWindow::kWindowShadowAlpha / 20,
+                  QStringLiteral("%1: the shadow leaves the window's corners empty, so the silhouette is "
+                                 "still the arc (%2 at the strongest)")
+                      .arg(theme).arg(cornerMax));
+
+            // And the shadow falls outside the card and nowhere else. A drop shadow that also laid over the
+            // app's own pixels would read as a dirty window, and it would be the cheapest way for this
+            // feature to get the theme's colours wrong while every corner reading above still passed.
+            QFrame *rail = window.findChild<QFrame *>(QStringLiteral("sidebar"));
+            if (rail) {
+                const QPoint railCentre =
+                    rail->mapTo(&window, QPoint(rail->width() / 2, rail->height() / 2));
+                check(cast.rect().contains(railCentre) && qAlpha(cast.pixel(railCentre)) == 255,
+                      QStringLiteral("%1: the middle of the rail is still fully opaque under the shadow")
+                          .arg(theme));
+                check(rgbWithin(shot.pixelColor(railCentre), cast.pixelColor(railCentre), 2),
+                      QStringLiteral("%1: …and the shadow has not tinted it (%2 with, %3 without)")
+                          .arg(theme).arg(cast.pixelColor(railCentre).name(QColor::HexRgb))
+                          .arg(shot.pixelColor(railCentre).name(QColor::HexRgb)));
+            }
+
             // ---- the chrome controls, inside the silhouette ----
             // Geometry proved they are clear of the stroke; this proves it in the same pixels the corners
             // are judged by: every corner of every control lands on a painted pixel, so none of them is
@@ -3374,9 +3524,13 @@ static void testWindowFrame()
                           .arg(theme, btn->property("role").toString()));
             }
 
-            // The shell as the user sees it, kept for the eye to check the arc it cannot measure.
+            // The shell as the user sees it, kept for the eye to check the arc it cannot measure — and the
+            // same window without its shadow beside it, because the difference between the two is the one
+            // part of this feature a screenshot cannot be argued about.
             shot.save(dark ? QStringLiteral("/tmp/shell-dark.png")
                            : QStringLiteral("/tmp/shell-light.png"));
+            cast.save(dark ? QStringLiteral("/tmp/shadow-dark.png")
+                           : QStringLiteral("/tmp/shadow-light.png"));
         }
 
         // ---- the drag, across the new layer ----
@@ -3449,6 +3603,30 @@ static void testWindowFrame()
                 QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier,
                                     onWindow + QPoint(30, 30));
             }
+        }
+
+        // ---- the drag, from the band the shadow falls through ----
+        //
+        // The band is a window's worth of pixels wide now, because that is what the shadow needs, and every
+        // one of them is a place the pointer can land without touching a widget. They have to stay grabbable:
+        // a shadow is paint, and paint does not take the mouse. So the press goes to the canvas itself, in the
+        // middle of the top band and on nothing but fall-off, and the window's own position is what proves
+        // the drag reached the handler that moves it.
+        {
+            const QPoint inBand(w / 2, m / 2);
+            check(inBand.y() > 0 && inBand.y() < m,
+                  QStringLiteral("…the press point is in the band and not on the card (%1 px of %2)")
+                      .arg(inBand.y()).arg(m));
+            const QPoint before = window.pos();
+            QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, inBand);
+            const QPoint after = inBand + QPoint(15, -9);
+            QTest::mouseMove(&window, after);
+            const QPoint moved = window.pos();
+            QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, after);
+            check(moved - before == QPoint(15, -9),
+                  QStringLiteral("a press on the shadowed band still drags the frameless window (moved "
+                                 "(%1,%2), expected (15,-9))").arg(moved.x() - before.x())
+                      .arg(moved.y() - before.y()));
         }
 
         // Back on the theme the rest of the binary — and the application itself — expects.

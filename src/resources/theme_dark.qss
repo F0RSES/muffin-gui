@@ -492,8 +492,11 @@ QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
 
    TWO surfaces are deliberately NOT in that list, and are named here so the next person does not
    "complete" it: the window and the canvas it holds. Both must stay transparent, because together they
-   are the band around #mainWindowFrame — fill either one and the rounded card becomes a rounding hidden
-   behind an opaque rectangle, which is the square-corner bug this shell exists to remove. */
+   are the band around #mainWindowFrame — the desktop at the window's rounded edge, and the room its drop
+   shadow falls through. That shadow is hung on the canvas by the C++ side and is never spelled in a sheet,
+   because it is the window's shape rather than its palette. Fill either surface here and the rounded card
+   becomes a rounding hidden behind an opaque rectangle, which is the square-corner bug this shell exists to
+   remove. */
 QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter,
 QScrollArea, QScrollArea > QWidget > QWidget,
 QWidget#cardHost, QWidget#logPanel, QWidget#logHeader,

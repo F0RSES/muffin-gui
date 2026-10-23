@@ -226,10 +226,29 @@ public:
     // inside the app.
     static constexpr int kWindowFrameRadiusPx = 12;
     static constexpr int kWindowFrameBorderPx = 1;
-    // The transparent band between the card and the surface's own edge. The stroke is drawing, and drawing
-    // that begins on the window's last pixel is drawing cut in half — this is the frameless equivalent of
-    // the square corners WA_TranslucentBackground exists to remove.
-    static constexpr int kWindowFrameMarginPx = 2;
+
+    // The shadow the card casts. A rounded card on a translucent surface can sit so close to the desktop
+    // that it reads as part of it: the 1 px stroke is the only thing between the app and whatever is behind
+    // it, and a stroke is a thin claim to make on its own. The shadow is what says "this is a window, and it
+    // is above your desktop".
+    //
+    // One value for both themes rather than a per-sheet one, and that is not an oversight: the shadow lands
+    // on the desktop, whose colour this app neither knows nor styles. The palette has nothing to reconcile it
+    // with, so it is declared here, in the code that owns the window's shape.
+    static constexpr int kWindowShadowBlurPx = 24;
+    static constexpr int kWindowShadowOffsetYpx = 4;
+    static constexpr int kWindowShadowAlpha = 100;
+
+    // The transparent band between the card and the surface's own edge. It has two jobs and the second one
+    // is the bigger: it keeps the 1 px stroke off the window's last pixel (a stroke that begins on the last
+    // pixel is a stroke cut in half — the frameless equivalent of the square corners
+    // WA_TranslucentBackground exists to remove), and it is the only room the shadow above has to fall in.
+    // QGraphicsDropShadowEffect blurs with a radius of half its blurRadius, and a Gaussian has no last
+    // pixel: what the band buys is not a shadow that ends before the surface, but one that is down to a few
+    // units of alpha by the time it gets there — invisible, where the same curve six pixels in is a step you
+    // can see on a light desktop. Reach plus the offset is where that fade is spent for any purpose a user
+    // has; narrow the band below it and testWindowFrame() starts failing on the ring.
+    static constexpr int kWindowFrameMarginPx = kWindowShadowBlurPx / 2 + kWindowShadowOffsetYpx + 1;
 
     // The shell itself. A hook for the same reason powerButton() is one: the rounded silhouette is the
     // window's claim about its own shape, and a suite cannot read the pixels of a widget it cannot name.

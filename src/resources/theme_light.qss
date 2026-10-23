@@ -400,9 +400,10 @@ QProgressBar#blockcheckProgress::chunk { border-radius: 2px; }
    painted black instead of the light background.
 
    TWO surfaces are deliberately left out and stay transparent — the window and the canvas it holds —
-   because together they are the band around #mainWindowFrame. Fill either one on this sheet and the
-   rounded card is a rounding behind an opaque light square: glaring here, where the dark sheet at least
-   hides the mistake in matching colour. */
+   because together they are the band around #mainWindowFrame: the desktop at its rounded edge, and the room
+   the drop shadow the C++ side hangs on the canvas falls through (it is shape, not palette, so no sheet
+   spells it). Fill either one on this sheet and the rounded card is a rounding behind an opaque light
+   square: glaring here, where the dark sheet at least hides the mistake in matching colour. */
 QDialog, QStackedWidget, QStackedWidget#pageStack, QSplitter, QScrollArea,
 QScrollArea > QWidget > QWidget, QWidget#cardHost, QWidget#logPanel,
 QWidget#logHeader, QWidget#dashboardPage, QWidget#profilesPage, QWidget#logsPage,

@@ -21,12 +21,14 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColor>
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFrame>
+#include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -116,8 +118,9 @@ constexpr int kStatusDotPx = 6;
 // is 18 px top margin + the tallest of its children (the 30 px chrome buttons / the 24 px title) + 16 px
 // bottom margin + the 1 px rule, so 64 px covers the whole header and nothing below it. Everything the
 // header lives in now sits inside the rounded shell, so the band starts that many pixels lower: the
-// transparent margin and the card's stroke are window furniture as much as the title is, and a pointer
-// aiming at the header does not stop 3 px short of it. The two chrome buttons and the rail glyphs are
+// transparent margin — wide enough now for the window's shadow to fall through — and the card's stroke are
+// window furniture as much as the title is, and a pointer aiming at the header does not stop a shadow short
+// of it. The two chrome buttons and the rail glyphs are
 // children that consume their own presses, so a press that reaches MainWindow inside this band is on bare
 // header space and safe to drag from.
 constexpr int kHeaderBandPx = 64 + MainWindow::kWindowFrameMarginPx + MainWindow::kWindowFrameBorderPx;
@@ -319,10 +322,11 @@ void MainWindow::buildCentral()
     //
     // The outer one is the transparent band: QMainWindowLayout puts the central widget in the window's
     // contents rect, so the margin is what keeps the card's 1 px stroke off the surface's edge — a stroke
-    // drawn on the last pixel of the window is a stroke cut in half. That canvas paints NOTHING: with
+    // drawn on the last pixel of the window is a stroke cut in half — and, since the shadow below, it is
+    // also the only space the shadow has to fall through. That canvas paints NOTHING: with
     // WA_TranslucentBackground, a background on it would be an opaque rectangle with square corners, which
     // is precisely the thing this whole arrangement is here to remove. What you see in the band is the
-    // desktop, and the arc below is the window's silhouette.
+    // desktop and the shadow, and the arc below is the window's silhouette.
     auto *canvas = new QWidget(this);
     canvas->setObjectName(QStringLiteral("rootCanvas"));
 
@@ -346,6 +350,24 @@ void MainWindow::buildCentral()
     frameBox->addWidget(buildSidebar());
     frameBox->addWidget(buildMainArea(), 1);
     canvasBox->addWidget(m_windowFrame);
+
+    // The shadow, on the canvas and not on the card. A drop shadow is drawn from the alpha of the widget it
+    // is attached to and lands OUTSIDE the shape that cast it — in the band — so the widget carrying it has
+    // to be the one that owns the band. The canvas is that widget: its rect is the window's whole surface,
+    // which is why kWindowFrameMarginPx is measured as the shadow's reach. Attach the same effect to the
+    // card instead and the shadow has nowhere to go: the card's rect stops at the card.
+    //
+    // It stays attached for the life of the window, which is the one part of this Motion would argue with.
+    // An attached effect routes every later paint of that widget through the raster compositor, so Motion
+    // detaches its fades as soon as a page has finished arriving; a shadow cannot be detached, because it
+    // IS the window's look rather than a transition through it. The cost is bounded by what this window
+    // actually repaints: the blur runs over the canvas's alpha when something inside it changes, which means
+    // page swaps, the power button's breath and the ping badges — not a 3D scene at sixty frames.
+    auto *shadow = new QGraphicsDropShadowEffect(canvas);
+    shadow->setBlurRadius(kWindowShadowBlurPx);
+    shadow->setColor(QColor(0, 0, 0, kWindowShadowAlpha));
+    shadow->setOffset(0, kWindowShadowOffsetYpx);
+    canvas->setGraphicsEffect(shadow);
 
     setCentralWidget(canvas);
 }
@@ -2750,8 +2772,10 @@ void MainWindow::mousePressEvent(QMouseEvent *event)
 {
     // The header bar occupies the top kHeaderBandPx px of the window, spanning the full width minus
     // nothing: the two chrome buttons are children that consume their own presses, so a press that reaches
-    // MainWindow here is on bare header space — or on the transparent band the rounded shell sits in, which
-    // is window furniture too. Anywhere else in that band, start dragging.
+    // MainWindow here is on bare header space — or on the transparent band the rounded shell and its shadow
+    // sit in, which is window furniture too. That band is a shadow's width now rather than a stroke's, and a
+    // wider strip of nothing to grab is not a bug: the shadow is paint, and paint does not take the mouse.
+    // Anywhere else in that band, start dragging.
     if (event->button() == Qt::LeftButton && event->position().y() <= kHeaderBandPx) {
         m_dragging = true;
         m_dragOffset = event->position().toPoint();
