@@ -128,7 +128,36 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
-        run: ctest --test-dir build --output-on-failure
+        # ctest's raw stdout is what tells us WHICH check failed, but the Actions log
+        # behind that output needs repo-admin to download, and this project's owner is
+        # running the agent without a token. Route every FAIL/info line the test binary
+        # printed through `::error::` so it becomes a public check-run annotation, then
+        # re-exit with ctest's own code so the step still turns red for the same reason.
+        # `%`/CR/LF are escaped per the workflow-command grammar so a value with those
+        # bytes in it cannot break out of the message payload.
+        run: |
+          set +e
+          ctest --test-dir build --output-on-failure > ctest.log 2>&1
+          rc=$?
+          set -e
+          cat ctest.log
+          if [ "$rc" -ne 0 ]; then
+            # gsub (not sub) so every % in the line is escaped, not just the first.
+            awk '
+              /^  (FAIL|info )/ {
+                line = $0
+                gsub(/%/, "%25", line); gsub(/\r/, "%0D", line)
+                print "::error::" line
+              }
+            ' ctest.log
+            # ctest's own per-test verdict line ("The following tests FAILED:") plus a
+            # short window around each one so the surrounding info lines make sense in
+            # the annotation view without scrolling the raw log.
+            grep -E 'Test #|tests passed|tests failed|The following tests' ctest.log \
+              | sed 's/%/%25/g; s/\r/%0D/g' \
+              | awk '{ print "::error::" $0 }'
+            exit "$rc"
+          fi
 
       # The polkit rule that packaging/postinst installs is what makes `apt install muffin` a
       # one-time authorisation instead of a per-pkexec prompt. Getting it wrong in the loose
@@ -340,7 +369,28 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           ZAPRET_TEST_TREE: /tmp/not-a-zapret-tree
         shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
+        # See the Linux job's note above — same annotation trick so the failing check
+        # shows up in the public check-run annotation list rather than only in the
+        # admin-gated raw log. `-C Release` is the MSVC multi-config selector.
+        run: |
+          set +e
+          ctest --test-dir build -C Release --output-on-failure > ctest.log 2>&1
+          rc=$?
+          set -e
+          cat ctest.log
+          if [ "$rc" -ne 0 ]; then
+            awk '
+              /^  (FAIL|info )/ {
+                line = $0
+                gsub(/%/, "%25", line); gsub(/\r/, "%0D", line)
+                print "::error::" line
+              }
+            ' ctest.log
+            grep -E 'Test #|tests passed|tests failed|The following tests' ctest.log \
+              | sed 's/%/%25/g; s/\r/%0D/g' \
+              | awk '{ print "::error::" $0 }'
+            exit "$rc"
+          fi
 
       - name: Deploy Qt DLLs
         if: startsWith(github.ref, 'refs/tags/v')
