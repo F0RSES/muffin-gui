@@ -752,12 +752,14 @@ static void testProfileCard()
     card.retheme();
     check(card.nameLabel()->text() == QLatin1String("general"), "retranslate kept the name");
 
-    // ---- the chip figure is tabular ----
-    // Same override the dashboard's number had: without a pinned fixed face the generic `QWidget`
-    // font-family rule makes the mini-chip latency proportional and it nudges the ring as digits change.
+    // ---- the chip text inherits the theme's proportional face ----
+    // A chip can spell a word ("таймаут"), not only digits, so unlike the dashboard's number it is
+    // deliberately NOT pinned to a fixed-pitch face: the generic `QWidget { font-family }` rule must
+    // win here. The pinning machinery stays proven by the dashboard check above; this one proves the
+    // chip opts out of it and inherits the proportional UI face.
     QLabel *chipVal = card.findChild<QLabel *>(QStringLiteral("miniPingValue"));
     check(chipVal != nullptr, "the chip carries a #miniPingValue figure");
-    check(resolvesMonospace(chipVal), "and the chip figure resolves to a fixed-pitch face");
+    check(!resolvesMonospace(chipVal), "and the chip text inherits the proportional UI face");
 
     // ---- the row height FOLLOWS the font instead of clipping it ----
     // It used to be a literal 52 px. Now it is max(52 px floor, layout size hint, name line + padding), so

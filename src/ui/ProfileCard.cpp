@@ -281,13 +281,12 @@ void ProfileCard::setHosts(const QStringList &hosts)
         auto *value = new QLabel(chip);
         value->setObjectName(QStringLiteral("miniPingValue"));
         value->setTextFormat(Qt::PlainText);
-        // The figure is tabular like the dashboard's ring number: a latency that changes digits must not
-        // nudge the ring beside it sideways. Same pinning as PingIndicator — the app sheet's generic
-        // `QWidget { font-family }` rule would otherwise pull it back to the proportional UI face.
-        QFont valueMono = Theme::monoFont(9);
-        valueMono.setBold(true);
-        value->setFont(valueMono);
-        Theme::applyFontViaSheet(value, valueMono);
+        // The figure takes the theme's proportional UI face by inheritance — no font is set here on
+        // purpose. A chip spells words, not only digits (the fail verdict is a word like "таймаут"),
+        // and a fixed-pitch face would read wrong inside the row's proportional text. The pinned
+        // monospace belongs to the dashboard's big number alone, where changing digits must not
+        // nudge the ring sideways (see PingIndicator); here the generic `QWidget { font-family }`
+        // rule winning is exactly the point.
 
         box->addWidget(icon);
         box->addWidget(value);
