@@ -1880,23 +1880,42 @@ int main(int argc, char **argv)
 
         // The answers a real release feed gives, captured rather than imagined. A release published with
         // the marker the tag always carries has to be read against the version stamped without one.
-        const QJsonObject newest = releaseJson(QByteArrayLiteral(R"JSON({
-  "tag_name": "v0.5.0",
-  "name": "Muffin 0.5.0",
-  "html_url": "https://github.com/F0RSES/zapret-muffin-gui/releases/tag/v0.5.0",
-  "prerelease": false,
-  "assets": [
-    {"name": "muffin_0.5.0_amd64.deb", "browser_download_url": "https://example.invalid/muffin_0.5.0_amd64.deb"}
-  ]
-})JSON"));
-        check(UpdateChecker::tagFromRelease(newest) == QLatin1String("v0.5.0"),
+        //
+        // The mock's tag is derived from MUFFIN_VERSION's major so the "feed is ahead of the running
+        // build" assertion stays true across every ordinary release: stamp 0.5.0 gets a v1.0.0 mock,
+        // stamp 1.2.3 gets a v2.0.0 mock. Pinning it to one specific next version — the way this
+        // section used to (a v0.5.0 mock against a 0.5.0 build) — breaks the whole suite on the
+        // release-prep commit that stamps that same version to match the tag: v0.5.0 vs 0.5.0 is
+        // "not newer", not a real signal about UpdateChecker, and the release job that runs the suite
+        // on its own tag build then fails its own publication.
+        const QStringList stampParts = QStringLiteral(MUFFIN_VERSION).split(QLatin1Char('.'));
+        const int majorNow = stampParts.isEmpty() ? 0 : stampParts.first().toInt();
+        const QString aheadTag = QStringLiteral("v%1.0.0").arg(majorNow + 1);
+        const QString aheadPlain = aheadTag.mid(1);
+        const QString aheadUrl = QStringLiteral("https://github.com/F0RSES/zapret-muffin-gui/releases/tag/")
+                                 + aheadTag;
+        // Assemble the mock release with QJsonObject/QJsonArray rather than a hand-built JSON byte
+        // string, so a future edit to this shape can't leave the payload syntactically valid but
+        // subtly different from what the checks compare against.
+        QJsonObject newest;
+        newest[QStringLiteral("tag_name")] = aheadTag;
+        newest[QStringLiteral("name")] = QStringLiteral("Muffin ") + aheadPlain;
+        newest[QStringLiteral("html_url")] = aheadUrl;
+        newest[QStringLiteral("prerelease")] = false;
+        QJsonObject asset;
+        asset[QStringLiteral("name")] = QStringLiteral("muffin_") + aheadPlain
+                                         + QStringLiteral("_amd64.deb");
+        asset[QStringLiteral("browser_download_url")] =
+            QStringLiteral("https://example.invalid/muffin_") + aheadPlain
+            + QStringLiteral("_amd64.deb");
+        newest[QStringLiteral("assets")] = QJsonArray{asset};
+        check(UpdateChecker::tagFromRelease(newest) == aheadTag,
               "the tag is what names the version");
         check(UpdateChecker::isNewer(UpdateChecker::tagFromRelease(newest),
                                      QStringLiteral(MUFFIN_VERSION)),
-              QStringLiteral("and a 0.5.0 release is ahead of the %1 this build is stamped with")
-                  .arg(QStringLiteral(MUFFIN_VERSION)));
-        check(UpdateChecker::downloadUrlFromRelease(newest) ==
-                  QLatin1String("https://github.com/F0RSES/zapret-muffin-gui/releases/tag/v0.5.0"),
+              QStringLiteral("and a %1 release is ahead of the %2 this build is stamped with")
+                  .arg(aheadTag, QStringLiteral(MUFFIN_VERSION)));
+        check(UpdateChecker::downloadUrlFromRelease(newest) == aheadUrl,
               "…while the URL offered to the user is the release page, not an asset: the dialog asks "
               "whether to go and download, and a single asset would pick the package for them");
 
