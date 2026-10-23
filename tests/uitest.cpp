@@ -47,6 +47,9 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFont>
+#include <QFontInfo>
+#include <QFontMetrics>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -461,6 +464,20 @@ static void testLogPanel()
 }
 
 // ---------------------------------------------------------- PingIndicator ----
+// True if `w`'s polished font is actually fixed-pitch — an 'i' advancing the same as a 'W'. This tests the
+// rendering property (tabular figures that do not shift) rather than a family NAME, so it holds whatever
+// QFontDatabase resolves the system's fixed face to, and it catches the real bug: a monospaced face silently
+// replaced by the proportional UI family via the generic `QWidget { font-family }` sheet rule.
+static bool resolvesMonospace(QWidget *w)
+{
+    if (!w)
+        return false;
+    w->ensurePolished();
+    const QFontMetrics fm(w->font());
+    return fm.horizontalAdvance(QLatin1Char('i')) == fm.horizontalAdvance(QLatin1Char('W'))
+        && fm.horizontalAdvance(QLatin1Char('l')) == fm.horizontalAdvance(QLatin1Char('M'));
+}
+
 static void testPingIndicator()
 {
     std::printf("\n[PingIndicator]\n");
@@ -527,6 +544,22 @@ static void testPingIndicator()
     chip.setServiceName(QStringLiteral("Discord"));
     check(chip.glyph() == QStringLiteral("discord"), "setServiceName follows the name to the mark");
     check(chip.serviceName() == QStringLiteral("Discord"), "and keeps the name");
+
+    // The latency figure is monospace WHERE IT RENDERS, not merely requested. The generic
+    // `QWidget { font-family: <UI family> }` rule in the app sheet outranks a C++ setFamily(), so a bare
+    // setFont() left the figure proportional and its digits shifted as they changed — this is the regression
+    // Theme::applyFontViaSheet() exists to stop. It runs against the real applied sheet (main() did
+    // Theme::apply first), so it is exactly what the widget shows on screen.
+    QLabel *number = chip.findChild<QLabel *>(QStringLiteral("pingNumber"));
+    check(number != nullptr, "the badge carries a #pingNumber figure");
+    check(resolvesMonospace(number), "and the figure resolves to a fixed-pitch face (no digit drift)");
+    // Guard that the check above means something: the app's own UI family must be proportional, or the
+    // monospace test would pass on a font that never got overridden in the first place.
+    QLabel uiSample;
+    uiSample.ensurePolished();
+    const QFontMetrics fmUi(uiSample.font());
+    check(fmUi.horizontalAdvance(QLatin1Char('i')) != fmUi.horizontalAdvance(QLatin1Char('W')),
+          "the UI text family really is proportional, so the monospace check discriminates");
 }
 
 // ------------------------------------------------------------- PowerButton ----
@@ -718,6 +751,33 @@ static void testProfileCard()
     card.retranslateText();
     card.retheme();
     check(card.nameLabel()->text() == QLatin1String("general"), "retranslate kept the name");
+
+    // ---- the chip figure is tabular ----
+    // Same override the dashboard's number had: without a pinned fixed face the generic `QWidget`
+    // font-family rule makes the mini-chip latency proportional and it nudges the ring as digits change.
+    QLabel *chipVal = card.findChild<QLabel *>(QStringLiteral("miniPingValue"));
+    check(chipVal != nullptr, "the chip carries a #miniPingValue figure");
+    check(resolvesMonospace(chipVal), "and the chip figure resolves to a fixed-pitch face");
+
+    // ---- the row height FOLLOWS the font instead of clipping it ----
+    // It used to be a literal 52 px. Now it is max(52 px floor, layout size hint, name line + padding), so
+    // a larger theme/HiDPI text size grows the row rather than cutting the name's descenders or the ring.
+    // The shipped look is preserved exactly at the base font; growth is what the change buys.
+    check(card.height() >= 52, "the row keeps the design's 52 px floor at the base font");
+    check(card.height() >= card.nameLabel()->sizeHint().height(),
+          "the row never clips the name's own height");
+
+    card.nameLabel()->setStyleSheet(QStringLiteral("font-size: 42pt;"));   // a big-font stand-in
+    card.nameLabel()->ensurePolished();
+    card.setHosts(hosts);                                                   // re-runs the height maths
+    check(card.height() > 52, "a larger name font grows the row past the floor");
+    check(card.height() >= card.nameLabel()->sizeHint().height(),
+          "...and still leaves the larger name fully inside the row");
+
+    card.nameLabel()->setStyleSheet(QString());                            // back to the sheet's 11pt
+    card.nameLabel()->ensurePolished();
+    card.setHosts(hosts);
+    check(card.height() == 52, "clearing the override returns the shipped 52 px");
 }
 
 // ------------------------------------------------------ tray + policy glue ----

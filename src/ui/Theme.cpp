@@ -3,10 +3,12 @@
 #include <QApplication>
 #include <QColor>
 #include <QFile>
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QPalette>
 #include <QStyleHints>
+#include <QWidget>
 
 namespace zapret {
 
@@ -175,6 +177,39 @@ QFont Theme::uiFont()
     f.setFamilies(families);
     f.setPointSize(10);
     return f;
+}
+
+QFont Theme::monoFont(int pointSize)
+{
+    QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    f.setPointSize(pointSize);
+    return f;
+}
+
+// Apply a font to one widget through its OWN inline stylesheet.
+//
+// The generic `QWidget { font-family: …; font-size: … }` rule near the top of both sheets outranks a
+// QFont::setFamily()/setPointSize() made in C++, because QStyleSheetStyle re-resolves the widget's font at
+// polish time and the sheet's declaration wins — verified on Qt 6.10 (a code-set monospaced figure came
+// back as the proportional UI family). The one declaration that beats the application sheet for a single
+// widget is that widget's inline stylesheet, so the whole font is written there. Point sizes are used (not
+// device pixels) so a HiDPI setting scales the figure along with everything else.
+void Theme::applyFontViaSheet(QWidget *w, const QFont &f)
+{
+    if (!w)
+        return;
+    QString sheet = QStringLiteral("font-family: \"%1\";").arg(f.family().replace(QLatin1Char('"'),
+                                                                                   QStringLiteral(R"(\")")));
+    if (f.pointSize() > 0)
+        sheet += QStringLiteral(" font-size: %1pt;").arg(f.pointSize());
+    else if (f.pixelSize() > 0)
+        sheet += QStringLiteral(" font-size: %1px;").arg(f.pixelSize());
+    if (f.bold())
+        sheet += QStringLiteral(" font-weight: bold;");
+    if (f.italic())
+        sheet += QStringLiteral(" font-style: italic;");
+    sheet += QLatin1Char(' ');
+    w->setStyleSheet(sheet);
 }
 
 QColor Theme::windowBackground() { return tokensFor(isDark()).window; }

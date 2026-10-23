@@ -79,7 +79,7 @@ QPushButton#navButton[alert="true"] { color: #F87171; border-color: #4B2530; bac
 
 QLabel#railVersion {
     background-color: transparent;
-    color: #5A6175; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
+    color: #5A6175; font-size: 8pt; font-weight: 500; letter-spacing: 0.3px;
 }
 
 /* ---------- window chrome (frameless) ----------------------------------------
@@ -102,7 +102,7 @@ QWidget#headerBar { background-color: #0B0C10; }
 QLabel#appTitle {
     background-color: transparent;
     font-family: "Montserrat", "Outfit", "Inter", "Segoe UI", sans-serif;
-    font-weight: 800; font-size: 24px; letter-spacing: 0.5px; color: #C084FC;
+    font-weight: 800; font-size: 18pt; letter-spacing: 0.5px; color: #C084FC;
 }
 QFrame#headerRule { background-color: #1F2833; border: none; }
 
@@ -115,7 +115,7 @@ QWidget#statusDot[statusKind="running"]  { background-color: #10B981; }
 QWidget#statusDot[statusKind="error"]    { background-color: #F87171; }
 QLabel#statusText {
     background-color: transparent;
-    color: #10B981; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+    color: #10B981; font-size: 9pt; font-weight: 600; letter-spacing: 1px;
 }
 QLabel#statusText[statusKind="stopped"]  { color: #5A6175; }
 QLabel#statusText[statusKind="starting"] { color: #FBBF24; }
@@ -193,7 +193,7 @@ QWidget#miniPing[pingStatus="waiting"] { border-color: #FBBF24; }
 QWidget#miniPing[pingStatus="fail"]    { border-color: #F87171; }
 QLabel#miniPingIcon { background-color: transparent; }
 QLabel#miniPingValue {
-    background-color: transparent; color: #9CA3AF; font-size: 11px; font-weight: 600;
+    background-color: transparent; color: #9CA3AF;
 }
 QLabel#muted { color: #8A91A6; background: transparent; }
 QLabel#placeholder { color: #5A6175; font-size: 11pt; background: transparent; }
@@ -362,14 +362,17 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 /* The thin strip the status bar became. It carries the resolved zapret path on the left and the ping
    cadence in the middle, and it is also where a transient sentence appears — see showTransientMessage(). */
 QFrame#footerBar { background-color: #0B0C10; border-top: 1px solid #1F2833; }
-QLabel#footerHint { background-color: transparent; color: #5A6175; font-size: 11px; }
+QLabel#footerHint { background-color: transparent; color: #5A6175; font-size: 8pt; }
 
 /* ---------- ping badges ----------
    The ring, its halo and the glyph inside it are painted by PingIndicator; the sheet owns only the two
-   labels that frame it. #10B981/#9CA3AF are the values Theme::pingOk()/Theme::pingMuted() paint with. */
-QLabel#pingNumber { background-color: transparent; color: #FFFFFF; font-size: 12px; font-weight: 700; }
+   labels that frame it — and here it sets only their COLOUR. The latency figure is a monospaced, point-sized
+   font applied by Theme::applyFontViaSheet() (so the generic `QWidget` family/size rule cannot override it
+   and it scales with HiDPI); #pingLabel keeps its size here because it is proportional UI text.
+   #10B981/#9CA3AF are the values Theme::pingOk()/Theme::pingMuted() paint with. */
+QLabel#pingNumber { background-color: transparent; color: #FFFFFF; }
 QLabel#pingClock  { background-color: transparent; }
-QLabel#pingLabel  { background-color: transparent; color: #9CA3AF; font-size: 10px; }
+QLabel#pingLabel  { background-color: transparent; color: #9CA3AF; font-size: 8pt; }
 
 /* ---------- menus ---------- */
 QMenu {

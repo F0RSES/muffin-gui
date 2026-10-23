@@ -15,6 +15,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPixmap>
+#include <QFontMetrics>
 #include <QStyle>
 #include <QToolButton>
 
@@ -40,6 +41,13 @@ constexpr int kMiniGapPx = 6;
 constexpr int kMiniGlowBlurPx = 14;
 constexpr int kMiniGlowRoomPx = 8;
 constexpr int kMiniGlowAlpha = 130;
+
+// The row's height is NOT a frozen 52 px: it is the tallest of a floor, the layout's own size hint, and
+// the name text's line height plus breathing room, so the row grows when a HiDPI font setting or a larger
+// theme size makes its contents taller instead of clipping the name's descenders or the chip's ring. At the
+// default 10pt/11pt sheet these three land on 52 px — the shipped look — and only move when the font does.
+constexpr int kRowMinHeightPx = 52;   // the design's row height at the base font
+constexpr int kRowPadY = 16;          // breathing room above+below the name line inside the floor
 
 // The chip's ring is drawn by the sheet from a status token, because QSS cannot read a QColor and
 // PingIndicator::dotColor() is C++'s to know. One spelling per status, both sheets, same words.
@@ -100,8 +108,8 @@ void ProfileCard::build()
     setFocusPolicy(Qt::TabFocus);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     // One height for every row, so a column of cards reads as a list rather than as notes of different
-    // length. The name's 16 px and the chips' 14 px both fit inside it with room to breathe.
-    setFixedHeight(52);
+    // length — but a height that FOLLOWS the font (see updateRowHeight() at the end of this function, and
+    // kRowMinHeightPx for the three terms), so a bigger theme/HiDPI size grows the row rather than clipping.
     setAccessibleName(QStringLiteral("profile"));
 
     auto *row = new QHBoxLayout(this);
@@ -142,6 +150,31 @@ void ProfileCard::build()
     row->addWidget(m_name, 1);
     row->addWidget(m_pingHost, 0, Qt::AlignVCenter);
     row->addWidget(m_menu, 0, Qt::AlignVCenter);
+
+    // Now that the layout, name and menu exist, size the row from them. setHosts() re-runs this once the
+    // chips are in (they are the tallest content), but a card that is shown with no chips still needs its
+    // height set from the name and the menu here.
+    updateRowHeight();
+}
+
+// The row's height, re-derived from the fonts it actually resolved to (through the application sheet, so
+// after polish) rather than a literal. The floor keeps the shipped 52 px at the base size; the layout's own
+// size hint carries the chip ring plus its glow room; and the name's line height plus breathing room is
+// what a HiDPI or larger-theme setting pushes past 52. Taking the max means the row grows with the text and
+// the ring never gets cut at the rim, and never shrinks below the design's minimum.
+void ProfileCard::updateRowHeight()
+{
+    ensurePolished();
+    if (m_name)
+        m_name->ensurePolished();
+
+    int natural = kRowMinHeightPx;
+    if (layout())
+        natural = qMax(natural, layout()->sizeHint().height());
+    if (m_name)
+        natural = qMax(natural, QFontMetrics(m_name->font()).height() + 2 * kRowPadY);
+
+    setFixedHeight(natural);
 }
 
 // The two things that can be done to the entry itself. Both are about the file on disk, not about the
@@ -248,6 +281,13 @@ void ProfileCard::setHosts(const QStringList &hosts)
         auto *value = new QLabel(chip);
         value->setObjectName(QStringLiteral("miniPingValue"));
         value->setTextFormat(Qt::PlainText);
+        // The figure is tabular like the dashboard's ring number: a latency that changes digits must not
+        // nudge the ring beside it sideways. Same pinning as PingIndicator — the app sheet's generic
+        // `QWidget { font-family }` rule would otherwise pull it back to the proportional UI face.
+        QFont valueMono = Theme::monoFont(9);
+        valueMono.setBold(true);
+        value->setFont(valueMono);
+        Theme::applyFontViaSheet(value, valueMono);
 
         box->addWidget(icon);
         box->addWidget(value);
@@ -261,6 +301,10 @@ void ProfileCard::setHosts(const QStringList &hosts)
         m_pings.insert(host, ping);
         refreshPing(host, m_pings[host]);
     }
+
+    // The chips just raised the row's natural height (ring + glow room), so re-derive the fixed height now
+    // that they exist — build() ran before there were any to measure.
+    updateRowHeight();
 }
 
 void ProfileCard::setPing(const QString &host, PingIndicator::PingStatus status, int latencyMs)

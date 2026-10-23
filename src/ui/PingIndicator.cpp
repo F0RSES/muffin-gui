@@ -3,7 +3,6 @@
 #include "LanguageManager.h"
 #include "Theme.h"
 
-#include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPaintEvent>
@@ -167,14 +166,18 @@ PingIndicator::PingIndicator(const QString &serviceName, QWidget *parent)
     m_ring = new PingRing(this);
 
     // The latency figure is the one number on this screen that must not shift sideways as it changes
-    // digits, so it is monospace by construction rather than by theme.
-    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    mono.setPixelSize(12);
+    // digits, so it is monospace by construction rather than by theme. It is sized in POINTS (matching the
+    // sheet's base `QWidget` rule), not a frozen device-pixel size, so a HiDPI font setting scales it with
+    // the rest of the UI. The family then has to be pinned with an inline sheet: the generic
+    // `QWidget { font-family: … }` rule outranks setFont() and would otherwise drop the figure back to the
+    // proportional UI face — the exact digit-drift this is here to prevent.
+    QFont mono = Theme::monoFont(9);
     mono.setBold(true);
 
     m_numberLabel = new QLabel(this);
     m_numberLabel->setObjectName(QStringLiteral("pingNumber"));
     m_numberLabel->setFont(mono);
+    Theme::applyFontViaSheet(m_numberLabel, mono);
     m_numberLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
     m_clockLabel = new QLabel(this);

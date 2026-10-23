@@ -6,6 +6,7 @@
 
 class QApplication;
 class QIcon;
+class QWidget;
 
 namespace zapret {
 
@@ -50,6 +51,21 @@ public:
     static QString styleSheet(bool dark);
     static QString resourcePathFor(bool dark);
     static QFont uiFont();
+    // Apply `f` to one widget through its OWN inline stylesheet so it survives the application sheet.
+    // A generic `QWidget { font-family: …; font-size: … }` rule in the app sheet OUTRANKS QFont::setFamily()/
+    // setPointSize() done in C++ (the style re-resolves the widget's font at polish time and the sheet wins),
+    // verified on Qt 6.10: a monospaced figure set in code fell back to the proportional UI face and its
+    // digits drifted. The only declaration that beats the app sheet for a single widget is that widget's own
+    // inline stylesheet — so the full font is written there. `f` carries a point size (not a frozen device
+    // pixel size) so the figure scales with a HiDPI setting alongside the rest of the UI.
+    static void applyFontViaSheet(QWidget *w, const QFont &f);
+    // The fixed (monospaced) face for figures that must not shift sideways as their digits change — the
+    // ping latency number on the dashboard and the mini-chip figure on a profile row both take it from
+    // here rather than each naming a family. Resolved through QFontDatabase (not a hardcoded name) so it
+    // works on a machine that carries none of the mono fonts a sheet might list. `pointSize` is in POINTS,
+    // the same unit the QSS `QWidget` base rule uses, so a HiDPI font setting scales these figures together
+    // with the rest of the UI instead of leaving them frozen at a device-pixel size.
+    static QFont monoFont(int pointSize = 9);
 
     // ---- colour tokens (mirror the QSS palette so C++-drawn widgets match) ----
     static QColor windowBackground();

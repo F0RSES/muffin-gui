@@ -69,7 +69,7 @@ QToolButton#langButton:focus { outline: none; border-color: #DDD6FE; }
 
 QLabel#railVersion {
     background-color: transparent;
-    color: #4B5563; font-size: 10px; font-weight: 500; letter-spacing: 0.3px;
+    color: #4B5563; font-size: 8pt; font-weight: 500; letter-spacing: 0.3px;
 }
 
 /* ---------- window chrome (frameless) ----------------------------------------
@@ -91,7 +91,7 @@ QWidget#headerBar { background-color: #F3F4F6; }
 QLabel#appTitle {
     background-color: transparent;
     font-family: "Montserrat", "Outfit", "Segoe UI", "Inter", sans-serif;
-    font-weight: 800; font-size: 24px; letter-spacing: 0.5px; color: #7C3AED;
+    font-weight: 800; font-size: 18pt; letter-spacing: 0.5px; color: #7C3AED;
 }
 QFrame#headerRule { background-color: #D1D5DB; border: none; }
 
@@ -104,7 +104,7 @@ QWidget#statusDot[statusKind="running"]  { background-color: #10B981; }
 QWidget#statusDot[statusKind="error"]    { background-color: #DC2626; }
 QLabel#statusText {
     background-color: transparent;
-    color: #10B981; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+    color: #10B981; font-size: 9pt; font-weight: 600; letter-spacing: 1px;
 }
 QLabel#statusText[statusKind="stopped"]  { color: #6B7280; }
 QLabel#statusText[statusKind="starting"] { color: #D97706; }
@@ -169,7 +169,7 @@ QWidget#miniPing[pingStatus="waiting"] { border-color: #D97706; }
 QWidget#miniPing[pingStatus="fail"]    { border-color: #DC2626; }
 QLabel#miniPingIcon { background-color: transparent; }
 QLabel#miniPingValue {
-    background-color: transparent; color: #4B5563; font-size: 11px; font-weight: 600;
+    background-color: transparent; color: #4B5563;
 }
 QLabel#muted     { color: #4B5563; }
 QLabel#placeholder { color: #6B7280; font-size: 11pt; }
@@ -314,10 +314,10 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 /* ---------- footer + ping badges ---------- */
 QFrame#footerBar { background-color: #F3F4F6; border-top: 1px solid #D1D5DB; }
-QLabel#footerHint { background-color: transparent; color: #4B5563; font-size: 11px; }
-QLabel#pingNumber { background-color: transparent; color: #1F2937; font-size: 12px; font-weight: 700; }
+QLabel#footerHint { background-color: transparent; color: #4B5563; font-size: 8pt; }
+QLabel#pingNumber { background-color: transparent; color: #1F2937; }
 QLabel#pingClock  { background-color: transparent; }
-QLabel#pingLabel  { background-color: transparent; color: #4B5563; font-size: 10px; }
+QLabel#pingLabel  { background-color: transparent; color: #4B5563; font-size: 8pt; }
 
 QMenu {
     background-color: #FFFFFF; color: #1F2937;

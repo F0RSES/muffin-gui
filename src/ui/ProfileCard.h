@@ -104,6 +104,7 @@ private:
     };
 
     void build();
+    void updateRowHeight();
     QMenu *buildMenu();
     void refreshPing(const QString &host, Ping &ping);
     void applyStateProperty(const char *name, bool on);
