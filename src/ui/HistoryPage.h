@@ -104,7 +104,21 @@ public:
     QTableView *table() const;
     QPushButton *clearButton() const;
     QLabel *headline() const;
-    QLabel *counts() const;
+    // The three counts, one chip each: the total, the failures, the substituted certificates. A chip is
+    // a separate label precisely so it can be coloured on its own, and the colour is a dynamic property
+    // the sheet paints — readable here, because "did the page decide to shout" is a decision, not a pixel.
+    QLabel *totalBadge() const;
+    QLabel *failedBadge() const;
+    QLabel *certBadge() const;
+    // One of "neutral", "danger", "warning": the QSS property name, for the same reason rateLevel() is —
+    // it is the contract between this page and both sheets, and a band the code stops stamping would
+    // leave a chip grey with nothing to say so.
+    QString badgeKind(const QLabel *badge) const;
+    // False while the record is empty: three grey zeroes would summarise a record that does not exist.
+    bool summaryBadgesVisible() const;
+    // The rounded panel the table sits inside. The panel, not the table, is what owns the corners — and
+    // what the corners are therefore tested against.
+    QWidget *tableCard() const;
     // True while the "nothing recorded yet" notice is what the user is shown instead of the table.
     bool showsEmptyNotice() const;
     // The headline percentage the page computed, or -1 when the history is empty.
@@ -138,9 +152,12 @@ private:
 
     QPushButton *m_clearButton = nullptr;
     QLabel *m_headline = nullptr;
-    QLabel *m_counts = nullptr;
+    QLabel *m_totalBadge = nullptr;
+    QLabel *m_failedBadge = nullptr;
+    QLabel *m_certBadge = nullptr;
     QWidget *m_rateBar = nullptr;       // a QProgressBar, styled: the widget is enough to poke
-    QStackedWidget *m_body = nullptr;   // table <-> empty notice
+    QStackedWidget *m_body = nullptr;   // table panel <-> empty notice
+    QWidget *m_tableCard = nullptr;     // the rounded panel; the table inside it paints nothing
     QTableView *m_table = nullptr;
     QLabel *m_emptyGlyph = nullptr;
     QLabel *m_emptyText = nullptr;

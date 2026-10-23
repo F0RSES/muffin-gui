@@ -56,6 +56,7 @@
 #include <QFontInfo>
 #include <QFontMetrics>
 #include <QGraphicsOpacityEffect>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
@@ -1263,6 +1264,12 @@ static void testTheme(QApplication &app)
     // the rate bar all need rules, or the page renders as loose labels on a black canvas.
     check(app.styleSheet().contains(QStringLiteral("historySummary")), "history summary rules present");
     check(app.styleSheet().contains(QStringLiteral("historyTable")), "history table rules present");
+    // The rounded panel the table sits in, and the three count chips: both are widgets the page builds by
+    // objectName, and an unstyled one is either a square table on a rounded card or plain loose text.
+    check(app.styleSheet().contains(QStringLiteral("historyTableCard")),
+          "history table panel rules present");
+    check(app.styleSheet().contains(QStringLiteral("historyBadge")),
+          "history count chip rules present");
     check(app.styleSheet().contains(QStringLiteral("historyRateBar")), "history rate bar rules present");
     check(app.styleSheet().contains(QStringLiteral("windowButton")), "window chrome rules present");
     // The rail and the page stack are the window's skeleton: if their rules go missing, the nav buttons
@@ -1355,6 +1362,38 @@ static void testTheme(QApplication &app)
         // through: this is the sheet promising not to override them.
         check(!sheet.contains(QStringLiteral("historyTable::item { background")),
               QStringLiteral("%1 sheet leaves the row colours to the model").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        // The rounded box belongs to the panel the table sits in, not to the table: a QTableView's radius
+        // rounds only its FRAME, while the header band and the rows are children that keep square corners
+        // and paint over the arc — the bug. So the panel declares the border and the radius, the table
+        // declares no fill and no border of its own, and HistoryPage keeps the table 4 px clear of the
+        // panel's edge (checked where the corners are read, below).
+        check(ruleProperty(sheet, QStringLiteral("QFrame#historyTableCard"),
+                           QStringLiteral("border-radius"))
+                  == QStringLiteral("12px"),
+              QStringLiteral("%1 sheet rounds the table's panel").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        // The table takes the panel's own fill and no border of its own: the panel is the only thing in
+        // there that draws a box. (The fill cannot be `transparent` either — a scroll viewport that paints
+        // nothing composites onto black, which is why this sheet's last block exists.)
+        check(ruleProperty(sheet, QStringLiteral("QTableView#historyTable"),
+                           QStringLiteral("background-color"))
+                  == ruleProperty(sheet, QStringLiteral("QFrame#historyTableCard"),
+                                  QStringLiteral("background-color")),
+              QStringLiteral("%1 sheet makes the table and its panel one surface").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        check(ruleProperty(sheet, QStringLiteral("QTableView#historyTable"),
+                           QStringLiteral("border"))
+                  == QStringLiteral("none"),
+              QStringLiteral("%1 sheet gives the panel the only border in there").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        // The chips' two shouting bands are the sheet's own state colours, read off the property the code
+        // stamps. A band missing from one theme leaves that theme's failures grey.
+        check(sheet.contains(QStringLiteral("historyBadge[badgeKind=\"danger\"]")),
+              QStringLiteral("%1 sheet colours a chip that counted failures").arg(
+                  dark ? QStringLiteral("dark") : QStringLiteral("light")));
+        check(sheet.contains(QStringLiteral("historyBadge[badgeKind=\"warning\"]")),
+              QStringLiteral("%1 sheet colours a chip that counted substitutions").arg(
                   dark ? QStringLiteral("dark") : QStringLiteral("light")));
         // The dashboard's painted circles read their colours from C++ tokens, but everything framing them
         // is sheet styling — and both sheets must carry it, or the light theme shows an unstyled rail.
@@ -1657,6 +1696,26 @@ protected:
     }
 };
 
+// The colour one sheet declares for one selector property. The corner checks below compare pixels
+// with colours the SHEET owns - the panel fill and the header band - so reading them out of the
+// sheet is what keeps those assertions true in either theme; hardcoding them here would test this
+// file, not a theme.
+QColor sheetColor(const QString &sheet, const QString &selector, const QString &prop)
+{
+    const int at = sheet.indexOf(selector);
+    const int open = at < 0 ? -1 : sheet.indexOf(QLatin1Char('{'), at);
+    const int close = open < 0 ? -1 : sheet.indexOf(QLatin1Char('}'), open);
+    if (close < 0)
+        return QColor();
+    const QStringList decls = sheet.mid(open + 1, close - open - 1).split(QLatin1Char(';'));
+    for (const QString &d : decls) {
+        const int colon = d.indexOf(QLatin1Char(':'));
+        if (colon > 0 && d.left(colon).trimmed().compare(prop, Qt::CaseInsensitive) == 0)
+            return QColor(d.mid(colon + 1).trimmed());
+    }
+    return QColor();
+}
+
 // What a rendered row strip is mostly made of: its background. Averaged over the strip rather than
 // sampled, because the text in it is a few hundred pixels against twenty thousand of tint.
 QColor rowAverage(const QImage &shot, int row, int rowHeight)
@@ -1817,9 +1876,61 @@ static void testHistoryPage()
     check(page.headline()->text() == LanguageManager::tr(QStringLiteral("history.headline"),
                                                         QStringLiteral("33")),
           "and the headline says exactly that");
-    check(page.counts()->text() == LanguageManager::tr(QStringLiteral("history.counts"))
-                                       .arg(3).arg(1).arg(1),
-          "the small line names the total, the failures and the interceptions");
+    // ---- the three count chips ----
+    // One sentence cannot be coloured per number, so the summary is three chips and the colour is the
+    // decision worth testing: red and amber are claims that something happened, which means a zero must
+    // not wear one and a seven must not wear grey.
+    check(page.summaryBadgesVisible(), "a record with rows in it shows its chips");
+    check(page.totalBadge()->text()
+              == LanguageManager::tr(QStringLiteral("history.badge.total")).arg(3),
+          "the first chip names what the percentage was computed from");
+    check(page.failedBadge()->text()
+              == LanguageManager::tr(QStringLiteral("history.badge.failed")).arg(1),
+          "…the second the checks that never connected…");
+    check(page.certBadge()->text()
+              == LanguageManager::tr(QStringLiteral("history.badge.cert")).arg(1),
+          "…and the third the certificates that came back somebody else's");
+    check(page.badgeKind(page.totalBadge()) == QStringLiteral("neutral"),
+          "a total is a number, never an alarm");
+    check(page.badgeKind(page.failedBadge()) == QStringLiteral("danger"),
+          "one failure does wear the sheet's red");
+    check(page.badgeKind(page.certBadge()) == QStringLiteral("warning"),
+          "…and one substitution its amber");
+    // …and the band reaches the screen. Each chip carries its figure in an inline stylesheet (the mono
+    // font needs one to beat the sheet's generic `QWidget` rule), which is exactly the situation where a
+    // widget's own colours could silently stop coming from the app sheet — so a chip is rendered and the
+    // colour it claimed is counted inside it.
+    auto pixelsOf = [](QLabel *badge, const QColor &ink) {
+        const QImage img = badge->grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        int hits = 0;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const QColor c = img.pixelColor(x, y);
+                if (qAbs(c.red() - ink.red()) < 24 && qAbs(c.green() - ink.green()) < 24
+                    && qAbs(c.blue() - ink.blue()) < 24)
+                    ++hits;
+            }
+        return hits;
+    };
+    check(pixelsOf(page.failedBadge(), Theme::error()) > 40,
+          QStringLiteral("the failure chip is rendered in the sheet's red (%1 px of %2x%3)")
+              .arg(pixelsOf(page.failedBadge(), Theme::error()))
+              .arg(page.failedBadge()->width()).arg(page.failedBadge()->height()));
+    check(pixelsOf(page.certBadge(), Theme::warning()) > 40,
+          QStringLiteral("…and the substitution chip in its amber (%1 px of %2x%3)")
+              .arg(pixelsOf(page.certBadge(), Theme::warning()))
+              .arg(page.certBadge()->width()).arg(page.certBadge()->height()));
+    // Read across as well as straight: each chip wears one colour, not either. Without these the two
+    // counts above would be satisfied by a chip that painted the wrong state colour, and the two state
+    // colours are close enough for a loose tolerance to let that through.
+    check(pixelsOf(page.failedBadge(), Theme::warning()) == 0,
+          "…and the failure chip is not the amber one");
+    check(pixelsOf(page.certBadge(), Theme::error()) == 0, "…and the substitution chip is not the red one");
+    check(page.certBadge()->text() != page.failedBadge()->text(),
+          "the two chips are different labels, not one widget checked twice");
+    check(pixelsOf(page.totalBadge(), Theme::error()) == 0,
+          "…while the total chip wears no alarm colour at all");
+
     check(page.table()->model()->rowCount() == page.rowCount(),
           "the hook the suite reads is the table's own row count, not a second number");
 
@@ -1880,6 +1991,103 @@ static void testHistoryPage()
         check(inkCount(2, Theme::success()) > 20, "the passed row's status word is green");
     }
 
+    // The three chips have to fit beside the headline rather than push it out: the window is a fixed
+    // 900 px, and a summary that overflowed would clip the one number the page exists to show.
+    if (QLayout *fit = page.layout())
+        fit->activate();
+    const QRect chips(page.totalBadge()->mapTo(&page, QPoint(0, 0)),
+                      page.certBadge()->mapTo(&page, QPoint(page.certBadge()->width(), 0)));
+    const QRect head(page.headline()->mapTo(&page, QPoint(0, 0)),
+                     page.headline()->mapTo(&page, QPoint(page.headline()->width(), 0)));
+    check(chips.right() < page.width() && chips.left() > head.right()
+              && page.totalBadge()->height() > 8 && page.certBadge()->width() > 20,
+          QStringLiteral("the chips fit on the summary line, after the headline (head ends %1, "
+                         "chips run %2..%3 of %4)")
+              .arg(head.right()).arg(chips.left()).arg(chips.right()).arg(page.width()));
+
+    // ---- does the panel's shape actually hold? ----
+    //
+    // Everything above is the model's side of the page. Its shape is the other half, and it is the half
+    // that broke silently: the radius used to sit on the QTableView, which rounds its own frame while the
+    // header band paints straight over the arc, square-cornered and outside the panel. No assertion on the
+    // rows and no contains("border-radius") on the sheet can see that, so the pixels are read - against the
+    // colours the sheet itself declares, which is what keeps each of them true in either theme.
+    {
+        QWidget *card = page.tableCard();
+        QHeaderView *hdr = page.table()->horizontalHeader();
+        check(card != nullptr && hdr != nullptr && card->width() > 120 && card->height() > 60,
+              QStringLiteral("the table's panel is on screen at %1x%2")
+                  .arg(card ? card->width() : -1).arg(card ? card->height() : -1));
+        if (card && hdr && card->width() > 120 && card->height() > 60) {
+            auto within6 = [](const QColor &a, const QColor &b) {
+                return qAbs(a.red() - b.red()) <= 6 && qAbs(a.green() - b.green()) <= 6
+                       && qAbs(a.blue() - b.blue()) <= 6;
+            };
+            // Run it in BOTH themes, and each theme proves something the other cannot. The three
+            // greys in play are: light page #F3F4F6, card #FFFFFF, band #F3F4F6; dark page #0B0C10,
+            // card #12131A, band #15161C — and within6() is the yardstick.
+            //
+            //  * A corner left square because the table sits flush to the panel reads the CARD FILL
+            //    there: 12 levels off the page grey in light, 14 in dark. Both runs catch it.
+            //  * A corner covered by the HEADER BAND reads the band colour: 14 off the page in dark,
+            //    so dark catches it — but #F3F4F6 in light is the page's own grey, so a band leak in
+            //    light is invisible to this particular sample. It is dark's job, not light's.
+            //  * Which rule owns the band is light's job. Dark declares that grey twice — #15161C on
+            //    QHeaderView#historyHeader::section and the same #15161C on the generic
+            //    QHeaderView::section fallback at the foot of the sheet — so a band painted by either
+            //    rule looks identical there. Light declares #F3F4F6 against that fallback's #E5E7EB,
+            //    fourteen apart: only the light run can see the ID-qualified rule beating the
+            //    fallback, which is what the inset relies on (a band the fallback re-tinted would
+            //    change colour under the arc without changing its shape).
+            //
+            // Reading the wanted colours out of the live sheet instead of hardcoding them is what
+            // lets one loop cover both.
+            for (const bool dark : {true, false}) {
+                const QString theme = dark ? QStringLiteral("dark") : QStringLiteral("light");
+                Theme::apply(*static_cast<QApplication *>(qApp), dark);
+                if (QLayout *ls = page.layout())
+                    ls->activate();
+                const QImage chrome = page.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+                const QColor pageInk = Theme::windowBackground();
+                const QColor bandInk = sheetColor(static_cast<QApplication *>(qApp)->styleSheet(),
+                                                  QStringLiteral("QHeaderView#historyHeader::section"),
+                                                  QStringLiteral("background-color"));
+                check(bandInk.isValid(),
+                      QStringLiteral("the %1 sheet declares the header band's colour").arg(theme));
+                // One pixel inside the panel's frame, at the corner. Outside a 12 px arc there is
+                // nothing but the page behind the panel, and a band that leaked covers this point.
+                const QPoint tl = card->mapTo(&page, QPoint(1, 1));
+                const QPoint tr = card->mapTo(&page, QPoint(card->width() - 2, 1));
+                // And the band itself, read in the strip where its text does not paint: proof the clean
+                // corners are a shape rather than a header that forgot to draw at all. In the left
+                // padding of the first section, vertically centred — band colour there, and no glyph,
+                // whichever way the header's own padding resolves.
+                const QPoint band = hdr->mapTo(&page, QPoint(3, hdr->height() / 2));
+                check(chrome.rect().contains(tl) && within6(chrome.pixelColor(tl), pageInk),
+                      QStringLiteral("%1: the panel's top-left corner shows the page behind it, not "
+                                     "the header band (%2,%3,%4)")
+                          .arg(theme).arg(chrome.pixelColor(tl).red())
+                          .arg(chrome.pixelColor(tl).green()).arg(chrome.pixelColor(tl).blue()));
+                check(chrome.rect().contains(tr) && within6(chrome.pixelColor(tr), pageInk),
+                      QStringLiteral("…%1 and so does its top-right one (%2,%3,%4)")
+                          .arg(theme).arg(chrome.pixelColor(tr).red())
+                          .arg(chrome.pixelColor(tr).green()).arg(chrome.pixelColor(tr).blue()));
+                check(chrome.rect().contains(band) && within6(chrome.pixelColor(band), bandInk),
+                      QStringLiteral("%1: the header band is painted where the sheet puts it "
+                                     "(%2,%3,%4), so the clean corners are a shape and not a blank")
+                          .arg(theme).arg(chrome.pixelColor(band).red())
+                          .arg(chrome.pixelColor(band).green())
+                          .arg(chrome.pixelColor(band).blue()));
+                chrome.save(dark ? QStringLiteral("/tmp/stats-dark.png")
+                                 : QStringLiteral("/tmp/stats-light.png"));
+            }
+            // Leave the page on dark, the default the rest of the binary and the app itself expect.
+            Theme::apply(*static_cast<QApplication *>(qApp), true);
+            if (QLayout *ls = page.layout())
+                ls->activate();
+        }
+    }
+
     // ---- sorting ----
     // The unmeasured row has to land at the far end of an ascending latency sort, not at the front: a
     // reader clicking the latency header is asking what is slowest to answer, and "it never answered" is
@@ -1918,8 +2126,8 @@ static void testHistoryPage()
           "the page says how many rows went, so the window can put the number in the journal");
     check(page.headline()->text() == LanguageManager::tr(QStringLiteral("history.headline.empty")),
           "the headline switches to the sentence an empty record deserves");
-    check(page.counts()->text().isEmpty(),
-          "…and the counts line goes quiet rather than reciting three zeroes at it");
+    check(!page.summaryBadgesVisible(),
+          "…and the three chips go quiet rather than reciting three zeroes at it");
     // The bar's band is a dynamic property the sheet colours. "none" is the point: an empty record must
     // not be painted as a verdict, and a grey thread is the only honest thing to show for it.
     check(page.rateLevel() == QStringLiteral("none"),
@@ -1938,6 +2146,11 @@ static void testHistoryPage()
               == QStringLiteral("Passed"),
           "…and so does a row's verdict word, on a row the page was not rebuilt for");
     check(!page.showsEmptyNotice(), "the one new row is enough to put the table back");
+    check(page.summaryBadgesVisible(), "…and the chips came back with it");
+    check(page.badgeKind(page.failedBadge()) == QStringLiteral("neutral"),
+          "a record with nothing failed takes the red off the failure chip");
+    check(page.badgeKind(page.certBadge()) == QStringLiteral("neutral"),
+          "…and the amber off the certificate one");
     LanguageManager::instance().setCode(QStringLiteral("ru"));
     page.retranslateUi();
     check(model->headerData(colVerdict, Qt::Horizontal, Qt::DisplayRole).toString()

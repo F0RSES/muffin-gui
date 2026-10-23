@@ -333,9 +333,27 @@ QProgressBar#historyRateBar[rateLevel="good"]::chunk { background-color: #34D399
 QProgressBar#historyRateBar[rateLevel="fair"]::chunk { background-color: #FBBF24; border-radius: 4px; }
 QProgressBar#historyRateBar[rateLevel="poor"]::chunk { background-color: #F87171; border-radius: 4px; }
 QProgressBar#historyRateBar[rateLevel="none"]::chunk { background-color: #262A36; border-radius: 4px; }
-QTableView#historyTable {
+/* The panel owns the rounded box, and the table inside it sits 4 px away from that box instead of being
+   clipped to it. A border-radius on a QTableView rounds only its own FRAME — the header band and the rows
+   are separate child widgets, and a styled widget does not clip its children — so the header's square top
+   corners used to paint straight over the arc and stick out of the panel. Nothing rounds them in place:
+   `::section` has no positional `:first`/`:last` state in QSS (measured on Qt 6.10: the declaration parses
+   and does nothing), a radius on every section notches each column boundary, and a mask clips in hard
+   stair-steps over the sheet's own antialiased border. So the inset does it geometrically, the way
+   #logPanel and #profileCard already do — 4 px is more than the 3.6 px a 12 px arc needs to clear its own
+   corner, so no square corner can ever land on the arc, in either theme, at any scale, on any Qt. The 12
+   here and the 4 in HistoryPage::build() are one decision in two files; uitest reads the corners to bind
+   them. */
+QFrame#historyTableCard {
     background-color: #12131A;
     border: 1px solid #262A36; border-radius: 12px;
+}
+/* The table takes the panel's own fill rather than `transparent`: a scroll viewport that paints nothing
+   composites onto black, which is why this sheet's last block exists. Matching the panel is also what
+   makes the inset read as one surface rather than a picture in a frame. */
+QTableView#historyTable {
+    background-color: #12131A;
+    border: none;
     gridline-color: #1F2230;
     selection-background-color: #1C1727; selection-color: #E7E9F2;
     outline: none;
@@ -354,6 +372,18 @@ QHeaderView#historyHeader::up-arrow { image: none; width: 0px; height: 0px; }
 QHeaderView#historyHeader::down-arrow { image: none; width: 0px; height: 0px; }
 QWidget#historyEmpty { background-color: transparent; }
 QLabel#historyEmptyGlyph { background-color: transparent; }
+/* The three counts above the table. A chip is the summary's smallest claim, so it is the sheet's own
+   recessed plate with the state colours on the two numbers that can be a problem — #F87171 and #FBBF24
+   are Theme::error()/Theme::warning(), the same red and amber the rows and the rate bar's chunk paint
+   with, and #0B0C10 ink keeps them readable on a raised fill rather than shouting a hole in the panel.
+   Which chip wears which is decided in C++ and stamped as [badgeKind] — the code owns the decision, the
+   sheet owns the colour — so a chip that never changes hands still cannot drift from the other two. */
+QLabel#historyBadge {
+    background-color: #1F222D; color: #8A91A6;
+    border-radius: 9px; padding: 3px 10px; font-weight: 600;
+}
+QLabel#historyBadge[badgeKind="danger"]  { background-color: #F87171; color: #0B0C10; }
+QLabel#historyBadge[badgeKind="warning"] { background-color: #FBBF24; color: #0B0C10; }
 
 /* ---------- scroll ---------- */
 QScrollArea, QScrollArea#cardScroll { background: transparent; border: none; }

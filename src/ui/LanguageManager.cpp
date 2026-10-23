@@ -319,13 +319,15 @@ const QVector<Row> &catalog()
         ROW("history.headline.empty", "Проверок ещё не было", "No checks yet",
             "Todavía no hay comprobaciones", "Noch keine Prüfungen", "尚无检查记录",
             "Aucun contrôle pour l'instant", "अभी कोई जाँच नहीं हुई"),
-        ROW("history.counts", "Всего: %1 · Ошибок: %2 · Подмен сертификата: %3",
-            "Total: %1 · Failed: %2 · Certificates substituted: %3",
-            "Total: %1 · Errores: %2 · Certificados sustituidos: %3",
-            "Gesamt: %1 · Fehler: %2 · Ausgetauschte Zertifikate: %3",
-            "总数：%1 · 失败：%2 · 证书替换：%3",
-            "Total : %1 · Échecs : %2 · Certificats substitués : %3",
-            "कुल: %1 · विफल: %2 · प्रतिस्थापित प्रमाणपत्र: %3"),
+        // Three counts, three chips, one number per chip: a chip is coloured on its own, so the wording
+        // has to fit a small plate. The third is deliberately terse ("Подмен", not "Подмен сертификата")
+        // and carries the full sentence as its tooltip — the column it counts spells the phrase out.
+        ROW("history.badge.total", "Всего: %1", "Total: %1", "Total: %1", "Gesamt: %1", "总数：%1",
+            "Total : %1", "कुल: %1"),
+        ROW("history.badge.failed", "Ошибок: %1", "Failed: %1", "Errores: %1", "Fehler: %1",
+            "失败：%1", "Échecs : %1", "विफल: %1"),
+        ROW("history.badge.cert", "Подмен: %1", "Substituted: %1", "Sustituidos: %1",
+            "Ausgetauscht: %1", "替换：%1", "Substitués : %1", "प्रतिस्थापित: %1"),
         ROW("history.col.time", "Время", "Time", "Hora", "Zeit", "时间", "Heure", "समय"),
         ROW("history.col.preset", "Профиль", "Profile", "Perfil", "Profil", "配置文件",
             "Profil", "प्रोफ़ाइल"),

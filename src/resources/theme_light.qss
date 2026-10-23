@@ -290,9 +290,17 @@ QProgressBar#historyRateBar[rateLevel="good"]::chunk { background-color: #059669
 QProgressBar#historyRateBar[rateLevel="fair"]::chunk { background-color: #D97706; border-radius: 4px; }
 QProgressBar#historyRateBar[rateLevel="poor"]::chunk { background-color: #DC2626; border-radius: 4px; }
 QProgressBar#historyRateBar[rateLevel="none"]::chunk { background-color: #D1D5DB; border-radius: 4px; }
-QTableView#historyTable {
+/* The panel owns the rounded box and the table inside it paints nothing — the same shape the dark sheet
+   explains at length: a QTableView's radius rounds only its FRAME, while the header band and the rows
+   are children that keep square corners and paint over the arc. The inset settles it, not a clip. */
+QFrame#historyTableCard {
     background-color: #FFFFFF;
     border: 1px solid #D1D5DB; border-radius: 12px;
+}
+/* The table is the panel's fill, not transparent — see the dark sheet for why. */
+QTableView#historyTable {
+    background-color: #FFFFFF;
+    border: none;
     gridline-color: #E5E7EB;
     selection-background-color: #EDE9FE; selection-color: #1F2937;
     outline: none;
@@ -307,6 +315,15 @@ QHeaderView#historyHeader::up-arrow { image: none; width: 0px; height: 0px; }
 QHeaderView#historyHeader::down-arrow { image: none; width: 0px; height: 0px; }
 QWidget#historyEmpty { background-color: transparent; }
 QLabel#historyEmptyGlyph { background-color: transparent; }
+/* The three counts, on the light canvas: the sheet's own quiet grey plate, and the two state colours at
+   their light-sheet values (#DC2626/#D97706 — Theme::error()/Theme::warning() here) with white ink,
+   which is the same pair the rate bar's chunk and the failing rows use. A chip's band is stamped in C++. */
+QLabel#historyBadge {
+    background-color: #F3F4F6; color: #4B5563;
+    border-radius: 9px; padding: 3px 10px; font-weight: 600;
+}
+QLabel#historyBadge[badgeKind="danger"]  { background-color: #DC2626; color: #FFFFFF; }
+QLabel#historyBadge[badgeKind="warning"] { background-color: #D97706; color: #FFFFFF; }
 
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }

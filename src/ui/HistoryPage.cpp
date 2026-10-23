@@ -47,6 +47,23 @@ constexpr int kRateFairMin = 60;
 // unpolish/repolish or the style never re-reads it.
 const char kRateLevelProperty[] = "rateLevel";
 
+// How far the table sits inside its panel. The panel rounds its corners with a 12 px arc (both sheets'
+// #historyTableCard), and a rounded rectangle only clears its own corner 12 - 12/sqrt(2) ≈ 3.5 px in —
+// so 4 px of panel between the border and the table is the smallest inset that guarantees no square
+// corner of the header band or a row tint ever lands on the arc. Rounding them instead is not available:
+// QSS has no positional state for header sections, a radius on the header widget loses to the sections
+// painting over it, and a mask clips in stair-steps. See the sheet's comment for the same arithmetic.
+constexpr int kTableInsetPx = 4;
+
+// The three counts' colour band, stamped the same way and for the same reason: "neutral" is a number that
+// is not a problem, "danger" the checks that never connected, "warning" the certificates that came back
+// somebody else's. The two hues are the sheet's own state colours — the same red and amber the rows and
+// the rate bar already paint with — so "3" on a red chip and three red rows are one claim, not two.
+const char kBadgeKindProperty[] = "badgeKind";
+const char kBadgeNeutral[] = "neutral";
+const char kBadgeDanger[] = "danger";
+const char kBadgeWarning[] = "warning";
+
 // The digits' font, resolved once. The theme's UI family is proportional by design — it is a text font —
 // and the two columns a reader scans downward are numbers, so they take the system's fixed face instead.
 // Asking QFontDatabase rather than naming a family is what keeps this working on a machine that has none
@@ -59,6 +76,23 @@ const QFont &monoFont()
         return f;
     }();
     return font;
+}
+
+// QSS never re-reads a dynamic property on its own, so a chip whose count crossed zero has to be taken
+// apart and put back together — the same three lines ProfileCard's ping chips and this page's rate bar
+// pay. Skipping the dance when the band has not moved keeps a refresh (one per host, per cycle) from
+// re-polishing three labels for nothing.
+void applyBadgeKind(QLabel *badge, const char *kind)
+{
+    if (!badge)
+        return;
+    const QString token = QString::fromLatin1(kind);
+    if (badge->property(kBadgeKindProperty).toString() == token)
+        return;
+    badge->setProperty(kBadgeKindProperty, token);
+    badge->style()->unpolish(badge);
+    badge->style()->polish(badge);
+    badge->update();
 }
 
 // The stored format is ISO to the second (HistoryStore::toJson); the displayed one drops the T and the
@@ -271,19 +305,41 @@ void HistoryPage::build()
 
     auto *numbers = new QHBoxLayout;
     numbers->setContentsMargins(0, 0, 0, 0);
-    numbers->setSpacing(14);
+    numbers->setSpacing(8);
 
     m_headline = new QLabel(summary);
     m_headline->setObjectName(QStringLiteral("historyHeadline"));
 
-    m_counts = new QLabel(summary);
-    m_counts->setObjectName(QStringLiteral("muted"));
-    m_counts->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_counts->setWordWrap(true);
+    // The three counts are chips rather than one sentence. A sentence has one colour; a chip has its own,
+    // so "Ошибок: 0" can stay quiet while "Ошибок: 7" wears the sheet's red — which is the whole point of
+    // showing the numbers at all: a reader who is not looking for a number should still see the one that
+    // is a problem. Their figures take the same fixed face the table's number columns use, pinned through
+    // each chip's own inline sheet because the generic `QWidget` font rule in both sheets outranks
+    // setFont() and would let the counts shift sideways as their digits change.
+    auto chip = [summary](const QString &tipKey) {
+        auto *badge = new QLabel(summary);
+        badge->setObjectName(QStringLiteral("historyBadge"));
+        badge->setProperty(kBadgeKindProperty, QLatin1String(kBadgeNeutral));
+        badge->setAlignment(Qt::AlignCenter);
+        badge->setTextFormat(Qt::PlainText);
+        badge->setFont(monoFont());
+        Theme::applyFontViaSheet(badge, monoFont());
+        if (!tipKey.isEmpty())
+            i18nTip(badge, tipKey);
+        return badge;
+    };
+
+    m_totalBadge = chip(QString());
+    m_failedBadge = chip(QString());
+    // "Подмен: 2" is terse by necessity — the plate is small — so the phrase the column spells out in
+    // full rides on it as a tooltip: what a substituted certificate says about the path in the middle.
+    m_certBadge = chip(QStringLiteral("history.verdict.intercepted_tip"));
 
     numbers->addWidget(m_headline);
     numbers->addStretch(1);
-    numbers->addWidget(m_counts);
+    numbers->addWidget(m_totalBadge);
+    numbers->addWidget(m_failedBadge);
+    numbers->addWidget(m_certBadge);
     summaryBox->addLayout(numbers);
 
     auto *bar = new QProgressBar(summary);
@@ -297,11 +353,23 @@ void HistoryPage::build()
 
     column->addWidget(summary);
 
-    // ---- the body: the table, or the reason there is no table ----
+    // ---- the body: the table in its panel, or the reason there is no table ----
     m_body = new QStackedWidget(this);
     m_body->setObjectName(QStringLiteral("historyBody"));
 
-    m_table = new QTableView(m_body);
+    // The panel owns the rounded box and the table inside it paints nothing of its own. A radius on a
+    // QTableView only rounds its FRAME — the header band and the rows are separate child widgets, and a
+    // styled widget does not clip its children — so the header's square top corners used to sit on top of
+    // the arc and stick out of the panel, which is the bug this shape exists to avoid. The corners are
+    // kept off the arc by kTableInsetPx rather than by clipping; see the constant and the sheet's comment.
+    m_tableCard = new QFrame(m_body);
+    m_tableCard->setObjectName(QStringLiteral("historyTableCard"));
+    m_tableCard->setAttribute(Qt::WA_StyledBackground, true);
+    auto *cardBox = new QVBoxLayout(m_tableCard);
+    cardBox->setContentsMargins(kTableInsetPx, kTableInsetPx, kTableInsetPx, kTableInsetPx);
+    cardBox->setSpacing(0);
+
+    m_table = new QTableView(m_tableCard);
     m_table->setObjectName(QStringLiteral("historyTable"));
     auto *model = new HistoryTableModel(this);
     m_table->setModel(model);
@@ -335,7 +403,8 @@ void HistoryPage::build()
     header->setSectionResizeMode(HistoryTableModel::ColumnLatency, QHeaderView::ResizeToContents);
     m_table->setSortingEnabled(true);
     m_table->sortByColumn(HistoryTableModel::ColumnTime, Qt::DescendingOrder);
-    m_body->addWidget(m_table);
+    cardBox->addWidget(m_table);
+    m_body->addWidget(m_tableCard);
 
     // The empty state, which is the only state a first run has. A bare grid of column headings would read
     // as a page that lost its data; this names the two things that would put rows in it.
@@ -399,19 +468,34 @@ void HistoryPage::updateSummary(const Tally &tally)
     if (rate < 0)
     {
         // "0%" would be a claim about checks that never happened. The empty record says so in words, and
-        // the counts line goes quiet with it: "Всего: 0 · Ошибок: 0" restates the sentence above it in a
-        // smaller font, and the placeholder below already explains what to do about it.
+        // the three chips go quiet with it: "Всего: 0 / Ошибок: 0 / Подмен: 0" restates the sentence above
+        // in three small plates, and the placeholder below already explains what to do about it.
         m_headline->setText(LanguageManager::tr(QStringLiteral("history.headline.empty")));
-        m_counts->clear();
+        m_totalBadge->hide();
+        m_failedBadge->hide();
+        m_certBadge->hide();
     }
     else
     {
         m_headline->setText(LanguageManager::tr(QStringLiteral("history.headline"),
                                                 QString::number(rate)));
-        m_counts->setText(LanguageManager::tr(QStringLiteral("history.counts"))
-                              .arg(tally.total)
-                              .arg(tally.failed)
-                              .arg(tally.intercepted));
+        // Zero never wears a state colour. The red and the amber are claims that something happened, and a
+        // chip that shouts about nothing would train the reader to ignore the one time it is right.
+        m_totalBadge->setText(LanguageManager::tr(QStringLiteral("history.badge.total"))
+                                  .arg(tally.total));
+        applyBadgeKind(m_totalBadge, kBadgeNeutral);
+
+        m_failedBadge->setText(LanguageManager::tr(QStringLiteral("history.badge.failed"))
+                                   .arg(tally.failed));
+        applyBadgeKind(m_failedBadge, tally.failed > 0 ? kBadgeDanger : kBadgeNeutral);
+
+        m_certBadge->setText(LanguageManager::tr(QStringLiteral("history.badge.cert"))
+                                 .arg(tally.intercepted));
+        applyBadgeKind(m_certBadge, tally.intercepted > 0 ? kBadgeWarning : kBadgeNeutral);
+
+        m_totalBadge->show();
+        m_failedBadge->show();
+        m_certBadge->show();
     }
 
     // A QProgressBar cannot show "no measurement", so an empty history moves the bar to zero without
@@ -520,7 +604,25 @@ QPushButton *HistoryPage::clearButton() const { return m_clearButton; }
 
 QLabel *HistoryPage::headline() const { return m_headline; }
 
-QLabel *HistoryPage::counts() const { return m_counts; }
+QLabel *HistoryPage::totalBadge() const { return m_totalBadge; }
+
+QLabel *HistoryPage::failedBadge() const { return m_failedBadge; }
+
+QLabel *HistoryPage::certBadge() const { return m_certBadge; }
+
+QString HistoryPage::badgeKind(const QLabel *badge) const
+{
+    return badge ? badge->property(kBadgeKindProperty).toString() : QString();
+}
+
+bool HistoryPage::summaryBadgesVisible() const
+{
+    // The visible flag rather than isVisible(): the page is built and read without ever being shown, and
+    // a chip that was hidden on purpose is the fact being asked about, not whether its window is up.
+    return m_totalBadge && !m_totalBadge->isHidden();
+}
+
+QWidget *HistoryPage::tableCard() const { return m_tableCard; }
 
 bool HistoryPage::showsEmptyNotice() const
 {
