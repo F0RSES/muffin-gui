@@ -8,7 +8,7 @@ project(Muffin LANGUAGES CXX)
 # which is what keeps muffin_<ver>_amd64.deb, Muffin-Setup-<ver>.exe and the tag themselves in
 # agreement. The default is the current release line, so local `cmake`/`cpack` runs still produce
 # sensibly named files and a helper that reports a real version.
-set(MUFFIN_VERSION "0.5.0" CACHE STRING "Version stamped into the generated packages")
+set(MUFFIN_VERSION "0.6.0" CACHE STRING "Version stamped into the generated packages")
 
 # ---- Qt6 -------------------------------------------------------------------
 # Core logic depends on QtCore (QString/QDir/QProcess); the reachability prober adds QtNetwork, and
