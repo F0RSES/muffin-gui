@@ -256,13 +256,13 @@ MainWindow::MainWindow(QWidget *parent)
     // dashboard whose Zapret half is lit rather than one whose WARP half is lit and whose power
     // button will not do anything. The clamp does not write settings — the store remembers the
     // intent, so putting WARP back lights the pill again without the user picking it twice.
-    m_modeToggle->setMode(MainWindow::clampModeForAvailability(
+    // Polling only runs while the mode is actually pointed at the tunnel — a status probe of a
+    // warp-cli nobody is looking at would just wake the process table — and the pill, the store and the
+    // poll are all moved by one call so the seed cannot half-do it. Going through setCurrentMode() also
+    // means this first move arrives at the pill as a programmatic one, not as a request to be asked about.
+    setCurrentMode(MainWindow::clampModeForAvailability(
         m_settings->warpMode() ? ModeToggle::Mode::Warp : ModeToggle::Mode::Zapret,
         m_warp->isAvailable()));
-    // Polling only runs while the mode is actually pointed at the tunnel — a status probe of a
-    // warp-cli nobody is looking at would just wake the process table.
-    if (m_modeToggle->mode() == ModeToggle::Mode::Warp)
-        m_warp->setPollingEnabled(true);
 
     m_manager->setZapretDir(m_settings->zapretPath());
     updateStatusUi();
@@ -1211,7 +1211,7 @@ void MainWindow::onPowerClicked()
     // than wrapping every existing state test in a mode check keeps zapret's gating (which is
     // subtle and has a lot of comments) untouched, and lets a future change to one subsystem's
     // state machine be a change to one branch instead of an audit of the other.
-    if (m_modeToggle && m_modeToggle->mode() == ModeToggle::Mode::Warp) {
+    if (m_mode == ModeToggle::Mode::Warp) {
         onWarpPowerClicked();
         return;
     }
@@ -1773,6 +1773,65 @@ ModeToggle::Mode MainWindow::clampModeForAvailability(ModeToggle::Mode desired, 
     return desired;
 }
 
+bool MainWindow::isBypassHeld(IZapretBackend::State state)
+{
+    switch (state) {
+    case IZapretBackend::State::Starting:
+    case IZapretBackend::State::Running:
+    case IZapretBackend::State::Stopping:
+        // All three hold the path. A launch in flight has already installed the queue rules it is
+        // half-way through building, and a teardown holds them until the flush returns — so either
+        // one is a bypass the user would lose by switching underneath it without asking.
+        return true;
+    case IZapretBackend::State::Stopped:
+    case IZapretBackend::State::Error:
+        break;
+    }
+    return false;
+}
+
+bool MainWindow::isTunnelHeld(WarpManager::State state)
+{
+    switch (state) {
+    case WarpManager::State::Connecting:
+    case WarpManager::State::Connected:
+    case WarpManager::State::Disconnecting:
+        // The same three cases as the backend, on the daemon's side of the house. Unavailable is
+        // deliberately excluded: a host with no warp-cli holds nothing here to be stopped.
+        return true;
+    case WarpManager::State::Disconnected:
+    case WarpManager::State::Error:
+    case WarpManager::State::Unavailable:
+        break;
+    }
+    return false;
+}
+
+MainWindow::SwitchAction MainWindow::switchAction(bool zapretHeld, bool warpHeld, bool userAgreed)
+{
+    // Nothing is up, so the switch is free and silent.
+    if (!zapretHeld && !warpHeld)
+        return SwitchAction::None;
+    // Something is up and the user said no: the pill goes back and the bypass it left alone keeps
+    // running. A refused question must not be able to read as partial consent.
+    if (!userAgreed)
+        return SwitchAction::None;
+    if (zapretHeld && warpHeld)
+        return SwitchAction::StopBoth;
+    return zapretHeld ? SwitchAction::StopZapret : SwitchAction::StopWarp;
+}
+
+ModeToggle::Mode MainWindow::resolveModeSwitch(ModeToggle::Mode current, ModeToggle::Mode requested,
+                                               bool zapretHeld, bool warpHeld, bool userAgreed)
+{
+    // An idle host, or an agreed switch, takes the half the user picked. A refused one keeps the
+    // half it had — which is also what makes the snap-back in onModeChanged a decision rather than
+    // a second copy of the reasoning.
+    if ((zapretHeld || warpHeld) && !userAgreed)
+        return current;
+    return requested;
+}
+
 bool MainWindow::canStartFrom(IZapretBackend::State state)
 {
     switch (state) {
@@ -1859,7 +1918,7 @@ void MainWindow::updateStatusUi()
     // redrawn, rather than at every signal handler — a caller in a slot cannot accidentally
     // paint a zapret state while the WARP pill is lit, and the toggle's own change slot only has
     // to ask for a redraw instead of duplicating this dispatch.
-    if (m_modeToggle && m_modeToggle->mode() == ModeToggle::Mode::Warp)
+    if (m_mode == ModeToggle::Mode::Warp)
         renderWarpStatus(m_warp ? m_warp->state() : WarpManager::State::Unavailable);
     else
         renderStatus(m_manager->state());
@@ -1986,22 +2045,153 @@ void MainWindow::onWarpPowerClicked()
     showTransientMessage(QStringLiteral("WARP is not installed on this host."), 5000);
 }
 
-// The user picked a half of the pill. Persist, retint, redraw.
+// The single writer of m_mode: the window's variable, the pill, Settings, the tunnel's polling and
+// one repaint, all moved together so a programmatic move cannot half-apply. It never starts or
+// stops anything — that is onModeChanged's decision, taken with the user's consent. m_settingMode
+// is set before the pill is moved so the modeChanged it emits on the way is recognised here as the
+// window's own echo and not as a second request from the user.
+void MainWindow::setCurrentMode(ModeToggle::Mode mode)
+{
+    m_settingMode = true;
+    m_mode = mode;
+    m_settings->setWarpMode(mode == ModeToggle::Mode::Warp);
+    // Leaving WARP means the tunnel is not our business any more — but stopping the poll is all
+    // this does. Tearing a live tunnel down because the pill moved is onModeChanged's business,
+    // reached only after the user agreed to it in words.
+    if (m_warp)
+        m_warp->setPollingEnabled(mode == ModeToggle::Mode::Warp);
+    if (m_modeToggle)
+        m_modeToggle->setMode(mode);   // moves the thumb; its guarded echo is ignored here
+    m_settingMode = false;
+
+    // One redraw so the chip, button and tray describe the mode that is now set, never a move
+    // caught half-applied between the variable and the widget.
+    updateStatusUi();
+}
+
+// Take the live subsystem(s) down because the user agreed to a switch that needs the path back.
+//
+// Decided through switchAction — the pure helper that names what still has to tear down — so the
+// reasoning the tests pin is the reasoning that runs. It carries no Start member: every value it
+// can return is a teardown, and that is the whole point of routing the switch through it.
+//
+// Each side uses its own stop path (onStopRequested for zapret, WarpManager::stop for the tunnel)
+// rather than the power button's slot, so the journal, the button's "stopping" look and the mode
+// move all say the same thing the button would have said.
+void MainWindow::stopHeldForModeSwitch()
+{
+    const bool zapretHeld = isBypassHeld(m_manager->state());
+    const bool warpHeld = isTunnelHeld(m_warp ? m_warp->state() : WarpManager::State::Unavailable);
+    const SwitchAction action = switchAction(zapretHeld, warpHeld, /*userAgreed=*/true);
+
+    if (action == SwitchAction::StopZapret || action == SwitchAction::StopBoth) {
+        if (m_log)
+            m_log->appendLine(LanguageManager::tr(QStringLiteral("mode.switch_stopping"))
+                                  .arg(ModeToggle::labelFor(ModeToggle::Mode::Zapret)),
+                              LogPanel::Info);
+        // The toolbar's own path: it shows the stopping look synchronously, refuses a re-entrant
+        // stop, and reconciles the redraw with what the backend actually did.
+        onStopRequested();
+    }
+
+    if (action == SwitchAction::StopWarp || action == SwitchAction::StopBoth) {
+        // Only a Connected tunnel can be brought down here. A verb already in flight (Connecting
+        // or Disconnecting) is warp-cli's to finish — the power button refuses it too — and the
+        // switch has still moved the pill, which is all a switch is ever allowed to do.
+        if (m_warp && m_warp->state() == WarpManager::State::Connected) {
+            if (m_log)
+                m_log->appendLine(LanguageManager::tr(QStringLiteral("mode.switch_stopping"))
+                                      .arg(ModeToggle::labelFor(ModeToggle::Mode::Warp)),
+                                  LogPanel::Info);
+            QString err;
+            if (m_warp->stop(&err)) {
+                // The same synchronous look showStoppingFeedback() applies to a backend stop: the
+                // daemon's state will not move until warp-cli exits, but the button must not read
+                // as idle while it catches up.
+                renderWarpStatus(WarpManager::State::Disconnecting);
+                if (m_power && m_power->isVisible())
+                    m_power->repaint();
+            } else {
+                showTransientMessage(err, 5000);
+            }
+        }
+    }
+}
+
+// The mode switch's question: is the user willing to lose a live bypass to move the thumb?
+//
+// Yes or No, defaulting to No — agreeing costs a teardown through pkexec or warp-cli, so a box
+// closed on the keyboard must not be read as consent. Built as an object rather than through the
+// static so the two half-names ("Zapret -> WARP") sit in the informative line instead of being
+// threaded through seven translations of the question — the exact seam confirmWatchdogRotation
+// uses, and the reason this and the rotation read the same way to a user.
+bool MainWindow::confirmStopAndSwitch(ModeToggle::Mode from, ModeToggle::Mode to)
+{
+    QMessageBox box(QMessageBox::Question,
+                    LanguageManager::tr(QStringLiteral("mode.switch_title")),
+                    LanguageManager::tr(QStringLiteral("mode.switch_question")),
+                    QMessageBox::Yes | QMessageBox::No, this);
+    box.setInformativeText(QStringLiteral("%1 \u2192 %2")
+                               .arg(ModeToggle::labelFor(from), ModeToggle::labelFor(to)));
+    box.setDefaultButton(QMessageBox::No);
+    return box.exec() == QMessageBox::Yes;
+}
+
+// The user picked a half of the pill. The thumb has already moved (the widget is where the click
+// landed); this decides whether the switch is allowed to, and puts the thumb back if it is not.
+//
+// The whole rule lives in the pure helpers — isBypassHeld/isTunnelHeld read the real managers,
+// switchAction names what a teardown covers, confirmStopAndSwitch asks — so this slot is only the
+// ordering: an idle host is a free move, a held one is a question, and the pill records whichever
+// half the decision leaves lit.
 void MainWindow::onModeChanged(ModeToggle::Mode mode)
 {
-    m_settings->setWarpMode(mode == ModeToggle::Mode::Warp);
-    m_warp->setPollingEnabled(mode == ModeToggle::Mode::Warp);
-    // Leaving WARP means the tunnel is not our business any more — but stopping the poll is
-    // all we do. Tearing a live tunnel down because the user glanced at Zapret would be the
-    // interface acting on a claim it was never given.
-    updateStatusUi();
+    // The echo of a move setCurrentMode() is itself making is not a request from the user. Without
+    // this guard the snap-back on a refused question would re-enter and ask again forever.
+    if (m_settingMode)
+        return;
+
+    const ModeToggle::Mode from = m_mode;
+    if (mode == from)
+        return;   // the thumb did not actually move — nothing to decide
+
+    const bool zapretHeld = isBypassHeld(m_manager->state());
+    const bool warpHeld = isTunnelHeld(m_warp ? m_warp->state() : WarpManager::State::Unavailable);
+    const bool somethingHeld = zapretHeld || warpHeld;
+
+    // Nothing is up, so the switch is free and asks about nothing — choosing a half that controls an
+    // idle subsystem has no cost to consent to. Something holding the path makes the switch's price a
+    // live bypass, and the user has to agree to that before anything comes down.
+    const bool agreed = somethingHeld && confirmStopAndSwitch(from, mode);
+
+    // Which half ends up lit is resolveModeSwitch's answer, not a second copy of it written out here:
+    // a refused question keeps the half it had, and everything else — the idle move, the agreed one —
+    // takes the half the user picked. The slot below is ordering, so the rule stays in one place.
+    const ModeToggle::Mode target = resolveModeSwitch(from, mode, zapretHeld, warpHeld, agreed);
+
+    // Agreed, and something was up: take the old subsystem down first, while the stopping look still
+    // belongs to the run the user was watching, and only then record the switch they asked for.
+    // (stopHeldForModeSwitch re-reads both managers itself, so a state that moved while the box was
+    // open is torn down as it now is rather than as it was when the question was asked.)
+    if (somethingHeld && target != from)
+        stopHeldForModeSwitch();
+
+    // Either way the pill ends where the decision left it. On an agreed switch that is the half the
+    // user dragged; on a refused one setCurrentMode(from) un-moves the thumb, and the bypass they were
+    // asked about keeps running untouched.
+    setCurrentMode(target);
+
+    // A refused question still has a visible effect — the thumb snapped back — and the footer says so,
+    // because "no" should read as the user's own decision rather than as a swallowed click.
+    if (somethingHeld && target == from)
+        showTransientMessage(LanguageManager::tr(QStringLiteral("mode.switch_declined")), 5000);
 }
 
 void MainWindow::onWarpStateChanged(WarpManager::State state)
 {
     // Only repaint when WARP is on the button; a poll that lands after the user flipped back to
     // Zapret should not overwrite the zapret chip with tunnel news nobody is looking at.
-    if (m_modeToggle && m_modeToggle->mode() == ModeToggle::Mode::Warp)
+    if (m_mode == ModeToggle::Mode::Warp)
         updateStatusUi();
     // The state also drives the tray icon; that one is a fact about what the app is doing, so it
     // gets refreshed regardless of which half the pill is on.

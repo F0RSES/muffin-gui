@@ -908,6 +908,180 @@ static void testWarpMappings()
           "a Zapret pick is never moved by WARP availability");
 }
 
+// ------------------------------------------------------------- mode switch ----
+//
+// Moving the Zapret/WARP pill is allowed to do exactly two things: light the other half, and — but
+// only with the user's spoken agreement — take a live bypass DOWN. It never brings one up. The rule is
+// split into pure helpers so that claim is checkable without a backend, a tunnel or a modal dialog, and
+// this section pins each of them: which states hold the path, what a switch tears down once the user has
+// agreed, and which half the pill is left on. MainWindow::onModeChanged is the ordering of these three
+// answers and nothing else, so everything the slot will act on is here.
+static void testModeSwitch()
+{
+    std::printf("\n[mode switch]\n");
+
+    using Mode = ModeToggle::Mode;
+    using Action = MainWindow::SwitchAction;
+
+    // ---- isBypassHeld: which zapret states mean the path is already altered ----
+    check(MainWindow::isBypassHeld(IZapretBackend::State::Running), "a live bypass holds the path");
+    check(MainWindow::isBypassHeld(IZapretBackend::State::Starting),
+          "a launch in flight holds it too — half its queue rules are already installed");
+    check(MainWindow::isBypassHeld(IZapretBackend::State::Stopping),
+          "…and a teardown holds them until the flush returns, so it is still a bypass being lost");
+    check(!MainWindow::isBypassHeld(IZapretBackend::State::Stopped),
+          "nothing running is nothing the switch could destroy");
+    check(!MainWindow::isBypassHeld(IZapretBackend::State::Error),
+          "a failed run left no bypass behind, so switching off it is free");
+
+    // The predicate is a switch over the enum. Counting the held states is what stops a sixth,
+    // future state from reading as 'not held' merely because nobody thought about it here.
+    const IZapretBackend::State backendStates[] = {
+        IZapretBackend::State::Starting, IZapretBackend::State::Running,
+        IZapretBackend::State::Stopping, IZapretBackend::State::Stopped,
+        IZapretBackend::State::Error};
+    int heldBackend = 0;
+    for (IZapretBackend::State s : backendStates)
+        if (MainWindow::isBypassHeld(s))
+            ++heldBackend;
+    check(heldBackend == 3, "exactly three of the five backend states hold the path");
+
+    // ---- isTunnelHeld: the same question on the daemon's side ----
+    check(MainWindow::isTunnelHeld(WarpManager::State::Connected), "a live tunnel holds the path");
+    check(MainWindow::isTunnelHeld(WarpManager::State::Connecting), "a connect in flight holds it");
+    check(MainWindow::isTunnelHeld(WarpManager::State::Disconnecting),
+          "…and so does a disconnect in flight — the daemon is still working on the interface");
+    check(!MainWindow::isTunnelHeld(WarpManager::State::Disconnected), "an offline tunnel holds nothing");
+    check(!MainWindow::isTunnelHeld(WarpManager::State::Error), "a failed verb holds nothing");
+    // The one that matters most on a machine without Cloudflare installed: an absent warp-cli is not
+    // a held tunnel, or every switch on such a host would ask a question that cannot be acted on.
+    check(!MainWindow::isTunnelHeld(WarpManager::State::Unavailable),
+          "no warp-cli holds nothing — the switch must not ask about a subsystem that is absent");
+
+    const WarpManager::State tunnelStates[] = {
+        WarpManager::State::Connecting, WarpManager::State::Connected,
+        WarpManager::State::Disconnecting, WarpManager::State::Disconnected,
+        WarpManager::State::Error, WarpManager::State::Unavailable};
+    int heldTunnel = 0;
+    for (WarpManager::State s : tunnelStates)
+        if (MainWindow::isTunnelHeld(s))
+            ++heldTunnel;
+    check(heldTunnel == 3, "exactly three of the six tunnel states hold the path");
+
+    // ---- switchAction: the full matrix, consent included ----
+    // Eight rows, because the answer depends on exactly three booleans. Naming each one is the point:
+    // this is the whole of what a confirmed switch is permitted to do to a live subsystem.
+    struct Row
+    {
+        bool zapretHeld;
+        bool warpHeld;
+        bool agreed;
+        Action expected;
+        const char *what;
+    };
+    const Row rows[] = {
+        // An idle host switches silently: no consent was ever needed, so nothing is torn down.
+        {false, false, false, Action::None, "idle host, never asked — nothing to stop"},
+        {false, false, true, Action::None, "idle host, agreed anyway — still nothing to stop"},
+        // Zapret alone.
+        {true, false, false, Action::None, "bypass held, refused — the run keeps running"},
+        {true, false, true, Action::StopZapret, "bypass held, agreed — the bypass comes down"},
+        // WARP alone.
+        {false, true, false, Action::None, "tunnel held, refused — the tunnel keeps running"},
+        {false, true, true, Action::StopWarp, "tunnel held, agreed — the tunnel comes down"},
+        // Both. A host can hold the path twice, and leaving that state has to clear both.
+        {true, true, false, Action::None, "both held, refused — neither moves"},
+        {true, true, true, Action::StopBoth, "both held, agreed — both come down"},
+    };
+    for (const Row &r : rows)
+        check(MainWindow::switchAction(r.zapretHeld, r.warpHeld, r.agreed) == r.expected,
+              QStringLiteral("switchAction(zapret=%1, warp=%2, agreed=%3): %4")
+                  .arg(r.zapretHeld ? QStringLiteral("held") : QStringLiteral("idle"))
+                  .arg(r.warpHeld ? QStringLiteral("held") : QStringLiteral("idle"))
+                  .arg(r.agreed ? QStringLiteral("yes") : QStringLiteral("no"))
+                  .arg(QString::fromUtf8(r.what)));
+
+    // A refused question is a complete answer, never partial consent: holding every combination, no
+    // refusal may name a teardown. This is the invariant the whole feature is built on, and it is
+    // stated separately from the table above so a reordered enum value cannot hide a leak.
+    for (const bool z : {false, true})
+        for (const bool w : {false, true})
+            check(MainWindow::switchAction(z, w, /*userAgreed=*/false) == Action::None,
+                  QStringLiteral("refusing never tears anything down (zapretHeld=%1, warpHeld=%2)")
+                      .arg(z ? QStringLiteral("true") : QStringLiteral("false"))
+                      .arg(w ? QStringLiteral("true") : QStringLiteral("false")));
+
+    // ---- resolveModeSwitch: which half stays lit ----
+    check(MainWindow::resolveModeSwitch(Mode::Zapret, Mode::Warp, false, false, false) == Mode::Warp,
+          "a free switch on an idle host takes the half picked — no question was ever asked");
+    check(MainWindow::resolveModeSwitch(Mode::Warp, Mode::Zapret, false, false, false) == Mode::Zapret,
+          "…and the same holds coming back");
+    check(MainWindow::resolveModeSwitch(Mode::Zapret, Mode::Warp, true, false, true) == Mode::Warp,
+          "an agreed switch takes the half the user picked");
+    check(MainWindow::resolveModeSwitch(Mode::Zapret, Mode::Warp, true, false, false) == Mode::Zapret,
+          "a refused one leaves the pill exactly where it was");
+    check(MainWindow::resolveModeSwitch(Mode::Warp, Mode::Zapret, false, true, false) == Mode::Warp,
+          "…equally when the tunnel is the thing that was held");
+    check(MainWindow::resolveModeSwitch(Mode::Warp, Mode::Zapret, true, true, true) == Mode::Zapret,
+          "and a double-held, double-agreed switch still moves");
+    // The subtle one: nothing held and nobody asked must NOT read as a refusal. If it did, every
+    // switch on an idle machine would snap the thumb back and the toggle would be useless.
+    check(MainWindow::resolveModeSwitch(Mode::Zapret, Mode::Warp, false, false, /*userAgreed=*/false)
+              == Mode::Warp,
+          "an unasked question is not a refused one — the idle move is free");
+
+    // ---- the two helpers must agree with each other ----
+    // A switch cannot tear something down and leave the pill unmoved (that would be a stop with no
+    // visible reason), and it cannot move the pill while something was up without stopping what was
+    // up. The idle case is deliberately asymmetric: moving is the whole of what a free switch does,
+    // so it is a move with no teardown owed. Pinned as toreDown == (moved && somethingHeld).
+    for (const Row &r : rows) {
+        const Action action = MainWindow::switchAction(r.zapretHeld, r.warpHeld, r.agreed);
+        const Mode target = MainWindow::resolveModeSwitch(Mode::Zapret, Mode::Warp,
+                                                          r.zapretHeld, r.warpHeld, r.agreed);
+        const bool moved = (target != Mode::Zapret);
+        const bool toreDown = (action != Action::None);
+        const bool somethingHeld = r.zapretHeld || r.warpHeld;
+        check(toreDown == (moved && somethingHeld),
+              QStringLiteral("teardown and pill-move agree (zapret=%1, warp=%2, agreed=%3)")
+                  .arg(r.zapretHeld ? QStringLiteral("held") : QStringLiteral("idle"))
+                  .arg(r.warpHeld ? QStringLiteral("held") : QStringLiteral("idle"))
+                  .arg(r.agreed ? QStringLiteral("yes") : QStringLiteral("no")));
+        // …spelled the other way for the half that must never happen at all: no stop on a pill that
+        // stayed where it was.
+        check(!(toreDown && !moved),
+              QStringLiteral("a switch never stops something while leaving the pill unmoved (agreed=%1)")
+                  .arg(r.agreed ? QStringLiteral("yes") : QStringLiteral("no")));
+    }
+
+    // And the reverse reading of the same rule, for the direction the code travels in the other half
+    // of the pill: a refused answer never strands the user between a moved thumb and a running
+    // subsystem they did not agree to lose. With nothing up there was never a question to answer, so
+    // the pill takes the half picked even on a caller-supplied 'no' — the same asymmetry the idle
+    // rows above assert for the teardown side.
+    for (const Mode from : {Mode::Zapret, Mode::Warp}) {
+        const Mode to = (from == Mode::Zapret) ? Mode::Warp : Mode::Zapret;
+        for (const bool z : {false, true})
+            for (const bool w : {false, true}) {
+                const Mode target = MainWindow::resolveModeSwitch(from, to, z, w, /*userAgreed=*/false);
+                const bool somethingHeld = z || w;
+                const Mode owed = somethingHeld ? from : to;
+                check(target == owed,
+                      QStringLiteral("%1 -> pill ends on %2")
+                          .arg(somethingHeld
+                                   ? QStringLiteral("a 'no' answer")
+                                   : QStringLiteral("nothing was up, so no answer was owed"))
+                          .arg(owed == Mode::Zapret ? QStringLiteral("Zapret") : QStringLiteral("WARP")));
+            }
+    }
+
+    // The last of these helpers' whole purpose is what it cannot say: SwitchAction has no Start
+    // member, so no switch outcome can launch anything. That is a fact about the type rather than a
+    // runtime branch — the four values named above are the entire domain, and onPowerClicked()
+    // stays the only path that brings a bypass up.
+    check(static_cast<int>(Action::None) == 0, "the action set begins at 'do nothing'");
+}
+
 // --------------------------------------------------------------- ProfileCard ----
 //
 // A profile row is a selection item, not a control: no start button, only the name, the mini ping chips
@@ -1475,6 +1649,15 @@ static void testLanguage()
     }
     check(holes == 0,
           QStringLiteral("every key has text in every language (%1 cells)").arg(keys.size() * codes.size()));
+
+    // A hole is not the only way a translation can break: a format key that loses its %1 still
+    // returns non-empty text, and the caller's .arg() then silently discards the word it was given.
+    // The mode switch's journal line names the subsystem being stopped that way, so the placeholder
+    // is pinned per language rather than trusted to the copy.
+    for (const QString &code : codes)
+        check(LanguageManager::translate(code, QStringLiteral("mode.switch_stopping"))
+                  .contains(QStringLiteral("%1")),
+              QStringLiteral("mode.switch_stopping keeps its placeholder in %1").arg(code));
 
     check(LanguageManager::translate(QStringLiteral("de"), QStringLiteral("nav.settings"))
               == QStringLiteral("Einstellungen"),
@@ -3963,6 +4146,7 @@ int main(int argc, char **argv)
     testPowerButton();
     testModeToggle();
     testWarpMappings();
+    testModeSwitch();
     testProfileCard();
     testTrayPolicy();
     testWindowPolicy();

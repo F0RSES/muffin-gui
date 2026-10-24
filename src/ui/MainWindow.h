@@ -108,6 +108,42 @@ public:
     // bug in the widget rather than a fact about the host.
     static ModeToggle::Mode clampModeForAvailability(ModeToggle::Mode desired, bool warpAvailable);
 
+    // ---- what a mode switch is allowed to do ---------------------------------------
+    //
+    // The pill picks which subsystem the power button will control. Choosing is not starting: the
+    // only press that brings a bypass UP is the button's own (see onPowerClicked), and a switch may
+    // therefore only ever take a live one DOWN — and only after the user agreed to that in words.
+    //
+    // There are two questions here, and both are pure so the whole rule is checkable without a
+    // tunnel, a backend or a modal.
+    //
+    // Does this backend state hold the path? Starting, Running and Stopping all do: a launch in
+    // flight is a run the user can still see being taken apart, and a teardown still has iptables
+    // rules in the path until it finishes. Stopped and Error hold nothing.
+    static bool isBypassHeld(IZapretBackend::State state);
+    // Does this tunnel state hold the path? The same three cases on WARP's side, and Unavailable —
+    // no warp-cli — is emphatically not one of them.
+    static bool isTunnelHeld(WarpManager::State state);
+
+    // What a switch still has to tear down. The type carries no "Start" member at all, which is the
+    // point: a future edit cannot add a launch to the toggle's path without first adding an enum
+    // value that every reader of this file will see was never there.
+    enum class SwitchAction
+    {
+        None,        // nothing was running, or the user refused — move the pill, touch nothing else
+        StopZapret,
+        StopWarp,
+        StopBoth     // a host can hold the path twice; the answer stops both
+    };
+    Q_ENUM(SwitchAction)
+    static SwitchAction switchAction(bool zapretHeld, bool warpHeld, bool userAgreed);
+
+    // Which half ends up lit. A refused question leaves the pill where it was; everything else —
+    // an idle host, an agreed switch — takes the requested half. Keeping the declined case in here
+    // rather than in the slot is what lets a test pin "no means no" without a window.
+    static ModeToggle::Mode resolveModeSwitch(ModeToggle::Mode current, ModeToggle::Mode requested,
+                                              bool zapretHeld, bool warpHeld, bool userAgreed);
+
     // ---- action gating: pure predicates again, so the whole matrix is checkable without a process ----
     //
     // A backend owns one operation at a time. LinuxBackend::start() refuses outright while anything is up
@@ -416,6 +452,16 @@ protected:
     // rotation that left the user with nothing running.
     virtual void performWatchdogRotation(const QString &fromId, const QString &nextId);
 
+    // ---- the mode switch's two seams -------------------------------------------
+    //
+    // Flipping the pill is a decision with one possible cost: a live bypass has to come down first.
+    // Split the same way the watchdog's rotation is — the question here, the act in the slot — so a
+    // suite can answer it by hand instead of blocking on a modal nobody out there can click.
+    //
+    // `from` and `to` name the halves, in the words the pill itself uses; the box shows them as its
+    // informative line so the seven translations of the question never carry a mode name.
+    virtual bool confirmStopAndSwitch(ModeToggle::Mode from, ModeToggle::Mode to);
+
 private slots:
     void onStopRequested();
     // The badge was pressed. Asks the one question and, on yes, hands the release page to the desktop's
@@ -552,6 +598,17 @@ private:
     // does nothing while no rotation is waiting, and the id it consumes it consumes once.
     void continueWatchdogRotation();
     void updateStatusUi();
+    // Record a mode as the current one: the window's own variable, the pill, Settings, the tunnel's
+    // polling and one repaint. This is the only writer of m_mode, and it never starts or stops
+    // anything — a programmatic move (the startup seed, an availability clamp, snapping the thumb back
+    // after a refused question) must not be able to reach the path, and must not re-enter the slot
+    // that asks. m_settingMode is what makes the pill's own signal ignorable while this runs.
+    void setCurrentMode(ModeToggle::Mode mode);
+    // Take down whatever is holding the path — the bypass, the tunnel, or both — because the user
+    // agreed to a switch that costs it. Named for the reason rather than reusing the power button's
+    // slots: onPowerClicked() and onWarpPowerClicked() are the only places anything is ever brought
+    // UP, and this file has to keep those two facts visibly apart.
+    void stopHeldForModeSwitch();
     // Draw the chip and the power button for one state, with no reference to what the manager says it
     // is in. updateStatusUi() calls it with the real state; the Stop press calls the feedback below,
     // which uses the state the teardown is about to enter. Kept apart from the tray so a look can be
@@ -628,6 +685,14 @@ private:
     QToolButton *m_langButton = nullptr;   // the current language's flag, opening the language menu
     PowerButton *m_power = nullptr;        // the dashboard's one control
     ModeToggle *m_modeToggle = nullptr;    // the Zapret/WARP pill under the button
+    // Which subsystem the power button controls. The window's own copy, not a read-through to the
+    // pill: the pill can be mid-animation, mid-clamp or mid-snap-back, and what the button means has
+    // to be one value the switch path writes and nothing else touches. Seeded from Settings and kept
+    // in step by setCurrentMode().
+    ModeToggle::Mode m_mode = ModeToggle::Mode::Zapret;
+    // True while setCurrentMode() is moving the pill, so the modeChanged the widget emits on the way
+    // back is recognised as a programmatic echo and not as a second request from the user.
+    bool m_settingMode = false;
     WarpManager *m_warp = nullptr;         // the tunnel control (a child of the window)
     QWidget *m_statusDot = nullptr;        // the 6 px chip beside the connection text
     QLabel *m_statusLabel = nullptr;       // "CONNECTED" and friends
