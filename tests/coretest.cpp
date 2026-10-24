@@ -30,6 +30,7 @@
 #include "WindowsArgs.h"
 #include "BlockcheckEngine.h"
 #include "HistoryStore.h"
+#include "WarpManager.h"
 #include "blockcheck_testcert.h"
 
 #include <QCoreApplication>
@@ -1480,8 +1481,22 @@ int main(int argc, char **argv)
               "and it ends in the zapret folder the downloader writes");
 
         const QStringList bases = ZapretLocator::defaultBases();
-        check(!bases.isEmpty() && bases.first() == managed,
+        check(!bases.isEmpty() && bases.contains(managed),
+              "defaultBases() knows the managed tree, so a restart finds it with no Settings at all");
+#if defined(Q_OS_WIN)
+        // The security half of the ordering: the tree a standard token cannot rewrite is looked at
+        // FIRST. A copy of zapret sitting in AppData is writable by every program running as that
+        // user, and Muffin starts the payload from an elevated token, so preferring it over the
+        // Program Files tree would leave the escalation open even after a successful promotion.
+        const QString systemBase = ZapretPaths::systemInstallDir();
+        check(!systemBase.isEmpty() && bases.first() == systemBase,
+              "defaultBases() leads with the Program Files tree, never the user-writable one");
+        check(bases.indexOf(systemBase) < bases.indexOf(managed),
+              "and the promoted tree outranks the AppData copy it replaced");
+#else
+        check(bases.first() == managed,
               "defaultBases() leads with it, so a restart finds the tree with no Settings at all");
+#endif
 
         // A tree dropped there must be recognised as zapret, not merely as a directory that exists.
         QTemporaryDir root;
@@ -2072,13 +2087,86 @@ int main(int argc, char **argv)
     // trusted enough to be exec'd as root — are data a test can read, not behaviour only a root shell
     // could observe.
     out << "\n[MuffinInstallHelper: promotion contract]\n";
+    // ---- the two trees, and which one an installer is allowed to write ----
+    //
+    // Everything in this block is a decision a test can hand its own inputs to.
+    // systemInstallDirUnder() composes the destination from a Program Files root named in the call, and
+    // defaultInstallTarget() / promotionRefusal() answer from a platform, a wish and an elevated flag.
+    // None of the three reads the environment of the machine it is asked on, so the Windows answers are
+    // checked from Linux and the Linux answers from Windows.
+    {
+        const QString pf = QStringLiteral("/tmp/muffin-program-files");
+        const QString pfSlash = pf + QStringLiteral("/Muffin/zapret");
+        check(ZapretPaths::systemInstallDirUnder(pf) == pfSlash,
+              "a named Program Files root composes Muffin\\zapret beneath it");
+        check(ZapretPaths::systemInstallDirUnder(QDir::toNativeSeparators(pf)) == pfSlash,
+              "the host's own separator spelling is normalised, not embedded in the result");
+        check(QDir::fromNativeSeparators(ZapretPaths::systemInstallDirUnder(QString()))
+                  .endsWith(QLatin1String("/Program Files/Muffin/zapret")),
+              "an absent value lands on a Program Files folder rather than the working directory");
 #if defined(Q_OS_WIN)
-    // Windows has no root-owned tree and no polkit: the answer to "where would you promote this?" is
-    // "nowhere", and every caller has to treat that as "no such place" rather than "C:\".
-    check(ZapretPaths::systemInstallDir().isEmpty(), "windows reports no system install directory");
-    check(MuffinInstallHelper::namespaceDir().isEmpty() && MuffinInstallHelper::stagingDir().isEmpty()
-              && MuffinInstallHelper::backupDir().isEmpty(),
-          "and therefore no namespace, staging or backup name either");
+        // The default is spelled for Windows, so "absolute" is a Windows claim: on a POSIX host
+        // "C:/Program Files" has no leading separator and QDir::isAbsolutePath rightly says false.
+        check(QDir::isAbsolutePath(ZapretPaths::systemInstallDirUnder(QString())),
+              "and on the host that uses it as the destination, it is an absolute path");
+#endif
+        check(ZapretPaths::systemInstallDirUnder(QStringLiteral("Program Files"))
+                  == ZapretPaths::systemInstallDirUnder(QString()),
+              "a RELATIVE Program Files is refused: it would resolve against whatever the cwd happens to be");
+        check(ZapretPaths::systemInstallDirUnder(QStringLiteral("/tmp/somewhere/../.."))
+                  == ZapretPaths::systemInstallDirUnder(QString()),
+              "and so is one carrying traversal");
+        check(!ZapretPaths::systemInstallDirUnder(QStringLiteral("/tmp/elsewhere/../evil"))
+                   .contains(QLatin1String("..")),
+              "no composition leaves a traversal in the destination an installer will write");
+
+        const QString managed = ZapretPaths::managedInstallDir();
+#if defined(Q_OS_WIN)
+        check(ZapretDownloader::defaultInstallTarget(Strategy::Platform::Windows, true, true)
+                  == ZapretPaths::systemInstallDir(),
+              "an elevated windows download is unpacked straight into Program Files");
+        check(ZapretDownloader::defaultInstallTarget(Strategy::Platform::Windows, true, false)
+                  == managed,
+              "and one without the token goes where an unprivileged process can actually write");
+        check(!ZapretDownloader::promotionRefusal(Strategy::Platform::Windows, true, false).isEmpty(),
+              "the missing token is said out loud, not installed quietly into AppData");
+        check(ZapretDownloader::promotionRefusal(Strategy::Platform::Windows, true, true).isEmpty(),
+              "and the elevated case has nothing to explain");
+#else
+        check(ZapretDownloader::defaultInstallTarget(Strategy::Platform::Linux, true, true) == managed,
+              "a linux download lands in the managed directory even when this process is root");
+        check(ZapretDownloader::defaultInstallTarget(Strategy::Platform::Linux, true, false) == managed,
+              "and moving it on is the root helper's job, not this process's");
+        check(ZapretDownloader::promotionRefusal(Strategy::Platform::Linux, true, false).isEmpty(),
+              "POSIX has no elevation of its own to be missing, so it raises no refusal here");
+#endif
+        check(ZapretDownloader::defaultInstallTarget(Strategy::Platform::Windows, false, true)
+                  == managed,
+              "nobody is written into a system tree the caller never asked to be written into");
+        check(ZapretDownloader::promotionRefusal(Strategy::Platform::Windows, false, false).isEmpty(),
+              "and nothing is refused when no promotion was requested");
+    }
+
+#if defined(Q_OS_WIN)
+    // Windows has a system tree now, and the root helper stays out of the picture: Muffin.exe carries
+    // requireAdministrator, so the downloader writes there itself. The helper's derived names still
+    // have to agree with the destination they come from, and the destination still has to be a place a
+    // standard token cannot write to - which is the whole reason it is not the managed directory.
+    {
+        const QString dest = ZapretPaths::systemInstallDir();
+        check(!dest.isEmpty(), "windows reports a system install directory to promote into");
+        check(QDir::isAbsolutePath(dest), "it is absolute, not held relative to the cwd");
+        check(!dest.contains(QLatin1String("..")), "and it carries no traversal");
+        check(QDir::fromNativeSeparators(dest).endsWith(QLatin1String("/Muffin/zapret")),
+              "it is Muffin's own folder under Program Files");
+        check(!QDir::fromNativeSeparators(dest).contains(QLatin1String("/AppData/")),
+              "and it is nowhere near the AppData tree an unprivileged program can rewrite");
+        check(dest != ZapretPaths::managedInstallDir(),
+              "it is a different place from the managed install the download lands in");
+        check(MuffinInstallHelper::stagingDir() == dest + QLatin1String(".new")
+                  && MuffinInstallHelper::backupDir() == dest + QLatin1String(".old"),
+              "the sibling names the swap uses still derive from it, and stay outside it");
+    }
 #else
     {
         const QString dest = ZapretPaths::systemInstallDir();
@@ -4636,6 +4724,95 @@ int main(int argc, char **argv)
                                           .entryList(QDir::Files, QDir::Name);
         check(leftovers.count() == 1 && leftovers.first() == QLatin1String("history.json"),
               "the atomic replace leaves no temporary file behind");
+    }
+
+    // [WarpManager] — Cloudflare WARP through warp-cli.
+    //
+    // The whole class exists so the window has something to talk to that is not a backend, and the
+    // tests below reach for the statics that make that claim checkable without a daemon: the
+    // status parser is a pure function, the argv each verb runs is a fixed string, and
+    // availability is a PATH lookup. The async half — the QProcess that actually runs warp-cli —
+    // never fires here, because a suite that runs `warp-cli connect` would take this machine's
+    // real traffic with it.
+    out << "\n[WarpManager]\n";
+    {
+        // The program name is what a test can hand back to QStandardPaths and what the process
+        // table has to match, so the spelling is the interface.
+        check(WarpManager::warpCliProgram() == QStringLiteral("warp-cli"),
+              "warp-cli is the one program name the manager knows");
+
+        // Every verb carries --accept-tos. warp-cli otherwise blocks on an interactive prompt no
+        // GUI can see; a missing flag is not a cosmetic problem, it is a hang.
+        for (const QStringList &args : {WarpManager::statusArgs(),
+                                         WarpManager::connectArgs(),
+                                         WarpManager::disconnectArgs()}) {
+            check(args.first() == QStringLiteral("--accept-tos"),
+                  "a verb that carries --accept-tos first");
+        }
+        check(WarpManager::statusArgs().contains(QStringLiteral("status")),
+              "statusArgs ends in `status`");
+        check(WarpManager::connectArgs().contains(QStringLiteral("connect")),
+              "connectArgs ends in `connect`");
+        check(WarpManager::disconnectArgs().contains(QStringLiteral("disconnect")),
+              "disconnectArgs ends in `disconnect`");
+
+        // ---- the status parser ----
+        //
+        // The Linux form: a timestamped log line ending in the state word.
+        check(WarpManager::parseStatus(QStringLiteral("2024-11-20T10:00:00.000Z warp-cli [INFO] Connected"))
+                  == WarpManager::State::Connected,
+              "Linux `Connected` is Connected");
+        check(WarpManager::parseStatus(QStringLiteral("2024-11-20T10:00:00.000Z warp-cli [INFO] Disconnected"))
+                  == WarpManager::State::Disconnected,
+              "Linux `Disconnected` is Disconnected (the negative must win over the substring)");
+
+        // The Windows form: the shorter "Status: X" prefix.
+        check(WarpManager::parseStatus(QStringLiteral("Status: Connected"))
+                  == WarpManager::State::Connected,
+              "Windows `Status: Connected` is Connected");
+        check(WarpManager::parseStatus(QStringLiteral("Status: Disconnected"))
+                  == WarpManager::State::Disconnected,
+              "Windows `Status: Disconnected` is Disconnected");
+        check(WarpManager::parseStatus(QStringLiteral("Status: Connecting"))
+                  == WarpManager::State::Connecting,
+              "Windows `Status: Connecting` is Connecting");
+
+        // Case-insensitivity: warp-cli's own casing has moved between versions, and a parser that
+        // matched the current build only would break on the next one.
+        check(WarpManager::parseStatus(QStringLiteral("status: connected"))
+                  == WarpManager::State::Connected,
+              "case is not significant");
+
+        // "Not registered": an unenrolled daemon. Reading it as Connecting when we just asked for
+        // a connect tells the truth about what the client is doing; reading it as Disconnected on
+        // a bare refresh says what the tunnel is not doing.
+        check(WarpManager::parseStatus(QStringLiteral("Not registered"))
+                  == WarpManager::State::Disconnected,
+              "unregistered on a bare refresh is Disconnected");
+        check(WarpManager::parseStatus(QStringLiteral("Not registered"), true)
+                  == WarpManager::State::Connecting,
+              "unregistered right after connect() is Connecting, not Error");
+
+        // A nonsense answer is not a claim. The parser falls back to Disconnected so the button
+        // cannot show green on text the manager did not read.
+        check(WarpManager::parseStatus(QString()) == WarpManager::State::Disconnected,
+              "empty output is Disconnected, never Connected");
+        check(WarpManager::parseStatus(QStringLiteral("some unrelated daemon noise"))
+                  == WarpManager::State::Disconnected,
+              "unparseable output is Disconnected");
+
+        // "Disconnecting" beats "Connected" — the same substring collision as "Disconnected",
+        // checked separately because the fix for the first is the same code that must handle
+        // the second, and a table that lists one without the other is a table waiting to drift.
+        check(WarpManager::parseStatus(QStringLiteral("Disconnecting"))
+                  == WarpManager::State::Disconnecting,
+              "Disconnecting is a state of its own, not Disconnected");
+
+        // ---- availability ----
+        check(!WarpManager::isAvailableFromPath(QString()),
+              "an empty resolved path means not available");
+        check(WarpManager::isAvailableFromPath(QStringLiteral("/usr/bin/warp-cli")),
+              "a real resolved path means available");
     }
 
     out << "\n=== " << (g_failures ? "FAILED" : "ALL PASS") << " (" << g_failures << " failures) ===\n";

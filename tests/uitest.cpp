@@ -30,6 +30,7 @@
 #include "LanguageManager.h"
 #include "LogPanel.h"
 #include "MainWindow.h"
+#include "ModeToggle.h"
 #include "Motion.h"
 #include "PingIndicator.h"
 #include "PingService.h"
@@ -40,6 +41,7 @@
 #include "Strategy.h"
 #include "Theme.h"
 #include "UpdateChecker.h"
+#include "WarpManager.h"
 #include "ZapretDownloader.h"
 #include "ZapretPaths.h"
 
@@ -233,6 +235,7 @@ static void testSettings()
         check(s.startLastOnLaunch() == false, "default startLastOnLaunch is false");
         check(s.minimizeToTray() == true, "default minimizeToTray is true");
         check(s.animationsEnabled() == true, "default animationsEnabled is true");
+        check(s.warpMode() == false, "default warpMode is false — Zapret stays the mode the app is drawn for");
         check(s.pingIntervalSec() == 5, "default ping interval is 5s");
         check(s.watchdogIntervalMin() == 5, "default watchdog interval is 5 min");
         check(Settings::kWatchdogDefaultIntervalMin == 5,
@@ -735,6 +738,32 @@ static void testPowerButton()
           "a transition in flight stays purple and only breathes");
     check(PowerButton::modeColor(PowerButton::Mode::Active) == Theme::pingOk(),
           "a live run wears the same green as the connected chip");
+
+    // WARP's palette — Cloudflare's own orange for idle/busy and blue for a live tunnel — is a
+    // separate table on purpose: a purple ring around a connected WARP would read as the zapret
+    // payload's neon, which is exactly the confusion the toggle exists to remove. The default
+    // palette is still Zapret so no existing check above changes.
+    check(button.palette() == PowerButton::Palette::Zapret, "the default palette is Zapret");
+    check(PowerButton::modeColor(PowerButton::Mode::Idle, PowerButton::Palette::Warp)
+              == QColor(0xF6, 0x82, 0x1F),
+          "a WARP idle ring is Cloudflare orange");
+    check(PowerButton::modeColor(PowerButton::Mode::Busy, PowerButton::Palette::Warp)
+              == QColor(0xF6, 0x82, 0x1F),
+          "a WARP busy ring is the same orange, only breathing");
+    check(PowerButton::modeColor(PowerButton::Mode::Active, PowerButton::Palette::Warp)
+              == QColor(0x22, 0xA7, 0xF0),
+          "a live WARP tunnel is Cloudflare blue, not the zapret green");
+    // The single-argument form and the two-argument form agree on Zapret, so an existing caller
+    // that has not been updated cannot accidentally start drawing WARP colours.
+    check(PowerButton::modeColor(PowerButton::Mode::Active)
+              == PowerButton::modeColor(PowerButton::Mode::Active, PowerButton::Palette::Zapret),
+          "the historical one-argument form is Zapret's palette");
+
+    button.setPalette(PowerButton::Palette::Warp);
+    check(button.palette() == PowerButton::Palette::Warp, "setPalette is readable back");
+    button.setPalette(PowerButton::Palette::Zapret);
+    check(button.palette() == PowerButton::Palette::Zapret, "and can be flipped back");
+
     check(button.glyph() == QStringLiteral("power"), "the default glyph is the power mark");
 
     button.show();
@@ -756,6 +785,127 @@ static void testPowerButton()
     check(button.width() == 120 + 2 * PowerButton::kHaloMargin, "and resizes the widget");
     button.setDiameter(0);
     check(button.diameter() == 48, "a zero diameter is clamped, not obeyed");
+}
+
+// --------------------------------------------------------------- ModeToggle ----
+//
+// The Zapret/WARP pill. Every check here is against a piece of the widget's contract that a
+// user's eye depends on — which half owns the thumb, what colour each half lights, and whether
+// picking a half emits the change the window can act on. Geometry is a static function for the
+// same reason the palette is: a suite cannot take a screenshot in a headless build, but it can
+// ask "given these bounds, where does the thumb go?".
+static void testModeToggle()
+{
+    std::printf("\n[ModeToggle]\n");
+
+    const QRect bounds(0, 0, ModeToggle::kPillWidthPx, ModeToggle::kPillHeightPx);
+    const QRect zapretThumb = ModeToggle::thumbRectFor(0, bounds);
+    const QRect warpThumb = ModeToggle::thumbRectFor(1, bounds);
+
+    // The two halves share the pill's interior width and the same inset top/bottom; only the x
+    // offset separates them. Anything else and the thumb visibly changes size when it slides,
+    // which reads as a bug in the widget rather than a change of mode.
+    check(zapretThumb.height() == warpThumb.height(), "both halves share the same height");
+    check(zapretThumb.left() < warpThumb.left(), "index 0 is the Zapret end");
+    check(zapretThumb.width() > 0 && warpThumb.width() > 0, "no thumb is empty");
+    check(zapretThumb.right() < warpThumb.left() + 1,
+          "the halves do not overlap — a thumb that jumps across a gap reads as two controls");
+
+    // The pill has exactly two labels, each naming one subsystem by what it is called everywhere
+    // else on the screen. English + uppercase matches the header's connection chip's design rule.
+    check(ModeToggle::labelFor(ModeToggle::Mode::Zapret) == QStringLiteral("Zapret"),
+          "the Zapret half is labelled by name, not by an abstract icon");
+    check(ModeToggle::labelFor(ModeToggle::Mode::Warp) == QStringLiteral("WARP"),
+          "the WARP half is labelled in caps, like the chip's CONNECTED");
+    check(ModeToggle::labelForIndex(0) == ModeToggle::labelFor(ModeToggle::Mode::Zapret),
+          "index 0 and Mode::Zapret name the same half");
+
+    // Colours: Zapret's half uses the theme's accent, WARP's is fixed Cloudflare orange so the
+    // choice does not flip with a theme change.
+    check(ModeToggle::colorFor(ModeToggle::Mode::Zapret) == Theme::accent(),
+          "the Zapret half borrows the accent already everywhere else on the screen");
+    check(ModeToggle::colorFor(ModeToggle::Mode::Warp) == QColor(0xF6, 0x82, 0x1F),
+          "the WARP half is the same orange the power button's Warp palette uses");
+    check(ModeToggle::colorFor(ModeToggle::Mode::Warp)
+              == PowerButton::modeColor(PowerButton::Mode::Idle, PowerButton::Palette::Warp),
+          "toggle and button agree on what a WARP orange looks like — one spelling of that hex");
+
+    // The widget itself: construction, mode round-trip, modeChanged emission.
+    ModeToggle toggle;
+    check(toggle.mode() == ModeToggle::Mode::Zapret, "the default mode is Zapret");
+    int changes = 0;
+    ModeToggle::Mode lastSeen = ModeToggle::Mode::Zapret;
+    QObject::connect(&toggle, &ModeToggle::modeChanged, [&](ModeToggle::Mode m) {
+        ++changes;
+        lastSeen = m;
+    });
+    toggle.setMode(ModeToggle::Mode::Zapret);
+    check(changes == 0, "re-setting the current mode is a no-op, not a signal storm");
+    toggle.setMode(ModeToggle::Mode::Warp);
+    check(changes == 1, "one change lands on one signal");
+    check(lastSeen == ModeToggle::Mode::Warp, "the signal carries the new mode");
+    check(toggle.mode() == ModeToggle::Mode::Warp, "and it reads back the same");
+}
+
+// ------------------------------------------------------------ Warp mappings ----
+//
+// The static state -> look / state -> word / state -> kind tables MainWindow uses when the
+// toggle is on Warp. They are statics so a suite can pin them from a console program without
+// a window, and this check exists because a missing entry in a switch is the kind of bug that
+// only shows on a real WARP install — which is precisely the machine a headless test is not.
+static void testWarpMappings()
+{
+    std::printf("\n[WarpMappings]\n");
+
+    check(MainWindow::connectionText(WarpManager::State::Connected)
+              == QStringLiteral("CONNECTED"),
+          "a live tunnel reads the same word on the chip as a live zapret run");
+    check(MainWindow::connectionText(WarpManager::State::Disconnected)
+              == QStringLiteral("OFFLINE"),
+          "a stopped tunnel uses the zapret side's stopped word, so the chip is legible");
+    check(MainWindow::connectionText(WarpManager::State::Connecting)
+              == QStringLiteral("CONNECTING"),
+          "a tunnel on its way up says so");
+    check(MainWindow::connectionText(WarpManager::State::Unavailable)
+              == QStringLiteral("ABSENT"),
+          "an absent warp-cli has its own word, distinct from an offline but installed one");
+
+    check(MainWindow::statusKind(WarpManager::State::Connected) == QStringLiteral("running"),
+          "a live tunnel matches the QSS's running token");
+    check(MainWindow::statusKind(WarpManager::State::Connecting) == QStringLiteral("starting"),
+          "a transition shares the 'starting' token, as zapret does");
+    check(MainWindow::statusKind(WarpManager::State::Unavailable) == QStringLiteral("absent"),
+          "an absent binary has its own token, not 'stopped'");
+
+    check(MainWindow::powerMode(WarpManager::State::Connected) == PowerButton::Mode::Active,
+          "a connected tunnel gives the button the green-to-blue active look");
+    check(MainWindow::powerMode(WarpManager::State::Connecting) == PowerButton::Mode::Busy,
+          "a connect in flight gives it the breathing busy look");
+    check(MainWindow::powerMode(WarpManager::State::Disconnected) == PowerButton::Mode::Idle,
+          "a stopped tunnel is an idle button, ready to press");
+
+    check(MainWindow::canActFrom(WarpManager::State::Connected),
+          "a live tunnel can be stopped");
+    check(MainWindow::canActFrom(WarpManager::State::Disconnected),
+          "a stopped tunnel can be started");
+    check(MainWindow::canActFrom(WarpManager::State::Error),
+          "a failed verb still allows a retry, so the button never strands the user");
+    check(!MainWindow::canActFrom(WarpManager::State::Connecting),
+          "an in-flight connect is refused, not queued behind a second warp-cli");
+    check(!MainWindow::canActFrom(WarpManager::State::Unavailable),
+          "no warp-cli, no action");
+
+    // The clamp: a stored Warp intent on a host that no longer has warp-cli falls back to
+    // Zapret so the button still means something; the store keeps the intent, not the widget.
+    check(MainWindow::clampModeForAvailability(ModeToggle::Mode::Warp, false)
+              == ModeToggle::Mode::Zapret,
+          "a stale Warp pick is clamped to Zapret when warp-cli is missing");
+    check(MainWindow::clampModeForAvailability(ModeToggle::Mode::Warp, true)
+              == ModeToggle::Mode::Warp,
+          "and honoured when warp-cli is back");
+    check(MainWindow::clampModeForAvailability(ModeToggle::Mode::Zapret, false)
+              == ModeToggle::Mode::Zapret,
+          "a Zapret pick is never moved by WARP availability");
 }
 
 // --------------------------------------------------------------- ProfileCard ----
@@ -1918,6 +2068,76 @@ static void testDownloadDialog()
     check(DownloadDialog::humanSize(7844856).contains(QStringLiteral("МиБ")), "and megabytes in МиБ");
     check(DownloadDialog::humanSize(-1) == QStringLiteral("неизвестно"),
           "an unannounced size is called unknown, not zero");
+
+    // ---- which completion message the finished path earns ----
+    //
+    // onDownloadFinished() ends in a modal QMessageBox, so a headless suite cannot call it: nothing is
+    // there to click OK, and the test would hang rather than fail. The decision it used to make inline —
+    // promoted or not, and therefore what the user is told about future password prompts — now lives in
+    // two statics, which is what makes it checkable at all. What is asserted here is the promise the GUI
+    // makes to the user, not the promotion mechanics (coretest owns those).
+    const QString systemTree = ZapretPaths::systemInstallDir();
+    const QString managedTree = ZapretPaths::managedInstallDir();
+
+    // The one path that is a promoted install, and everything that merely resembles one.
+    check(DownloadDialog::isPromotedPath(systemTree) == !systemTree.isEmpty(),
+          "the system tree is promoted, and nothing is when this host has no system tree");
+    check(!DownloadDialog::isPromotedPath(QString()), "an unset path is not a promoted install");
+    check(!DownloadDialog::isPromotedPath(managedTree),
+          "the managed folder is never announced as the system-wide install");
+    // The sibling names a promotion builds beside the tree. Both hold a not-yet-root-owned payload, and
+    // the polkit rule deliberately refuses them, so promising passwordless starts for either is a lie
+    // about a tree the rule will still challenge. Exact match, not prefix match, is the property.
+    check(!DownloadDialog::isPromotedPath(systemTree + QStringLiteral(".new")),
+          "the staging directory is not a promoted install");
+    check(!DownloadDialog::isPromotedPath(systemTree + QStringLiteral(".old")),
+          "nor is the backup of the incumbent");
+    check(!DownloadDialog::isPromotedPath(QStringLiteral("/opt/zapret")),
+          "upstream's own default tree is not ours");
+    check(!DownloadDialog::isPromotedPath(QLatin1Char('/') + systemTree),
+          "and a doubled separator does not sneak past the equality test");
+
+    const QString rootNote = LanguageManager::tr(QStringLiteral("dl.root_note"));
+    const QString failureNote = QStringLiteral("the root helper is not installed");
+
+    if (systemTree.isEmpty())
+    {
+        // Windows: there is no destination a download can be promoted into, so no finished path — not
+        // even the empty string, which is what the dialog would otherwise compare against — may be
+        // reported as a passwordless install. Every install this platform makes is the managed one.
+        const QString text = DownloadDialog::installedMessageText(managedTree, failureNote);
+        check(!text.contains(rootNote),
+              "windows never promises passwordless starts, because it can never promote");
+        check(!DownloadDialog::installedMessageText(QString(), QString()).contains(rootNote),
+              "and an empty path there reads as no install, not as a promoted one");
+    }
+    else
+    {
+        // A promoted install promises passwordless starts, and must not also carry a stale failure line:
+        // a promotion that landed after an earlier one failed should not still report that failure.
+        const QString promotedText = DownloadDialog::installedMessageText(systemTree, failureNote);
+        check(promotedText.contains(rootNote),
+              "a promoted install says starts will not ask for a password");
+        check(!promotedText.contains(failureNote),
+              "and it does not repeat a failure the successful promotion just contradicted");
+        check(promotedText.contains(QDir::toNativeSeparators(systemTree)),
+              "naming the tree the payload really sits in");
+    }
+
+    // The managed folder works identically but asks each time, so the reason the promotion fell through
+    // is the whole value of the message — that is what the user would otherwise have to go find.
+    const QString managedText = DownloadDialog::installedMessageText(managedTree, failureNote);
+    check(!managedText.contains(rootNote),
+          "a managed install does not promise passwordless starts it cannot deliver");
+    check(managedText.contains(failureNote), "and carries the reason why");
+    check(managedText.contains(QDir::toNativeSeparators(managedTree)), "naming where it actually landed");
+
+    // No promotion attempted (the default, and the whole of Windows) and no promotion note to show: the
+    // message is the bare location, with no dangling blank lines from an empty note.
+    const QString plainText = DownloadDialog::installedMessageText(managedTree, QString());
+    check(!plainText.contains(rootNote) && !plainText.contains(failureNote),
+          "with nothing to report about promotion the message says nothing about it");
+    check(!plainText.endsWith(QStringLiteral("\n")), "and an empty note leaves no trailing blank line");
 }
 
 // ---------------------------------------------------------------- History page ----
@@ -3741,6 +3961,8 @@ int main(int argc, char **argv)
     testLogPanel();
     testPingIndicator();
     testPowerButton();
+    testModeToggle();
+    testWarpMappings();
     testProfileCard();
     testTrayPolicy();
     testWindowPolicy();

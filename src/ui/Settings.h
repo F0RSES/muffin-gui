@@ -66,6 +66,14 @@ public:
     bool minimizeToTray() const;         // hide to tray instead of quitting on close
     void setMinimizeToTray(bool on);
 
+    // ---- mode toggle --------------------------------------------------------
+    // Whether the dashboard is currently pointed at WARP rather than Zapret. The power button
+    // and the header chip read this to decide which subsystem they control; every other widget
+    // stays out of the decision so a mode flip cannot leave half the screen talking to a
+    // subsystem the other half has stopped watching.
+    bool warpMode() const;
+    void setWarpMode(bool on);
+
     // ---- motion ----
     // Whether the interface may move at all: page fades, card entrances, the power button's breath. On
     // by default, because the design was drawn moving; the switch exists for the machines the movement

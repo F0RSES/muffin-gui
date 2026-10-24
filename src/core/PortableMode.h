@@ -165,20 +165,32 @@ inline constexpr const char *kPortableFakeFilesSubdir = "files/fake";
 inline constexpr const char *kPortableFakeTlsFile = "tls_clienthello_www_google_com.bin";
 inline constexpr const char *kPortableFakeQuicFile = "quic_initial_www_google_com.bin";
 
-// The absolute path to one fake template, or empty when this host has no system tree at all.
+// The absolute path to one fake template, or empty when there is no tree to read it from.
 //
 // Why absolute: nfqws resolves a relative path against its cwd, and the backend starts the payload
-// from the tree root — a directory the run happened to be located in, not something this header
+// from the tree root - a directory the run happened to be located in, not something this header
 // controls. Anchoring to ZapretPaths::systemInstallDir() instead means the payload, the polkit rule
 // and the packager all read the one literal, and a template can never be sought inside a directory
-// the unprivileged user can rewrite. Empty on Windows: no such tree, and no portable mode there.
+// the unprivileged user can rewrite.
+//
+// Refused on Windows, and the refusal is now explicit rather than inherited. systemInstallDir() used
+// to answer "there is no such place" there, which is what made portable mode evaporate on its own;
+// it now names C:\Program Files\Muffin\zapret, because Windows promotes too - just by writing the
+// tree there directly. Portable mode itself has no Windows half: it is nfqws behind an nfqueue and
+// iptables rules. Saying "no template" is what keeps a Windows host from being handed a Linux
+// payload's absolute path, which nfqws would fail the whole start on.
 inline QString portableFakeFilePath(const char *fileName)
 {
+#if defined(Q_OS_WIN)
+    Q_UNUSED(fileName);
+    return QString();
+#else
     const QString tree = ZapretPaths::systemInstallDir();
     if (tree.isEmpty())
         return QString();
     return tree + QLatin1Char('/') + QLatin1String(kPortableFakeFilesSubdir) +
            QLatin1Char('/') + QLatin1String(fileName);
+#endif
 }
 
 // The default nfqws argument vector for a portable run, seeded into Strategy::argv by the parser.

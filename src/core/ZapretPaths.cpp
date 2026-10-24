@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <QStandardPaths>
+#include <QProcessEnvironment>
 #include <QStringList>
 #include <QSysInfo>
 
@@ -261,13 +262,58 @@ bool ZapretPaths::migrateManagedInstallDir()
     return moved;
 }
 
+QString ZapretPaths::systemInstallDirUnder(const QString &programFilesRoot)
+{
+    // The default is where a host with no usable Program Files value still installs into. Every Windows
+    // installation has a Program Files; the value is only absent when the environment block was built
+    // without it (a process launched by a runner that clears the environment, a service under a minimal
+    // token), and guessing the system drive beats reporting "there is nowhere to promote to" - which
+    // every caller reads as "stay in the user-writable folder" and which is the vulnerability this
+    // function exists to close.
+    const QString fallback = QStringLiteral("C:/Program Files");
+
+    // '/' on the wire everywhere inside this library (see rel()); the value read from the environment
+    // arrives with '\', and a test hands in a path in its own host's spelling, so normalise once here
+    // and the rest of the function is the same on both platforms.
+    QString root = QDir::fromNativeSeparators(programFilesRoot).trimmed();
+    while (root.length() > 1 && root.endsWith(QLatin1Char('/')))
+        root.chop(1);
+
+    // The three refusals below are the reason this is a function rather than a concatenation. A
+    // relative "Program Files" would resolve against whatever the working directory happens to be -
+    // and the working directory, unlike the destination, is somewhere the user does control. A ".."
+    // component walks out of the directory the value named, which is exactly what "only an elevated
+    // process can write here" is meant to rule out.
+    if (root.isEmpty() || !QDir::isAbsolutePath(root)
+        || root.split(QLatin1Char('/'), Qt::SkipEmptyParts).contains(QLatin1String("..")))
+    {
+        root = fallback;
+    }
+
+    return rel(rel(root, QStringLiteral("Muffin")), QStringLiteral("zapret"));
+}
+
 QString ZapretPaths::systemInstallDir()
 {
 #if defined(Q_OS_WIN)
-    // No polkit and no root-owned tree to promote into. The empty string means "there is no such
-    // place" — exactly like managedInstallDir() empty — and every caller has to read it that way
-    // rather than as a path it may write under.
-    return QString();
+    // C:\Program Files\Muffin\zapret.
+    //
+    // The alternative - leaving the payload in %LOCALAPPDATA%\... where the download was unpacked - is
+    // not a layout preference, it is a local privilege escalation. Muffin.exe carries
+    // requireAdministrator, WindowsBackend starts winws.exe from that elevated token, and the standard
+    // user owns everything under his own AppData. A program running WITHOUT administrative rights can
+    // therefore replace winws.exe in the managed folder, and the next press of the power button runs
+    // the replacement as admin. Program Files is the one ordinary location a standard token cannot
+    // write to, so the promotion is what makes the elevation safe.
+    //
+    // QProcessEnvironment rather than qgetenv(): the Windows environment block is UTF-16 and this
+    // returns a properly decoded QString, which matters on a machine whose system drive is not on C
+    // or whose username is not ASCII. "ProgramFiles" is the value the OS writes for THIS process's
+    // bitness; a 32-bit build on a 64-bit Windows names "Program Files (x86)" with it, which is a
+    // directory the user cannot write to either, so the security property is identical and the
+    // difference is only which folder the user sees in Explorer.
+    return systemInstallDirUnder(
+        QProcessEnvironment::systemEnvironment().value(QStringLiteral("ProgramFiles")));
 #else
     // Fixed at compile time on purpose: no environment variable, no Settings key and no argument
     // reaches this value, because the root helper reads it while running as root, and a redirectable

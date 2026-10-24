@@ -74,16 +74,32 @@ PowerButton::~PowerButton()
 
 QColor PowerButton::modeColor(Mode mode)
 {
+    return modeColor(mode, Palette::Zapret);
+}
+
+QColor PowerButton::modeColor(Mode mode, Palette palette)
+{
+    // Warp's colours are Cloudflare's own registered palette rather than a re-tint of the app's
+    // accents: a user who has ever seen the WARP tray icon should recognise that the green
+    // they know from zapret means something different in this mode. The values below match the
+    // brand assets as published on 2024-11 — "Cloudflare Orange" #F6821F and a lighter
+    // "Cloudflare Blue" #22A7F0 for the "up and passing traffic" state.
+    const QColor warpIdle(0xF6, 0x82, 0x1F);
+    const QColor warpActive(0x22, 0xA7, 0xF0);
     switch (mode) {
     case Mode::Active:
-        // Green: the same token the "CONNECTED" chip and the live ping rings are drawn with, so one
-        // colour means one thing on this screen. Purple-to-green is the difference, at a glance, between
-        // "press me" and "press me and your traffic goes down".
+        if (palette == Palette::Warp)
+            return warpActive;
+        // Green: the same token the "CONNECTED" chip and the live ping rings are drawn with, so
+        // one colour means one thing on this screen. Purple-to-green is the difference, at a
+        // glance, between "press me" and "press me and your traffic goes down".
         return Theme::pingOk();
     case Mode::Idle:
     case Mode::Busy:
         break;
     }
+    if (palette == Palette::Warp)
+        return warpIdle;
     return Theme::accent();
 }
 
@@ -113,6 +129,17 @@ void PowerButton::setMode(Mode mode)
     m_mode = mode;
     refreshGlyph();
     reconcileMotion();
+    update();
+}
+
+void PowerButton::setPalette(Palette palette)
+{
+    if (m_palette == palette)
+        return;
+    m_palette = palette;
+    // The glyph is baked in the mode's colour, so a palette flip cannot just repaint the ring
+    // — the tint has to be re-rasterised or the icon keeps the previous palette's hue.
+    refreshGlyph();
     update();
 }
 
@@ -208,10 +235,11 @@ QPixmap PowerButton::glyphPixmap(const QColor &tint, int px) const
 
 void PowerButton::refreshGlyph()
 {
-    // Rasterised once per (glyph, mode, size) rather than per paint: Theme::icon() rewrites and reloads
-    // an SVG document, which is far too much work to repeat on every frame of the pulse.
+    // Rasterised once per (glyph, mode, palette, size) rather than per paint: Theme::icon()
+    // rewrites and reloads an SVG document, which is far too much work to repeat on every
+    // frame of the pulse.
     m_glyphPx = qRound(m_diameter * kGlyphRatio);
-    m_glyphPm = glyphPixmap(modeColor(m_mode), m_glyphPx);
+    m_glyphPm = glyphPixmap(modeColor(m_mode, m_palette), m_glyphPx);
 }
 
 void PowerButton::enterEvent(QEnterEvent *event)
@@ -251,7 +279,7 @@ void PowerButton::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    const QColor tint = modeColor(m_mode);
+    const QColor tint = modeColor(m_mode, m_palette);
     const QPointF center(width() / 2.0, height() / 2.0);
     const qreal radius = m_diameter / 2.0;
     const QRectF rim(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0);

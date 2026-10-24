@@ -38,6 +38,23 @@ public:
     };
     Q_ENUM(Mode)
 
+    // Whether the button's colours belong to Zapret or WARP. Two palettes rather than a per-widget
+    // colour because the mode's meaning is a claim about what is running, not about what a widget
+    // was drawn to look like: a WARP tunnel that shows up purple would read as the zapret
+    // payload's own neon, and the entire point of the toggle is that these are two different
+    // things the user can pick between at a glance.
+    //
+    // Zapret's palette stays on the historical purple (idle/busy) and green (active) so an
+    // existing screenshot of the dashboard does not lie. Warp's palette borrows Cloudflare's
+    // registered orange for idle/busy and a lighter blue for active, so a user who has seen the
+    // WARP client's own tray icon knows they are looking at the tunnel rather than at zapret.
+    enum class Palette
+    {
+        Zapret,
+        Warp
+    };
+    Q_ENUM(Palette)
+
     explicit PowerButton(QWidget *parent = nullptr);
     ~PowerButton() override;
 
@@ -53,6 +70,11 @@ public:
 
     void setMode(Mode mode);
     Mode mode() const { return m_mode; }
+
+    // Switch which colour scheme the ring, halo and glyph are drawn from. Setting the palette it
+    // already has is a no-op; anything else re-rasterises the glyph and repaints the halo.
+    void setPalette(Palette palette);
+    Palette palette() const { return m_palette; }
 
     // The "this run is alive" breath: the whole button fading between fully opaque and Motion's floor
     // and back, on Motion's period. MainWindow turns it on for exactly the two states in which the
@@ -77,8 +99,13 @@ public:
     void setGlow(qreal level);
     qreal glow() const { return m_glow; }
 
-    // The ring/halo/glyph colour for a mode. Theme-independent neon: purple to act, green to stop.
+    // The ring/halo/glyph colour for a mode in the default (Zapret) palette. Retained as a
+    // one-argument form because existing tests reach for it, and because "purple to act, green
+    // to stop" is the historical claim about this widget's look.
     static QColor modeColor(Mode mode);
+    // The same lookup in an explicit palette, so a caller that owns the mode-to-look table can
+    // ask "what colour would a WARP-active button be?" without holding a widget.
+    static QColor modeColor(Mode mode, Palette palette);
 
     // How much room the bloom gets on each side of the circle.
     static constexpr int kHaloMargin = 38;
@@ -115,6 +142,7 @@ private:
     qreal m_glow = 1.0;
     int m_diameter = 200;
     Mode m_mode = Mode::Idle;
+    Palette m_palette = Palette::Zapret;
     bool m_hovered = false;
 };
 

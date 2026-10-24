@@ -59,17 +59,27 @@ public:
     void setTargetDir(const QString &dir);
     QString targetDir() const;
 
-    // ---- system-wide promotion (POSIX) ----
+    // ---- system-wide promotion ----
     //
-    // Turn on, and a finished linux download is also handed to the root helper
-    // (MuffinInstallHelper), which installs a copy into ZapretPaths::systemInstallDir() as
-    // root:root with no group/world write bit. That tree is the one packaging/postinst's polkit rule
-    // lets pkexec run WITHOUT a password; the managed copy in the user's own app-data folder can
-    // never be authorised, because the user owns the bytes there and could swap in anything.
+    // Turn on, and a finished download ends up in ZapretPaths::systemInstallDir() - the one tree its
+    // owner cannot rewrite - instead of staying in the managed directory the user owns.
     //
-    // Off by default: asking a human for a password is not something a library does behind a
-    // caller's back, and a headless test that never opts in can therefore never reach pkexec.
-    // Promotion also never fails a download — see promotionFailed.
+    // On POSIX that means handing the finished linux tree to the root helper (MuffinInstallHelper),
+    // which copies it into the system directory as root:root with no group/world write bit. That tree
+    // is the one packaging/postinst's polkit rule lets pkexec run WITHOUT a password; a copy in the
+    // user's own app-data folder can never be authorised, because he owns the bytes there and could
+    // swap in anything.
+    //
+    // On Windows it means unpacking the tree straight into C:\Program Files\Muffin\zapret. There is no
+    // polkit to ask and no helper to exec: Muffin.exe is already elevated, because its manifest said
+    // so before main() ran, and the installer's own QFile::rename is enough to put bytes where a
+    // standard token may not write. Leaving them in %LOCALAPPDATA% instead is a local privilege
+    // escalation - an unprivileged program rewrites winws.exe there, and the elevated window runs it.
+    // See defaultInstallTarget().
+    //
+    // Off by default: installing system-wide is not something a library does behind a caller's back,
+    // and a headless test that never opts in can therefore never reach pkexec. Promotion also never
+    // fails a download - see promotionFailed.
     void setPromoteAfterInstall(bool on);
     bool promoteAfterInstall() const;
 
@@ -86,8 +96,33 @@ public:
     void cancel();
 
     // ---- pure helpers: no socket, no subprocess, usable from tests ----
-    // The directory this application installs into ("<AppDataLocation>/zapret").
+    // The directory this application installs into ("<AppDataLocation>/zapret"). The user owns every
+    // byte of it, which is exactly why a promoted download does not stay there.
     static QString installRoot();
+    // The tree a promotion writes into: ZapretPaths::systemInstallDir(). "" when this host has none.
+    static QString promotionRoot();
+
+    // Which of the two directories this download will be unpacked into, as a function of the answers
+    // rather than of the environment, so a test can ask it about a host it is not standing on.
+    //
+    // POSIX always answers the managed directory. An unprivileged process cannot write to
+    // /opt/muffin, so the tree is unpacked where it can be and then COPIED there by the root helper
+    // through pkexec - the password is spent on one copy, and the payload is never exec'd from a
+    // directory the user owns.
+    //
+    // Windows answers the system directory when promotion was asked for and this process is elevated,
+    // because Muffin.exe carries requireAdministrator in its manifest: the elevation already happened,
+    // before main() ran. There is no polkit to ask and no helper to exec, so the installer writes the
+    // tree straight into Program Files with QFile::rename - which is the same transactional swap
+    // installTree() already performs, only aimed somewhere a standard token cannot write. Nothing
+    // user-writable is left behind, which is the point: an unprivileged process that can rewrite
+    // winws.exe has a local privilege escalation the moment the elevated window starts it.
+    static QString defaultInstallTarget(Strategy::Platform platform, bool promote, bool elevated);
+
+    // The reason a requested promotion cannot happen on this host, or empty when it can. Split out
+    // because "why did you not protect me?" is a decision the dialog reports, and a decision that only
+    // exists inside a signal emission is a decision nobody can test.
+    static QString promotionRefusal(Strategy::Platform platform, bool promote, bool elevated);
 
     // Lowercase hex sha256 of the file, or "" (with *ok == false) when it could not be read. Streamed,
     // so an 8 MB tarball is never held in memory.

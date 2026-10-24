@@ -38,26 +38,43 @@ void probeOne(const QString &candidate, QList<ZapretLocator::Found> &out)
 QStringList ZapretLocator::defaultBases()
 {
     QStringList bases;
-    // The managed install comes FIRST. It is the only base whose contents this application laid out
-    // itself — ZapretDownloader unpacks and validates a release into exactly that directory — so a
-    // restart finds the tree the user downloaded without asking them to point at it again. It also
-    // cannot shadow anything a user set up by hand: the directory simply does not exist until the
-    // download feature has been used once.
+    // Two trees, two rules, and the difference is who can write to them.
     //
-    // It also stays first after a promotion. /opt/muffin/zapret is a copy of this directory taken by
-    // the root helper, so the two hold the same release — but a download whose promotion was declined
-    // or failed leaves the managed copy NEWER than the system one, and silently preferring the stale
-    // tree would mean running an older zapret than the one the user just installed. The promoted tree
-    // reaches the GUI through Settings (zapretInstalled is told the system path when the promotion
-    // succeeded), which outranks this list; the entry here is the fallback that keeps it findable when
-    // Settings is reset or another user logs in.
+    // The managed install is the only base whose contents this application laid out itself -
+    // ZapretDownloader unpacks and validates a release into exactly that directory - so a restart finds
+    // the tree the user downloaded without asking them to point at it again. It cannot shadow anything
+    // a user set up by hand: the directory simply does not exist until the download feature has been
+    // used once. And it is a COPY of what a promotion moves into the system tree, so on POSIX the two
+    // hold the same release - but a download whose promotion was declined or failed leaves the managed
+    // copy NEWER than the system one, and silently preferring the stale tree would mean running an
+    // older zapret than the one the user just installed. Hence managed first on POSIX.
+    //
+    // On Windows the order flips, and it is not a preference: it is the security fix. The managed tree
+    // lives in the user's own AppData, which any process running as that user may rewrite, and Muffin
+    // starts winws.exe from an elevated token. Ranking that directory above
+    // C:\Program Files\Muffin\zapret would mean the vulnerable copy wins whenever both exist - which is
+    // precisely the local privilege escalation the promotion exists to remove. The promoted tree is
+    // also the ONLY one after a successful promotion: ZapretDownloader deletes the AppData copy once the
+    // move lands, so there is normally nothing to rank second.
+    //
+    // The promoted tree reaches the GUI through Settings in either order (zapretInstalled is told the
+    // system path when the promotion succeeded), and Settings outranks this list; these entries are the
+    // fallback that keeps a tree findable when Settings is reset or another user logs in.
     const QString managed = ZapretPaths::managedInstallDir();
-    if (!managed.isEmpty())
-        bases << managed;
-    // The root-owned tree a download is promoted into. Empty on Windows, where there is no such place.
     const QString system = ZapretPaths::systemInstallDir();
+#if defined(Q_OS_WIN)
     if (!system.isEmpty())
         bases << system;
+    if (!managed.isEmpty())
+        bases << managed;
+#else
+    if (!managed.isEmpty())
+        bases << managed;
+    // Empty only when this host offers no system tree at all; an empty answer is "no such place",
+    // never "the root directory".
+    if (!system.isEmpty())
+        bases << system;
+#endif
     bases << QDir::homePath() + QStringLiteral("/Documents/zapret");
     bases << QDir::homePath() + QStringLiteral("/Downloads/zapret");
     bases << QDir::currentPath() + QStringLiteral("/zapret");

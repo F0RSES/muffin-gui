@@ -110,29 +110,51 @@ public:
     // one this build resolves to) survives untouched.
     static bool migrateManagedInstallDir();
 
-    // ---- the system-wide tree a download is promoted into (POSIX only) ----
-    // "/opt/muffin/zapret", or empty on Windows, where there is no polkit and no root-owned tree to
-    // promote into. Empty means "there is no such place", exactly like managedInstallDir() empty means
-    // "this host offers no app-data directory" — callers must not read it as "the root directory".
+    // ---- the system-wide tree a download is promoted into ----
+    // "/opt/muffin/zapret" on POSIX, "<Program Files>\Muffin\zapret" on Windows. Empty only when the
+    // host offers no such place at all; callers must not read an empty answer as "the root directory".
     //
-    // Why a directory of its own instead of /opt/zapret: upstream's own scripts default to that
+    // Why a directory of its own instead of /opt/zapret (and on Windows instead of a folder loose in
+    // C:\): upstream's own scripts default to that POSIX path
     // (init.d/sysv/defaults.sh: ZAPRET_BASE=${ZAPRET_BASE:-/opt/zapret}), so a user who set zapret up
-    // by hand already has a tree there that Muffin must never overwrite. /opt/muffin is this
-    // application's namespace: nothing else claims it, and the packaging scripts may clean it up.
+    // by hand already has a tree there that Muffin must never overwrite. Muffin's namespace is a place
+    // nothing else claims, and the packaging scripts may clean it up.
     //
-    // Why it has to be root-owned: packaging/postinst installs a polkit rule that lets a payload under
-    // this tree be exec'd through pkexec WITHOUT a password. That is only sound while an unprivileged
-    // user cannot replace the bytes there. A directory in the user's own home fails that test — he owns
-    // it, so whoever wrote the file owns the root shell that follows — which is why a download is
-    // staged in managedInstallDir() and then promoted here by the root helper (MuffinInstallHelper)
-    // instead of being exec'd in place.
+    // Why it has to be a directory the user cannot write to: that IS the point of promoting. The
+    // download is unpacked into managedInstallDir(), which the user owns, and the finished tree is
+    // then moved here, where only root (POSIX) or only an elevated process (Windows) may write.
     //
-    // Fixed at compile time on purpose: no environment variable, no Settings key and no argument
-    // reaches this value, because the helper reads it while running as root and a redirectable
-    // destination would let an unprivileged user aim that root write at any directory on the machine.
-    // packaging/check-polkit-rule.js reads this one literal back out of the source and requires the
+    //   POSIX: packaging/postinst installs a polkit rule that lets a payload under this tree be exec'd
+    //   through pkexec WITHOUT a password. That is only sound while an unprivileged user cannot replace
+    //   the bytes there. A directory in the user's own home fails that test - he owns it, so whoever
+    //   wrote the file owns the root shell that follows - which is why the promotion is done by the
+    //   root helper (MuffinInstallHelper) rather than by exec'ing the staged copy in place.
+    //
+    //   Windows: Muffin.exe carries requireAdministrator in its manifest and WindowsBackend starts
+    //   winws.exe from that elevated token. A tree left in %LOCALAPPDATA% is therefore a local
+    //   privilege escalation: any program running as the user can rewrite winws.exe there, and the
+    //   next start runs the replacement as administrator. %ProgramFiles% is the one ordinary location
+    //   a standard token cannot write to, so that is where the payload belongs.
+    //
+    // The POSIX branch is a compile-time literal because the root helper reads it while running as
+    // root, and a redirectable destination would let an unprivileged user aim that root write at any
+    // directory on the machine. The Windows branch is read from the environment because Muffin reads
+    // it while it is ALREADY elevated: the value comes from the elevated process's own environment
+    // block, which a non-admin cannot influence, and hardcoding C:\ would break the machine where
+    // Windows is installed elsewhere. systemInstallDirUnder() refuses anything that is not an
+    // absolute, traversal-free path, so even a hostile value cannot steer the write outside
+    // Program Files.
+    //
+    // packaging/check-polkit-rule.js reads the POSIX literal back out of the source and requires the
     // polkit rule to carry the same prefix, so the two cannot drift apart silently.
     static QString systemInstallDir();
+
+    // The Windows destination composed from the Program Files root `programFilesRoot`, under the rules
+    // systemInstallDir() applies to the value it reads from the environment: empty, not absolute, or
+    // carrying a ".." component lands on the plain "C:/Program Files" default instead. Split out
+    // because "where would a promotion write?" is the security answer, and an answer a test cannot
+    // hand its inputs to is an answer nobody has checked.
+    static QString systemInstallDirUnder(const QString &programFilesRoot);
 
     // ---- the list files a payload is told to read ----
     //

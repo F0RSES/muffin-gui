@@ -36,6 +36,7 @@ add_library(zapretcore STATIC
     src/core/PingService.cpp
     src/core/BlockcheckEngine.cpp
     src/core/HistoryStore.cpp
+    src/core/WarpManager.cpp
     src/platform/WindowsBackend.cpp
     src/platform/LinuxBackend.cpp
 )
@@ -52,6 +53,7 @@ target_sources(zapretcore PRIVATE
     src/core/PingService.h
     src/core/BlockcheckEngine.h
     src/core/HistoryStore.h
+    src/core/WarpManager.h
     src/platform/WindowsBackend.h
     src/platform/LinuxBackend.h
 )
@@ -77,8 +79,12 @@ endif()
 # sits in a directory the caller owns. This target has no degrees of freedom — one argument, a fixed
 # destination read from ZapretPaths, and its own validation.
 #
-# POSIX-only: Windows elevates winws.exe through UAC from wherever it lives, and
-# ZapretPaths::systemInstallDir() is empty there, so there would be nothing for it to do.
+# POSIX-only: there is no polkit on Windows and no root account to become, and Muffin.exe is already
+# elevated by its own manifest - so ZapretDownloader unpacks a Windows release straight into
+# ZapretPaths::systemInstallDir() (C:\Program Files\Muffin\zapret) with its own transactional rename.
+# A helper with a fixed destination is what the unprivileged POSIX process cannot do for itself; an
+# administrative Windows process can, and one more passwordless exec on the authorised path would only
+# add a way to be abused.
 #
 # The DESTINATION is part of the security contract, not a layout preference:
 # MuffinInstallHelper::installedProgram() returns this exact path, the GUI execs it through pkexec,
@@ -113,6 +119,7 @@ set(ZAPRET_UI_SOURCES
     src/ui/Motion.cpp
     src/ui/PingIndicator.cpp
     src/ui/PowerButton.cpp
+    src/ui/ModeToggle.cpp
     src/ui/ProfileCard.cpp
     src/ui/LogPanel.cpp
     src/ui/DownloadDialog.cpp
@@ -130,6 +137,7 @@ set(ZAPRET_UI_HEADERS
     src/ui/Motion.h
     src/ui/PingIndicator.h
     src/ui/PowerButton.h
+    src/ui/ModeToggle.h
     src/ui/ProfileCard.h
     src/ui/LogPanel.h
     src/ui/DownloadDialog.h

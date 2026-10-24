@@ -54,6 +54,28 @@ public:
     // "7.5 MiB" style size for the info line. Static: the wording is a decision, not a widget.
     static QString humanSize(qint64 bytes);
 
+    // Did `path` arrive from the promotion into the system tree, or from the managed directory the
+    // download unpacked into? The two need different wording — one can promise that starts will be
+    // passwordless, the other has to explain why they will not — and reading the answer off the path
+    // is the whole of that decision.
+    //
+    // Static, for humanSize()'s reason: it is a judgement about a report and not a widget. The
+    // alternative is a test that cannot reach it at all, because the code that asks the question ends
+    // in a modal QMessageBox — and a headless suite has nobody to click OK, so calling it hangs.
+    //
+    // An empty systemInstallDir() means this host has no promoted destination to reach (Windows); it
+    // is read as "no such place", never as a path a report might match, so nothing is ever promoted
+    // there and an unset `path` can never read as one.
+    static bool isPromotedPath(const QString &path);
+
+    // The completion message for a finished install: where it landed, followed by either the note that
+    // starts will be passwordless (promoted) or the reason that promotion did not happen.
+    //
+    // `promotionNote` is the first line of the promotionFailed message, or empty when the promotion
+    // succeeded or was never attempted. Passing it in rather than reading a member keeps the answer a
+    // function of its arguments, which is what makes it checkable without driving a downloader.
+    static QString installedMessageText(const QString &path, const QString &promotionNote);
+
 signals:
     // A validated tree now sits at `path`. Named installed() instead of accepted(): QDialog already has
     // an argument-less accepted() that accept() fires, and overloading it would make every connect site

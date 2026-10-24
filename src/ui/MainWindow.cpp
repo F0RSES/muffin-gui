@@ -6,6 +6,7 @@
 #include "HistoryStore.h"
 #include "LanguageManager.h"
 #include "LogPanel.h"
+#include "ModeToggle.h"
 #include "Motion.h"
 #include "PingIndicator.h"
 #include "PingService.h"
@@ -15,6 +16,7 @@
 #include "SettingsPage.h"
 #include "Theme.h"
 #include "UpdateChecker.h"
+#include "WarpManager.h"
 #include "ZapretManager.h"
 #include "ZapretPaths.h"
 
@@ -107,8 +109,14 @@ constexpr int kFlagGlyphPx = 22;
 // The dashboard's circle. 200 px of rim, and PowerButton adds its own halo margin on every side, so the
 // widget is taller than this — which is why the spacing below is measured from the widget, not the ring.
 constexpr int kPowerDiameterPx = 200;
-// Button to ping badges, as specified.
-constexpr int kPowerToPingsGap = 60;
+// Button to pill: shorter than the old button-to-badges gap because the pill belongs with the button
+// rather than with the badges; together they are the "what am I controlling" cluster.
+constexpr int kPowerToToggleGap = 24;
+// Pill to ping badges: the rest of what used to sit in one gap, kept as its own constant so the
+// two halves of the vertical rhythm can be tuned without either one dragging the other.
+constexpr int kToggleToPingsGap = 36;
+// Kept for anything that still refers to the old total; new call sites should use the pair above.
+constexpr int kPowerToPingsGap = kPowerToToggleGap + 40 /* pill height */ + kToggleToPingsGap;
 // Badge to badge.
 constexpr int kPingSpacing = 50;
 // The header's connected dot: 6 px across, so a 3 px radius.
@@ -157,6 +165,13 @@ MainWindow::MainWindow(QWidget *parent)
     // lives on this thread, and only its probe worker does not.
     m_blockcheck = new BlockcheckEngine(this);
     m_blockcheck->setManager(m_manager);
+
+    // WARP is a separate subsystem: it talks to a system daemon through warp-cli rather than
+    // owning a child process, so it lives beside ZapretManager instead of under it. Constructed
+    // eagerly — an unavailable warp-cli is a fact the toggle has to show from the first frame,
+    // and probing PATH once on the GUI thread is well under the budget the constructor's own
+    // history load already spends.
+    m_warp = new WarpManager(this);
 
     // The record of every check this window measures, kept in the per-user data directory next to — and
     // deliberately not inside — the payload tree a re-download replaces. load() is the one synchronous
@@ -235,6 +250,19 @@ MainWindow::MainWindow(QWidget *parent)
     // lights the row the last session left running rather than the first one alphabetically. If that id is
     // stale (the folder changed, the entry was deleted) populateCards falls it back to a real row.
     m_selectedId = m_settings->lastStrategyId();
+
+    // Seed the toggle from the persisted choice, then clamp it against what the host actually has.
+    // A user who picked WARP, quit, and uninstalled the WARP client should come back to a
+    // dashboard whose Zapret half is lit rather than one whose WARP half is lit and whose power
+    // button will not do anything. The clamp does not write settings — the store remembers the
+    // intent, so putting WARP back lights the pill again without the user picking it twice.
+    m_modeToggle->setMode(MainWindow::clampModeForAvailability(
+        m_settings->warpMode() ? ModeToggle::Mode::Warp : ModeToggle::Mode::Zapret,
+        m_warp->isAvailable()));
+    // Polling only runs while the mode is actually pointed at the tunnel — a status probe of a
+    // warp-cli nobody is looking at would just wake the process table.
+    if (m_modeToggle->mode() == ModeToggle::Mode::Warp)
+        m_warp->setPollingEnabled(true);
 
     m_manager->setZapretDir(m_settings->zapretPath());
     updateStatusUi();
@@ -789,7 +817,17 @@ QWidget *MainWindow::buildDashboardPage()
     connect(m_power, &QAbstractButton::clicked, this, &MainWindow::onPowerClicked);
     box->addWidget(m_power, 0, Qt::AlignHCenter);
 
-    box->addSpacing(kPowerToPingsGap);
+    // The Zapret/WARP pill sits directly under the button so the two read as one control: the
+    // ring says what the next press will do, the pill says what the next press will be pressed
+    // ON. Same horizontal centring as the ring for the same reason the mock is centred — a
+    // pill that lands off-axis makes the whole column look like it was assembled by eye.
+    box->addSpacing(kPowerToToggleGap);
+    m_modeToggle = new ModeToggle(page);
+    m_modeToggle->setObjectName(QStringLiteral("modeToggle"));
+    connect(m_modeToggle, &ModeToggle::modeChanged, this, &MainWindow::onModeChanged);
+    box->addWidget(m_modeToggle, 0, Qt::AlignHCenter);
+
+    box->addSpacing(kToggleToPingsGap);
 
     // One badge per host the ping service actually checks, rather than a hardcoded pair: a badge that
     // showed a service nobody probes would be the only dishonest number on the screen.
@@ -1169,6 +1207,14 @@ void MainWindow::showTransientMessage(const QString &text, int timeoutMs)
 // The one press this window is built around.
 void MainWindow::onPowerClicked()
 {
+    // WARP owns the button when the toggle says so. Splitting the branches at the top rather
+    // than wrapping every existing state test in a mode check keeps zapret's gating (which is
+    // subtle and has a lot of comments) untouched, and lets a future change to one subsystem's
+    // state machine be a change to one branch instead of an audit of the other.
+    if (m_modeToggle && m_modeToggle->mode() == ModeToggle::Mode::Warp) {
+        onWarpPowerClicked();
+        return;
+    }
     const IZapretBackend::State state = m_manager->state();
     // A run is up, or coming up: the button's other meaning is the one that is wanted, and canStopFrom()
     // is the same gate the toolbar action and Ctrl+Shift+X used.
@@ -1345,6 +1391,15 @@ void MainWindow::wire()
     connect(m_manager, &ZapretManager::strategyStopped, this, &MainWindow::onStrategyStopped);
     connect(m_manager, &ZapretManager::logMessage, this, &MainWindow::onLogMessage);
     connect(m_manager, &ZapretManager::errorOccurred, this, &MainWindow::onErrorOccurred);
+
+    // WARP's channels land on the same handlers the zapret side uses where the vocabulary
+    // matches (logMessage) and on a dedicated one where it does not (stateChanged carries a
+    // different enum, and the window has to know which subsystem is answering before it redraws
+    // the chip). Availability drives the toggle's clamping.
+    connect(m_warp, &WarpManager::stateChanged, this, &MainWindow::onWarpStateChanged);
+    connect(m_warp, &WarpManager::availabilityChanged, this, &MainWindow::onWarpAvailabilityChanged);
+    connect(m_warp, &WarpManager::logMessage, this, &MainWindow::onLogMessage);
+    connect(m_warp, &WarpManager::errorOccurred, this, &MainWindow::onErrorOccurred);
 
     connect(m_settings, &Settings::changed, this, &MainWindow::onSettingsChanged);
     connect(m_ping, &PingService::pingUpdated, this, &MainWindow::onPingUpdated);
@@ -1626,6 +1681,98 @@ PowerButton::Mode MainWindow::powerMode(IZapretBackend::State state)
     return PowerButton::Mode::Idle;
 }
 
+// ---- the WARP branch of the same three mappings ------------------------------
+//
+// Kept next to their zapret counterparts so a maintainer adding a new tunnel state sees
+// immediately that both tables have to grow. Each one is a straight lookup: no side effects,
+// no widget access, and the whole point of that shape is that a test can call them from a
+// console program without a QApplication.
+
+QString MainWindow::connectionText(WarpManager::State state)
+{
+    switch (state) {
+    case WarpManager::State::Connected:
+        return QStringLiteral("CONNECTED");
+    case WarpManager::State::Connecting:
+        return QStringLiteral("CONNECTING");
+    case WarpManager::State::Disconnecting:
+        return QStringLiteral("DISCONNECTING");
+    case WarpManager::State::Error:
+        return QStringLiteral("ERROR");
+    case WarpManager::State::Unavailable:
+        return QStringLiteral("ABSENT");
+    case WarpManager::State::Disconnected:
+        break;
+    }
+    // "OFFLINE" is the same word the zapret side uses for a stopped daemon, so the header chip
+    // reads consistently across the two subsystems even when the toggle is mid-flip.
+    return QStringLiteral("OFFLINE");
+}
+
+QString MainWindow::statusKind(WarpManager::State state)
+{
+    // The QSS [statusKind="..."] selector already has tokens for every case except Unavailable
+    // — mapping the missing binary onto "stopped" would draw a greyed chip that says "not
+    // running", when the honest answer is "not installed". Adding "absent" here is the one
+    // extension the sheet needs to grow; the sheet's existing [statusKind="absent"] rule is
+    // deliberately styled like stopped so a machine without WARP is legible rather than alarming.
+    switch (state) {
+    case WarpManager::State::Connected:      return QStringLiteral("running");
+    case WarpManager::State::Connecting:
+    case WarpManager::State::Disconnecting:  return QStringLiteral("starting");
+    case WarpManager::State::Error:          return QStringLiteral("error");
+    case WarpManager::State::Unavailable:    return QStringLiteral("absent");
+    case WarpManager::State::Disconnected:
+        break;
+    }
+    return QStringLiteral("stopped");
+}
+
+PowerButton::Mode MainWindow::powerMode(WarpManager::State state)
+{
+    switch (state) {
+    case WarpManager::State::Connected:
+        return PowerButton::Mode::Active;
+    case WarpManager::State::Connecting:
+    case WarpManager::State::Disconnecting:
+        return PowerButton::Mode::Busy;
+    case WarpManager::State::Disconnected:
+    case WarpManager::State::Error:
+    case WarpManager::State::Unavailable:
+        break;
+    }
+    return PowerButton::Mode::Idle;
+}
+
+bool MainWindow::canActFrom(WarpManager::State state)
+{
+    switch (state) {
+    case WarpManager::State::Disconnected:
+    case WarpManager::State::Connected:
+    case WarpManager::State::Error:
+        // A failed verb is exactly when a retry needs to remain reachable, on both sides of the
+        // tunnel. Treating Error as "no action possible" strands the user with a red chip and no
+        // way to move without restarting Muffin.
+        return true;
+    case WarpManager::State::Connecting:
+    case WarpManager::State::Disconnecting:
+    case WarpManager::State::Unavailable:
+        break;
+    }
+    return false;
+}
+
+ModeToggle::Mode MainWindow::clampModeForAvailability(ModeToggle::Mode desired, bool warpAvailable)
+{
+    // Zapret is always available (the app would not be running if it were not) and Warp is
+    // available only when warp-cli exists. Selecting the missing half would leave the button
+    // pointing at a subsystem the tooltip then has to explain is not there — better to fall
+    // back on the caller's behalf and let Settings keep the intent for a later re-install.
+    if (desired == ModeToggle::Mode::Warp && !warpAvailable)
+        return ModeToggle::Mode::Zapret;
+    return desired;
+}
+
 bool MainWindow::canStartFrom(IZapretBackend::State state)
 {
     switch (state) {
@@ -1708,7 +1855,14 @@ bool MainWindow::rowFollowsCycle(bool manualRound, bool rowIsActive)
 
 void MainWindow::updateStatusUi()
 {
-    renderStatus(m_manager->state());
+    // Which subsystem owns the button is decided here, at the one place the whole dashboard is
+    // redrawn, rather than at every signal handler — a caller in a slot cannot accidentally
+    // paint a zapret state while the WARP pill is lit, and the toggle's own change slot only has
+    // to ask for a redraw instead of duplicating this dispatch.
+    if (m_modeToggle && m_modeToggle->mode() == ModeToggle::Mode::Warp)
+        renderWarpStatus(m_warp ? m_warp->state() : WarpManager::State::Unavailable);
+    else
+        renderStatus(m_manager->state());
     updateTrayIcon();
 }
 
@@ -1720,6 +1874,11 @@ void MainWindow::updateStatusUi()
 // manager's live state and has no part in what the window itself shows.
 void MainWindow::renderStatus(IZapretBackend::State state)
 {
+    // Zapret owns the look on this path — if the toggle was flipped to WARP the updateStatusUi()
+    // dispatch would not have come here at all, but a direct caller (a test, or a re-paint
+    // before the toggle is built) still has to see the right palette.
+    if (m_power)
+        m_power->setPalette(PowerButton::Palette::Zapret);
     if (m_statusLabel) {
         // The chip's word is the plain state, not the sentence the old pill carried: "CONNECTED" beside a
         // dot, with the strategy's name reserved for the log and the tray tooltip, which both say it more
@@ -1755,6 +1914,110 @@ void MainWindow::renderStatus(IZapretBackend::State state)
 
     for (auto it = m_cards.cbegin(); it != m_cards.cend(); ++it)
         it.value()->setSelected(it.key() == m_selectedId);
+}
+
+// Draw the chip and the power button for one WARP state.
+//
+// Deliberately parallel to renderStatus() — same controls, same "one place decides the look"
+// rule, same tooltip discipline — because the whole point of the toggle is that the button
+// means the same thing to the user across the two subsystems. It differs only in the values it
+// draws from: WARP's states, its chip word, its palette.
+void MainWindow::renderWarpStatus(WarpManager::State state)
+{
+    if (m_power)
+        m_power->setPalette(PowerButton::Palette::Warp);
+    if (m_statusLabel)
+        setConnectionChip(connectionText(state), statusKind(state));
+
+    const bool canAct = canActFrom(state);
+    if (m_power) {
+        m_power->setMode(powerMode(state));
+        // The breath belongs to a live tunnel and to a teardown in flight, exactly as it does
+        // on the zapret side. Connecting is deliberately excluded: the halo pulse already says
+        // "we are waiting on the daemon", and stacking a slow whole-button fade on top of that
+        // reads as flicker rather than as intent.
+        m_power->setPulsing(state == WarpManager::State::Connected
+                            || state == WarpManager::State::Disconnecting);
+        m_power->setEnabled(canAct);
+        m_power->setToolTip(state == WarpManager::State::Connected
+                                ? stopActionHint()
+                                : (canAct ? startActionHint()
+                                         : QStringLiteral("WARP is not available on this host.")));
+    }
+}
+
+// The press when WARP owns the button. Same shape as the zapret branch: if the tunnel is up,
+// take it down; if it is down, put it up; if a verb is in flight, refuse and let the tooltip
+// say why. WarpManager's own gating already refuses a second connect during one, so the check
+// here exists so the tooltip is not the only thing that says "nothing happened".
+void MainWindow::onWarpPowerClicked()
+{
+    if (!m_warp)
+        return;
+    const WarpManager::State state = m_warp->state();
+    if (state == WarpManager::State::Connecting || state == WarpManager::State::Disconnecting)
+        return;
+    QString err;
+    if (state == WarpManager::State::Connected) {
+        if (!m_warp->stop(&err)) {
+            showTransientMessage(err, 5000);
+            return;
+        }
+        // Same synchronicity trick showStoppingFeedback() uses for a backend stop: the tunnel's
+        // real state will not move until warp-cli exits, but the button must not look like it
+        // did nothing while the daemon catches up.
+        renderWarpStatus(WarpManager::State::Disconnecting);
+        if (m_power && m_power->isVisible())
+            m_power->repaint();
+        return;
+    }
+    if (state == WarpManager::State::Disconnected || state == WarpManager::State::Error) {
+        if (!m_warp->start(&err)) {
+            showTransientMessage(err, 5000);
+            return;
+        }
+        renderWarpStatus(WarpManager::State::Connecting);
+        if (m_power && m_power->isVisible())
+            m_power->repaint();
+        return;
+    }
+    // Unavailable — the button is disabled so this should be unreachable, but a stale tooltip
+    // and a greyed ring are the honest answer if it somehow is not.
+    showTransientMessage(QStringLiteral("WARP is not installed on this host."), 5000);
+}
+
+// The user picked a half of the pill. Persist, retint, redraw.
+void MainWindow::onModeChanged(ModeToggle::Mode mode)
+{
+    m_settings->setWarpMode(mode == ModeToggle::Mode::Warp);
+    m_warp->setPollingEnabled(mode == ModeToggle::Mode::Warp);
+    // Leaving WARP means the tunnel is not our business any more — but stopping the poll is
+    // all we do. Tearing a live tunnel down because the user glanced at Zapret would be the
+    // interface acting on a claim it was never given.
+    updateStatusUi();
+}
+
+void MainWindow::onWarpStateChanged(WarpManager::State state)
+{
+    // Only repaint when WARP is on the button; a poll that lands after the user flipped back to
+    // Zapret should not overwrite the zapret chip with tunnel news nobody is looking at.
+    if (m_modeToggle && m_modeToggle->mode() == ModeToggle::Mode::Warp)
+        updateStatusUi();
+    // The state also drives the tray icon; that one is a fact about what the app is doing, so it
+    // gets refreshed regardless of which half the pill is on.
+    updateTrayIcon();
+}
+
+void MainWindow::onWarpAvailabilityChanged(bool available)
+{
+    // Clamp the pill: WARP was picked and the binary went away, or the reverse. The store keeps
+    // the intent so a re-install flips the pill back without the user having to click twice.
+    const ModeToggle::Mode current = m_modeToggle ? m_modeToggle->mode() : ModeToggle::Mode::Zapret;
+    const ModeToggle::Mode clamped = clampModeForAvailability(current, available);
+    if (clamped != current && m_modeToggle)
+        m_modeToggle->setMode(clamped);
+    // A fresh availability answer also means the state is stale — go ask warp-cli what it says.
+    updateStatusUi();
 }
 
 // Answer a Stop press on screen before the teardown it asked for has begun.
@@ -1836,6 +2099,8 @@ void MainWindow::applyTheme()
     // same way, so each re-bakes on the same signal.
     if (m_power)
         m_power->retheme();
+    if (m_modeToggle)
+        m_modeToggle->retheme();
     for (ProfileCard *card : findChildren<ProfileCard *>())
         card->retheme();
     // The dashboard's rings bake their mark into a pixmap as well, and that mark is the one glyph in

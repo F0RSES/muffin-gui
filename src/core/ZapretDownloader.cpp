@@ -1,6 +1,7 @@
 #include "ZapretDownloader.h"
 
 #include "MuffinInstallHelper.h"
+#include "PrivilegeHelper.h"
 #include "ZapretPaths.h"
 
 #include <QCoreApplication>
@@ -141,12 +142,71 @@ void ZapretDownloader::setTargetDir(const QString &dir)
 
 QString ZapretDownloader::targetDir() const
 {
-    return m_targetDir.isEmpty() ? installRoot() : m_targetDir;
+    if (!m_targetDir.isEmpty())
+        return m_targetDir;
+    return defaultInstallTarget(m_platform, m_promoteAfterInstall, PrivilegeHelper::isElevated());
 }
 
 QString ZapretDownloader::installRoot()
 {
     return ZapretPaths::managedInstallDir();
+}
+
+QString ZapretDownloader::promotionRoot()
+{
+    return ZapretPaths::systemInstallDir();
+}
+
+QString ZapretDownloader::defaultInstallTarget(Strategy::Platform platform, bool promote,
+                                              bool elevated)
+{
+    if (!promote)
+        return installRoot();
+
+#if defined(Q_OS_WIN)
+    // See the header: on Windows the choice IS the promotion. The tree is unpacked where it will be
+    // run from, by a process that already holds the elevation, and installTree()'s rename puts it there
+    // in one step - so there is never a second, user-writable copy to delete or to defend.
+    if (platform == Strategy::Platform::Windows && elevated && !promotionRoot().isEmpty())
+        return promotionRoot();
+#else
+    Q_UNUSED(platform);
+    Q_UNUSED(elevated);
+    // POSIX cannot write here at all from an unprivileged process, so the download always lands in the
+    // managed directory and MuffinInstallHelper copies it afterwards.
+#endif
+    return installRoot();
+}
+
+QString ZapretDownloader::promotionRefusal(Strategy::Platform platform, bool promote,
+                                           bool elevated)
+{
+    if (!promote)
+        return QString();
+
+#if defined(Q_OS_WIN)
+    // The only promotion Windows can make is the one made while writing the tree into place, and that
+    // needs the elevated token the manifest asks for. Saying so is the whole value of this message: a
+    // payload that stayed in AppData looks exactly like an installed one, and only this sentence tells
+    // the user that the copy a non-admin program can rewrite is the copy that will be run.
+    if (platform == Strategy::Platform::Windows && !elevated)
+    {
+        return QStringLiteral(
+            "ZapretDownloader: Muffin is not running as administrator, so zapret could not be "
+            "installed into %1 and stays in %2. Any program running as this user can replace the "
+            "payload there, and Muffin would then start the replacement with administrative rights - "
+            "start Muffin with \"Run as administrator\" and download again to install it where that "
+            "is not possible.")
+            .arg(QDir::toNativeSeparators(promotionRoot()),
+                 QDir::toNativeSeparators(installRoot()));
+    }
+#else
+    Q_UNUSED(platform);
+    Q_UNUSED(elevated);
+    // POSIX has no such refusal: the root helper and pkexec are the elevation, so whether this
+    // download can be promoted is a question MuffinInstallHelper answers in detail.
+#endif
+    return QString();
 }
 
 void ZapretDownloader::setPromoteAfterInstall(bool on)
@@ -737,13 +797,35 @@ void ZapretDownloader::installAndFinish(const QString &extractDir)
     }
 
     cleanup();
-    // A linux download can be handed to the root helper as well. That call owns the end of the
-    // operation — it emits downloadFinished itself, because the path worth reporting depends on
+    // Two ways a finished download becomes a system-wide one, and the choice of which is the
+    // platform's, not the caller's.
+    //
+    // Windows decided during the install. defaultInstallTarget() aimed the whole unpack at
+    // C:\Program Files\Muffin\zapret when promotion was asked for and this process holds the
+    // administrator token, so `target` already IS the system tree and there is nobody left to hand it
+    // to. What remains is saying why it could not, when the user asked and the token was not there.
+    //
+    // POSIX cannot write to /opt/muffin from an unprivileged process at all, so the tree landed in the
+    // managed directory and the root helper is the only way it moves. That call owns the end of the
+    // operation - it emits downloadFinished itself, because the path worth reporting depends on
     // whether the promotion landed.
-    if (m_promoteAfterInstall && m_platform == Strategy::Platform::Linux)
+    if (m_promoteAfterInstall)
     {
-        beginPromotion(target);
-        return;
+        const QString refusal = promotionRefusal(m_platform, true, PrivilegeHelper::isElevated());
+        if (!refusal.isEmpty())
+        {
+            // The download is complete and usable either way, exactly as a declined pkexec prompt
+            // leaves it: promotion is an addition, never a requirement.
+            setStage(Stage::Idle);
+            emit promotionFailed(refusal);
+            emit downloadFinished(target);
+            return;
+        }
+        if (m_platform == Strategy::Platform::Linux)
+        {
+            beginPromotion(target);
+            return;
+        }
     }
 
     setStage(Stage::Idle);

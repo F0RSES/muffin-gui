@@ -21,6 +21,7 @@ const QString kPingIntervalSec   = QStringLiteral("ping/intervalSec");
 const QString kWatchdogInterval  = QStringLiteral("watchdog/intervalMin");
 const QString kTheme             = QStringLiteral("ui/theme");
 const QString kLanguage          = QStringLiteral("ui/language");
+const QString kWarpMode          = QStringLiteral("ui/warpMode");
 
 constexpr int kPingIntervalDefault = 5;
 constexpr int kPingIntervalMin     = 3;
@@ -152,6 +153,12 @@ void Settings::setLastStrategyId(const QString &id) { write(kLastStrategyId, id)
 
 bool Settings::startLastOnLaunch() const { return read<bool>(kStartLastOnLaunch, false); }
 void Settings::setStartLastOnLaunch(bool on) { write(kStartLastOnLaunch, on); }
+
+// Default off: Zapret is the mode the app was designed around, and picking WARP is an explicit
+// switch to a different tool — a first run that lit the tunnel without the user asking would be
+// the interface changing the shape of their traffic on its own.
+bool Settings::warpMode() const { return read<bool>(kWarpMode, false); }
+void Settings::setWarpMode(bool on) { write(kWarpMode, on); }
 
 // Default on: zapret is a background service, so closing the window should keep it running.
 // MainWindow refuses to hide when the platform has no system tray, so this can never strand the app.

@@ -243,9 +243,14 @@ const read = (rel) => {
 };
 
 // 1. ZapretPaths::systemInstallDir() — the destination the helper writes and the rule exempts.
+//
+// The POSIX literal is the one this check exists to pin, and systemInstallDir() now carries a second
+// QStringLiteral on the Windows branch (the "C:/Program Files" default). Anchoring on a leading '/' is
+// what keeps the two apart: the rule and the tree it exempts are POSIX-only, and a destination that
+// begins with a drive letter is not something polkit can ever match.
 const pathsCpp = read('src/core/ZapretPaths.cpp');
 const treeMatch = pathsCpp.match(
-  /ZapretPaths::systemInstallDir\(\)[\s\S]*?return QStringLiteral\("([^"]+)"\);/);
+  /ZapretPaths::systemInstallDir\(\)[\s\S]*?return QStringLiteral\("(\/[^"]+)"\);/);
 if (!treeMatch) {
   console.log('FAIL  src/core/ZapretPaths.cpp: no QStringLiteral destination in systemInstallDir()');
   bad++;

@@ -230,6 +230,36 @@ void DownloadDialog::onPromotionFailed(QString message)
     setStatus(m_promotionNote);
 }
 
+bool DownloadDialog::isPromotedPath(const QString &path)
+{
+    const QString system = ZapretPaths::systemInstallDir();
+    // Empty means "this host offers no system tree", not "the tree is the root directory" — the reading
+    // ZapretPaths::systemInstallDir() itself warns about. Skipping the comparison rather than
+    // string-matching against an empty string is what keeps an unset or unrelated path from being
+    // announced as a passwordless install that was never made.
+    if (system.isEmpty() || path.isEmpty())
+        return false;
+    return path == system;
+}
+
+QString DownloadDialog::installedMessageText(const QString &path, const QString &promotionNote)
+{
+    // The path decides the message. A promoted install lands in the root-owned tree whose payload the
+    // polkit rule exempts, so starts are passwordless; anything else is the managed folder, which
+    // works exactly the same but asks for the password each time.
+    QString text = LanguageManager::tr(QStringLiteral("dl.installed_msg"))
+                       .arg(QDir::toNativeSeparators(path));
+    if (isPromotedPath(path))
+    {
+        text += LanguageManager::tr(QStringLiteral("dl.root_note"));
+    }
+    else if (!promotionNote.isEmpty())
+    {
+        text += QStringLiteral("\n\n%1").arg(promotionNote);
+    }
+    return text;
+}
+
 void DownloadDialog::onDownloadFinished(QString path)
 {
     m_installedPath = path;
@@ -238,23 +268,8 @@ void DownloadDialog::onDownloadFinished(QString path)
     setStatus(LanguageManager::tr(QStringLiteral("dl.installed_in")).arg(QDir::toNativeSeparators(path)));
     setBusy(false);
 
-    // The path decides the message. A promoted install lands in the root-owned tree whose payload the
-    // polkit rule exempts, so starts are passwordless; anything else is the managed folder, which
-    // works exactly the same but asks for the password each time.
-    const bool promoted =
-        !ZapretPaths::systemInstallDir().isEmpty() && path == ZapretPaths::systemInstallDir();
-    QString text = LanguageManager::tr(QStringLiteral("dl.installed_msg"))
-                       .arg(QDir::toNativeSeparators(path));
-    if (promoted)
-    {
-        text += LanguageManager::tr(QStringLiteral("dl.root_note"));
-    }
-    else if (!m_promotionNote.isEmpty())
-    {
-        text += QStringLiteral("\n\n%1").arg(m_promotionNote);
-    }
-
-    QMessageBox::information(this, LanguageManager::tr(QStringLiteral("action.download_zapret")), text);
+    QMessageBox::information(this, LanguageManager::tr(QStringLiteral("action.download_zapret")),
+                             installedMessageText(path, m_promotionNote));
 
     // Announced before accept() so the owner holds the path while this dialog is still the window any
     // follow-up message belongs to.

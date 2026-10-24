@@ -1,8 +1,10 @@
 #pragma once
 
 #include "IZapretBackend.h"
-#include "PingIndicator.h"   // PingStatus is stored per host for seeding new rows mid-cycle
-#include "PowerButton.h"     // PowerButton::Mode is the return type of the state -> look mapping
+#include "ModeToggle.h"    // ModeToggle::Mode is the mode the toggle can be in
+#include "PingIndicator.h" // PingIndicator::PingStatus is stored per host for seeding new rows mid-cycle
+#include "PowerButton.h"   // PowerButton::Mode is the return type of the state -> look mapping
+#include "WarpManager.h"   // WarpManager::State is the tunnel's view of itself
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -37,12 +39,14 @@ class BlockcheckEngine;
 class HistoryPage;
 class HistoryStore;
 class LogPanel;
+class ModeToggle;
 class PingIndicator;
 class PingService;
 class ProfileCard;
 class Settings;
 class SettingsPage;
 class UpdateChecker;
+class WarpManager;
 class ZapretManager;
 
 // The application window: a narrow icon rail down the left, one full-width page at a time to its right,
@@ -85,6 +89,24 @@ public:
     // sites draw this button — the state-changed path, and the Stop press that answers ahead of the
     // backend (see showStoppingFeedback) — and one state must not be able to mean two looks.
     static PowerButton::Mode powerMode(IZapretBackend::State state);
+
+    // ---- the WARP branch of the same three mappings ------------------------------
+    //
+    // WarpManager::State covers six cases, of which Unavailable and Error have no direct
+    // equivalent in IZapretBackend's five — a backend that cannot be started is a startup
+    // failure, whereas WARP whose daemon is not installed is a state the interface has to sit in
+    // indefinitely. Kept next to their zapret counterparts so a maintainer adding a new backend
+    // state sees immediately that the WARP table has to grow with it.
+    static QString connectionText(WarpManager::State state);
+    static QString statusKind(WarpManager::State state);
+    static PowerButton::Mode powerMode(WarpManager::State state);
+    // Whether the power button may act for a WARP state — the same reasoning as canStartFrom /
+    // canStopFrom, applied to a tunnel that has to be brought up rather than launched.
+    static bool canActFrom(WarpManager::State state);
+    // The look the toggle should wear when WARP is unavailable: the Zapret half stays lit so a
+    // missing warp-cli does not leave the whole control in a half-picked state that reads as a
+    // bug in the widget rather than a fact about the host.
+    static ModeToggle::Mode clampModeForAvailability(ModeToggle::Mode desired, bool warpAvailable);
 
     // ---- action gating: pure predicates again, so the whole matrix is checkable without a process ----
     //
@@ -200,6 +222,14 @@ public:
     // The power button. A hook for the same reason as cardCount(): the pulse is the window's claim about
     // a backend state, and a suite cannot check a claim it has no way to look at.
     PowerButton *powerButton() const { return m_power; }
+    // The dashboard's Zapret/WARP pill. Same reasoning as powerButton(): a suite cannot assert
+    // which subsystem the window is pointed at unless the widget that decides it is reachable.
+    ModeToggle *modeToggle() const { return m_modeToggle; }
+    // The WARP manager. Exposed for the same reason the power button is: its state — available,
+    // disconnected, connected — is a claim the window makes on screen, and reading it off the
+    // widget alone would leave a test unable to say whether the toggle's colour matches the
+    // tunnel it is supposed to represent.
+    WarpManager *warpManager() const { return m_warp; }
     // Draw the chip and the button for one state, without a manager ever having been in it. The same
     // entry point showStoppingFeedback() uses — and for the same reason: a teardown is a state the
     // backend will not sit still for, so the only way to check what the window draws for it is to ask
@@ -396,6 +426,20 @@ private slots:
     // both because the button is one control whose meaning the state decides.
     void onPowerClicked();
     void onStateChanged(IZapretBackend::State state);
+    // The WARP half of the button's meaning — reached from onPowerClicked when the toggle is on
+    // Warp. Split out rather than inlined because the two branches share no state at all:
+    // one reads ZapretManager, the other reads WarpManager, and folding them into a single
+    // function is how a mode-check ends up on every line of both.
+    void onWarpPowerClicked();
+    // The user picked a half of the Zapret/WARP pill. Persist the choice, retint the button, and
+    // redraw the chip so the header describes whatever the button is about to control, not what
+    // it used to.
+    void onModeChanged(ModeToggle::Mode mode);
+    // The tunnel moved. Same redraw path as a backend state change, driven from the WARP side.
+    void onWarpStateChanged(WarpManager::State state);
+    // warp-cli appeared or disappeared while the window was open. Re-clamp the toggle so a
+    // mid-session uninstall does not leave the button pointed at a subsystem with no binary.
+    void onWarpAvailabilityChanged(bool available);
     void onStrategyStarted(const QString &id, const QString &name);
     void onStrategyStopped();
     void onLogMessage(const QString &line, int level);
@@ -457,6 +501,11 @@ private:
     void tintUpdateBadge();
     // The one line the header's chip is allowed to be built from: text plus colour from the state.
     void setConnectionChip(const QString &text, const QString &statusKind);
+    // Draw the chip and the power button for one WARP state, in exactly the same way
+    // renderStatus() does for a backend state. Kept apart rather than overloaded because the
+    // two enums do not overlap: an IZapretBackend::State does not know Unavailable is a thing,
+    // and folding both into one switch is how a case ends up falling through on the wrong one.
+    void renderWarpStatus(WarpManager::State state);
     // Create the tray icon if the platform has a tray host. Idempotent; returns whether one exists.
     bool ensureTray();
     void startTrayRetry();
@@ -578,6 +627,8 @@ private:
     QString m_updateUrl;                    // the page its press hands to the browser
     QToolButton *m_langButton = nullptr;   // the current language's flag, opening the language menu
     PowerButton *m_power = nullptr;        // the dashboard's one control
+    ModeToggle *m_modeToggle = nullptr;    // the Zapret/WARP pill under the button
+    WarpManager *m_warp = nullptr;         // the tunnel control (a child of the window)
     QWidget *m_statusDot = nullptr;        // the 6 px chip beside the connection text
     QLabel *m_statusLabel = nullptr;       // "CONNECTED" and friends
     QLabel *m_footerLabel = nullptr;       // the ping cadence, or a transient message
